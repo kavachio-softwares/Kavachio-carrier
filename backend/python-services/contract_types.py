@@ -96,7 +96,9 @@ FIELDS: dict[str, dict[str, Any]] = {
     },
     "executed_date": {
         "attr": "executed_date", "label": "Executed", "kind": "date",
-        "hint": "When it was signed. Normally filled in when the broker signs "
+        # {counterparty}: "broker" or "reinsurer", filled in per type by
+        # public_spec.
+        "hint": "When it was signed. Normally filled in when the {counterparty} signs "
                 "and returns it — set it here only for a contract that was "
                 "already executed before it reached Kavachio.",
     },
@@ -374,7 +376,8 @@ def public_spec() -> list[dict[str, Any]]:
                 "label": (t["counterparty_label"]
                           if name == "counterparty_party_id" else f["label"]),
                 "kind": f["kind"],
-                "hint": f["hint"],
+                "hint": f["hint"].replace(
+                    "{counterparty}", t["counterparty_label"].lower()),
                 # The placeholder. Absent for a date or a picker, where the
                 # control already says what shape the answer takes.
                 "example": f.get("example"),

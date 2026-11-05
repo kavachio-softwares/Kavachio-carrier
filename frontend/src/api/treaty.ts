@@ -380,7 +380,10 @@ export type AccessLink = {
 export type AccessEventType =
   "sent" | "code_sent" | "code_failed" | "locked" | "unlocked" | "viewed"
   | "downloaded" | "revoked" | "refused" | "approved" | "changes_requested"
-  | "sign_requested" | "signed";
+  | "sign_requested" | "signed" | "approval_requested" | "endorsement_sent"
+  | "endorsement_approved" | "endorsement_changes_requested"
+  | "endorsement_sign_requested" | "endorsement_signed"
+  | "basis_sent" | "basis_approved" | "basis_changes_requested";
 
 export type AccessEvent = {
   id: number;
@@ -428,6 +431,13 @@ export const shareWithReinsurers = (contractId: number, contactIds: number[],
     sent: { link_id: number; name: string; email: string; emailed: boolean }[];
   }>(`/contracts/${contractId}/reinsurer-access`, { contact_ids: contactIds, sign })
     .then(r => r.data);
+
+/** Send a draft treaty to every reinsurer on it, to approve or ask for changes. */
+export const sendTreatyForApproval = (contractId: number) =>
+  api.post<ReinsurerAccess & {
+    sent: { link_id: number; name: string; email: string; emailed: boolean }[];
+    missing: string[];
+  }>(`/contracts/${contractId}/send-for-approval`).then(r => r.data);
 
 export const resendReinsurerLink = (contractId: number, linkId: number) =>
   api.post<ReinsurerAccess & { emailed: boolean }>(
@@ -497,6 +507,9 @@ export type TreatyViewOpen = {
   wording_pdf: boolean;
   /** The reinsurance bordereaux this reinsurer has been sent for the treaty. */
   statements?: import("./ceded").LinkStatement[];
+  /** Endorsements sent to the reinsurers, and this reinsurer's answer. */
+  endorsements?: TreatyViewEndorsement[];
+  basis_changes?: TreatyViewBasisChange[];
   /** Set when they were asked to sign it on this link. */
   signature?: {
     requested_at: string | null;
@@ -519,6 +532,60 @@ export type TreatyViewOpen = {
   expires_at: string | null;
   expires_on: string | null;
 };
+
+/** Changes to the treaty's terms sent to this reinsurer to approve. */
+export type TreatyViewBasisChange = {
+  id: number; status: "pending" | "changes_requested" | "approved"; status_label: string;
+  sent_at: string | null;
+  changes: { id: number; label: string; value: string; effective_from: string; note: string | null }[];
+  my_answer: { status: string; signer_name: string | null; note: string | null; at: string | null } | null;
+  can_answer: boolean;
+};
+
+export const approveBasisOnLink = (token: string, roundId: number, signerName: string) =>
+  api.post<{ ok: boolean; in_force: boolean; view: TreatyViewOpen }>(
+    `/treaty-view/${encodeURIComponent(token)}/basis/${roundId}/approve`,
+    { signer_name: signerName },
+    { headers: { "X-Treaty-Session": getViewSession(token) } }).then(r => r.data);
+
+export const requestBasisChanges = (token: string, roundId: number, note: string) =>
+  api.post<{ ok: boolean; in_force: boolean; view: TreatyViewOpen }>(
+    `/treaty-view/${encodeURIComponent(token)}/basis/${roundId}/request-changes`,
+    { note },
+    { headers: { "X-Treaty-Session": getViewSession(token) } }).then(r => r.data);
+
+export type TreatyViewEndorsement = {
+  id: number; label: string; effective_from: string | null;
+  status: EndorsementApprovalStatus; status_label: string; sent_at: string | null;
+  changes: { label: string | null; from: unknown; to: unknown }[];
+  clauses: (string | null)[];
+  has_file: boolean;
+  my_answer: { status: "approved" | "changes_requested"; signer_name: string | null;
+               note: string | null; at: string | null } | null;
+  can_answer: boolean;
+  carrier_signed: boolean;
+  my_signature: { name: string; title: string | null; at: string } | null;
+  can_sign: boolean;
+};
+
+export const signEndorsementOnLink = (token: string, docId: number, signerName: string,
+                                      signerTitle: string, consent: boolean) =>
+  api.post<{ ok: boolean; in_force: boolean; view: TreatyViewOpen }>(
+    `/treaty-view/${encodeURIComponent(token)}/endorsements/${docId}/sign`,
+    { signer_name: signerName, signer_title: signerTitle || null, consent },
+    { headers: { "X-Treaty-Session": getViewSession(token) } }).then(r => r.data);
+
+export const approveEndorsementOnLink = (token: string, docId: number, signerName: string) =>
+  api.post<{ ok: boolean; in_force: boolean; view: TreatyViewOpen }>(
+    `/treaty-view/${encodeURIComponent(token)}/endorsements/${docId}/approve`,
+    { signer_name: signerName },
+    { headers: { "X-Treaty-Session": getViewSession(token) } }).then(r => r.data);
+
+export const requestEndorsementChanges = (token: string, docId: number, note: string) =>
+  api.post<{ ok: boolean; in_force: boolean; view: TreatyViewOpen }>(
+    `/treaty-view/${encodeURIComponent(token)}/endorsements/${docId}/request-changes`,
+    { note },
+    { headers: { "X-Treaty-Session": getViewSession(token) } }).then(r => r.data);
 
 export const approveTreaty = (token: string, signerName: string,
                               signerTitle?: string) =>
@@ -739,6 +806,24 @@ export type BasisVersion = {
   value: number | SlidingScale | ProfitCommission;
   source: "structure" | "manual" | "wording" | "endorsement";
   note: string | null; entered_by: string | null; entered_at?: string | null;
+  document_id?: number | null;
+  /** Not used: from an endorsement not yet in force, or a change entered
+   *  here that every reinsurer has not yet approved. */
+  pending?: boolean;
+  /** A change entered here: where it stands with the reinsurers. */
+  approval?: BasisChangeStatus | null;
+};
+export type BasisChangeStatus = "draft" | "pending" | "changes_requested" | "approved";
+/** A request to the reinsurers to approve changes to the basis. */
+export type BasisRound = {
+  id: number; status: "pending" | "changes_requested" | "approved"; label: string;
+  sent_at: string | null; sent_by: string | null; approved_at: string | null;
+  approved: number; total: number;
+  parties: { party_id: number; party_name: string | null; is_lead: boolean;
+             status: "pending" | "approved" | "changes_requested";
+             signer_name: string | null; note: string | null; at: string | null }[];
+  changes: { id: number; label: string; value: string; effective_from: string;
+             note: string | null; removed: boolean }[];
 };
 export type BasisTerm = {
   term: string; label: string; kind: BasisKind; level: "treaty" | "layer";
@@ -747,6 +832,8 @@ export type BasisTerm = {
 export type Basis = {
   treaty_type: TreatyTypeKey | null; inception: string | null; expiry: string | null;
   terms: BasisTerm[]; can_edit: boolean;
+  /** Changes entered here not yet sent, and the request out now, if any. */
+  approval?: { draft: number; unapproved: number; round: BasisRound | null };
 };
 
 export const getBasis = (contractId: number) =>
@@ -756,6 +843,10 @@ export const addBasis = (contractId: number, body: {
   term: string; layer?: number | null; value: unknown; effective_from: string;
   note?: string | null; source?: string;
 }) => api.post<Basis>(`/contracts/${contractId}/basis`, body).then(r => r.data);
+
+export const sendBasisForApproval = (contractId: number) =>
+  api.post<Basis & { sent: { emailed: boolean }[]; missing: string[] }>(
+    `/contracts/${contractId}/basis/send-for-approval`).then(r => r.data);
 
 export const removeBasis = (contractId: number, entryId: number) =>
   api.delete<Basis>(`/contracts/${contractId}/basis/${entryId}`).then(r => r.data);
@@ -804,7 +895,38 @@ export type EndorsementRecord = {
   terms: { term: string; layer: number | null; label: string; layer_name: string | null;
            kind: BasisKind; value_before: unknown }[];
   treaty: string; contract_id: number; can_edit: boolean;
+  /** Its terms are used only once every reinsurer on the treaty approved it. */
+  approval: EndorsementApproval;
 };
+
+export type EndorsementApprovalStatus =
+  "draft" | "pending" | "changes_requested" | "approved" | "carrier_signed" | "in_force";
+
+export type EndorsementApproval = {
+  status: EndorsementApprovalStatus; label: string;
+  sent_at: string | null; sent_by: string | null; approved_at: string | null;
+  parties: { party_id: number; party_name: string | null; is_lead: boolean;
+             status: "pending" | "approved" | "changes_requested";
+             signer_name: string | null; note: string | null; at: string | null;
+             signed: { name: string; title: string | null; at: string } | null }[];
+  approved: number; signed: number; total: number;
+  carrier_signature: { name: string; title: string | null; at: string } | null;
+  in_force_at: string | null;
+};
+
+/** The carrier signs an endorsement every reinsurer approved; each reinsurer
+ *  is then sent its link to sign. */
+export const signEndorsement = (contractId: number, docId: number, signerName: string,
+                                signerTitle?: string) =>
+  api.post<EndorsementRecord & {
+    sent: { name: string; email: string; emailed: boolean }[]; missing: string[];
+  }>(`/contracts/${contractId}/endorsements/${docId}/sign`,
+     { signer_name: signerName, signer_title: signerTitle || null }).then(r => r.data);
+
+export const sendEndorsementForApproval = (contractId: number, docId: number) =>
+  api.post<EndorsementRecord & {
+    sent: { name: string; email: string; emailed: boolean }[]; missing: string[];
+  }>(`/contracts/${contractId}/endorsements/${docId}/send-for-approval`).then(r => r.data);
 
 export const getEndorsement = (contractId: number, docId: number) =>
   api.get<EndorsementRecord>(`/contracts/${contractId}/endorsements/${docId}`).then(r => r.data);
@@ -823,4 +945,21 @@ export async function documentPageUrl(contractId: number, docId: number, page: n
   const r = await api.get<Blob>(`/contracts/${contractId}/documents/${docId}/pages/${page}`,
                                 { responseType: "blob" });
   return URL.createObjectURL(r.data);
+}
+
+/** What a new treaty's approval email reached, as the server reports it. */
+export type ApprovalSent = { sent?: { emailed: boolean }[]; missing?: string[]; error?: string | null };
+
+/** The line shown on a treaty just created: who the approval email went to,
+ *  and who could not be reached. `noticeOk` when nothing needs doing. */
+export function approvalNotice(a?: ApprovalSent | null): { notice: string; noticeOk: boolean } {
+  if (!a) return { notice: "Saved as a draft. Send it to the reinsurers for approval.", noticeOk: false };
+  if (a.error) return { notice: `Saved as a draft, but not sent: ${a.error}`, noticeOk: false };
+  const sent = a.sent ?? [], missing = a.missing ?? [];
+  const ok = sent.filter(x => x.emailed).length, failed = sent.length - ok;
+  const notice = `Saved as a draft and sent for approval to ${ok} `
+    + `${ok === 1 ? "person" : "people"} at the reinsurers.`
+    + (failed ? ` ${failed} email${failed === 1 ? "" : "s"} could not be sent — send it again.` : "")
+    + (missing.length ? ` No contact with an email at ${missing.join(", ")}.` : "");
+  return { notice, noticeOk: ok > 0 && !failed && !missing.length };
 }

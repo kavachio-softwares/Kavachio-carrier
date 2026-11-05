@@ -11,17 +11,23 @@ import os
 import pytest
 
 import treaty_basis as tb
+import treaty_routes
 from auth_tokens import mint_access_token
 from db import AppUser, Contract, ContractDocument, SessionLocal, TreatyTerm
-from test_ceded import _inward, _qs, _treaty, client, mail, w  # noqa: F401 — fixtures
+from test_ceded import _approve_basis, _approve_endorsements, _inward, _qs, _treaty, client, mail, w  # noqa: F401 — fixtures
 
 pytestmark = pytest.mark.usefixtures("mail")
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
-def _change(w, cid, term, value, on, layer=None, **kw):
-    return client.post(f"/contracts/{cid}/basis", headers=w["ch"], json={
+def _change(w, cid, term, value, on, layer=None, approve=True, **kw):
+    """A dated change — and, unless `approve` is False, sent to the reinsurers
+    and approved by every one, so it is used."""
+    r = client.post(f"/contracts/{cid}/basis", headers=w["ch"], json={
         "term": term, "layer": layer, "value": value, "effective_from": on, **kw})
+    if approve and r.status_code == 200:
+        _approve_basis(w, cid)
+    return r
 
 
 def _statement(w, cid, period):
@@ -150,14 +156,17 @@ def test_s9_a_sliding_scale_charges_its_provisional_rate_until_removed(w):
     cid = _treaty(w, _qs(w, 40), "S9 sliding")                    # 30% commission
     scale = {"provisional_pct": 22, "method": "linear",
              "points": [{"loss_ratio": 70, "rate": 15}, {"loss_ratio": 40, "rate": 30}]}
-    r = _change(w, cid, "sliding_scale", scale, "2027-01-01")
+    r = _change(w, cid, "sliding_scale", scale, "2027-01-01", approve=False)
     assert r.status_code == 200, r.text
     saved = _versions(w, cid, "sliding_scale")[-1]["value"]
     assert [p["loss_ratio"] for p in saved["points"]] == [40, 70]             # sorted
+    # Not approved yet: the agreed 30% is still what is charged.
+    assert _lines(_statement(w, cid, "2027-04"), "S9")[0]["ceding_commission"] == 120
+    _approve_basis(w, cid)
     assert _lines(_statement(w, cid, "2027-04"), "S9")[0]["ceding_commission"] == 88   # 22% of 400
+    # Approved by every reinsurer: it stays.
     assert client.delete(f"/contracts/{cid}/basis/{_versions(w, cid, 'sliding_scale')[-1]['id']}",
-                         headers=w["ch"]).status_code == 200
-    assert _lines(_statement(w, cid, "2027-04"), "S9")[0]["ceding_commission"] == 120  # back to 30%
+                         headers=w["ch"]).status_code == 409
 
 
 @pytest.mark.parametrize("lr, linear, step", [
@@ -217,8 +226,8 @@ def test_s12_a_change_that_does_not_make_sense_is_refused(w, term, value, on, sa
 
 def test_s13_two_changes_on_one_date_and_removing(w):
     cid = _treaty(w, _qs(w, 40), "S13 duplicate", setup=False)
-    assert _change(w, cid, "cession_pct", 30, "2027-06-01").status_code == 200
-    r = _change(w, cid, "cession_pct", 25, "2027-06-01")
+    assert _change(w, cid, "cession_pct", 30, "2027-06-01", approve=False).status_code == 200
+    r = _change(w, cid, "cession_pct", 25, "2027-06-01", approve=False)
     assert r.status_code == 400 and "already a change" in r.text
     entry = _versions(w, cid, "cession_pct")[-1]["id"]
     assert client.delete(f"/contracts/{cid}/basis/{entry}", headers=w["ch"]).status_code == 200
@@ -226,7 +235,7 @@ def test_s13_two_changes_on_one_date_and_removing(w):
     with SessionLocal() as s:                                  # kept, marked removed
         assert s.get(TreatyTerm, entry).removed_at is not None
     # Once removed, the date is free again.
-    assert _change(w, cid, "cession_pct", 25, "2027-06-01").status_code == 200
+    assert _change(w, cid, "cession_pct", 25, "2027-06-01", approve=False).status_code == 200
     # Another treaty's change cannot be removed through this one.
     other = _treaty(w, _qs(w, 40), "S13 other", setup=False)
     mine = _versions(w, cid, "cession_pct")[-1]["id"]
@@ -300,6 +309,7 @@ def test_s17_an_endorsement_raises_a_layer_limit_from_its_date(w):
     assert ch["question"] == "Limit — Layer 1" and ch["from"] == "USD 1,000,000"
     assert _endorse(w, cid, "2027-09-01",
                     [{"term": "limit", "layer": 0, "value": 2_000_000}]).status_code == 200
+    _approve_endorsements(w, cid)
     v = _versions(w, cid, "limit", 0)[-1]
     assert (v["value"], v["source"], v["note"]) == (2_000_000, "endorsement", "Endorsement 1")
     assert _lines(_statement(w, cid, "2027-10"), "S17")[0]["recovery"] == 2_000_000
@@ -594,7 +604,7 @@ def test_n15_a_broker_contracts_endorsement_ignores_a_basis(w):
 def test_n16_a_removed_change_never_comes_back_into_a_statement(w):
     _inward(w, [("N16", 100_000, 1000, None, None)], period="2027-11")
     cid = _treaty(w, _qs(w, 40), "N removed")
-    assert _change(w, cid, "cession_pct", 10, "2027-01-01").status_code == 200
+    assert _change(w, cid, "cession_pct", 10, "2027-01-01", approve=False).status_code == 200
     entry = _versions(w, cid, "cession_pct")[-1]["id"]
     assert client.delete(f"/contracts/{cid}/basis/{entry}", headers=w["ch"]).status_code == 200
     # Not in the timeline, not in the statement, not in the endorsement's "from".
@@ -699,6 +709,7 @@ def test_c5_an_endorsement_changes_the_sliding_scale_and_profit_commission(w):
     assert _endorse(w, cid, "2027-09-01", [{"term": "sliding_scale", "value": new_scale},
                                             {"term": "profit_commission", "value": new_pc}]
                     ).status_code == 200
+    _approve_endorsements(w, cid)
     assert [v["source"] for v in _versions(w, cid, "sliding_scale")] == ["structure", "endorsement"]
     assert _versions(w, cid, "profit_commission")[-1]["value"]["rate_pct"] == 25
     comm = lambda per: _lines(_statement(w, cid, per), "C5")[0]["ceding_commission"]  # noqa: E731
@@ -862,6 +873,7 @@ def test_e2_confirming_applies_its_terms_from_its_date_and_its_clauses(w, monkey
         "changes": rd["changes"], "clauses": rd["clauses"]})
     assert r.status_code == 200, r.text
     out = r.json()
+    _approve_endorsements(w, cid)
     assert out["document"]["effective_from"] == "2027-07-01"
     assert [(a["term"], a["value"], a["effective_from"]) for a in out["applied"]] == \
         [("cession_pct", 30, "2027-07-01")]
@@ -1015,6 +1027,7 @@ def test_r1_an_endorsements_clauses_are_read_for_rules_from_its_date(w, monkeypa
     doc = _upload_endorsement(w, cid)
     r = _apply(w, cid, doc)
     assert r.status_code == 200, r.text
+    _approve_endorsements(w, cid)
     assert "Clause 12 Limits" in seen["text"] and "Cuba" in seen["text"]   # read from its clauses
     rules = r.json()["rules"]
     assert [x["id"] for x in rules] == [f"endorsement{doc}_1_sum_insured_max",
@@ -1038,6 +1051,7 @@ def test_r2_the_carriers_severity_on_an_endorsement_rule_is_kept(w, monkeypatch)
     cid = _treaty(w, _qs(w, 40), "R2 severity")
     doc = _upload_endorsement(w, cid)
     assert _apply(w, cid, doc).status_code == 200
+    _approve_endorsements(w, cid)
     d = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()
     rules = [{**x, "severity": "warning"} if x["source"] == "endorsement" else x
              for x in d["setup"]["rules"]]
@@ -1078,6 +1092,7 @@ def test_r4_a_retired_endorsements_rules_stop(w, monkeypatch):
     cid = _treaty(w, _qs(w, 40), "R4 retired")
     doc = _upload_endorsement(w, cid)
     assert _apply(w, cid, doc).status_code == 200
+    _approve_endorsements(w, cid)
     assert any(x["source"] == "endorsement" for x in _rules(w, cid))
     assert client.delete(f"/contracts/{cid}/documents/{doc}",
                          headers=w["ch"]).status_code in (200, 204)
@@ -1092,3 +1107,233 @@ def test_r5_rules_in_force_on_a_date():
     assert [r["id"] for r in trr.in_force_on(rules, "2027-06-01")] == ["t", "e2"]
     assert [r["id"] for r in trr.in_force_on(rules, "2027-07-01")] == ["t", "e1", "e2"]
     assert [r["id"] for r in trr.in_force_on(rules, None)] == ["t", "e1", "e2"]
+
+
+
+# ── an endorsement is used only once every reinsurer on the treaty approved it ──
+def _sent_links(w, cid, doc, monkeypatch):
+    import treaty_routes
+    got = []
+    monkeypatch.setattr(treaty_routes, "_send_link_email",
+                        lambda s, link, c, token, code, **kw: got.append((link.party_id, token, code)) or True)
+    r = client.post(f"/contracts/{cid}/endorsements/{doc}/send-for-approval", headers=w["ch"])
+    assert r.status_code == 200, r.text
+    out = {}
+    for pid, token, code in got:
+        v = client.post(f"/treaty-view/{token}/verify", json={"code": code})
+        out.setdefault(pid, (token, {"X-Treaty-Session": v.json()["session"]}))
+    return r.json(), out
+
+
+def test_a1_an_endorsement_is_used_only_once_approved_and_signed_by_all(w, monkeypatch):
+    for per in ("2027-08",):
+        _inward(w, [("A1", 100_000, 1000, None, None)], period=per)
+    cid = _treaty(w, _qs(w, 40), "A1 approval")
+    _active(cid)
+    r = _endorse(w, cid, "2027-07-01", [{"term": "cession_pct", "value": 30}])
+    doc = r.json()["endorsement"]["document_id"]
+    e = client.get(f"/contracts/{cid}/endorsements/{doc}", headers=w["ch"]).json()
+    assert e["approval"]["status"] == "draft"
+    # Applied but not approved: listed as waiting, not used.
+    v = _versions(w, cid, "cession_pct")[-1]
+    assert v["value"] == 30 and v["pending"] is True
+    assert _lines(_statement(w, cid, "2027-08"), "A1")[0]["ceded_pct"] == 40
+
+    out, links = _sent_links(w, cid, doc, monkeypatch)
+    assert out["approval"]["status"] == "pending" and out["approval"]["total"] == 2
+    assert set(links) == {w["swiss"], w["munich"]}
+    # The reinsurer sees it on its link, with what it changes.
+    t, h = links[w["swiss"]]
+    view = client.get(f"/treaty-view/{t}", headers=h).json()
+    mine = next(x for x in view["endorsements"] if x["id"] == doc)
+    assert mine["can_answer"] and mine["changes"] and mine["effective_from"] == "2027-07-01"
+
+    assert client.post(f"/treaty-view/{t}/endorsements/{doc}/approve", headers=h,
+                       json={"signer_name": "Sam"}).json()["in_force"] is False
+    assert _versions(w, cid, "cession_pct")[-1]["pending"] is True          # one of two
+    t2, h2 = links[w["munich"]]
+    r = client.post(f"/treaty-view/{t2}/endorsements/{doc}/approve", headers=h2,
+                    json={"signer_name": "Mia"}).json()
+    assert r["agreed"] is True and r["in_force"] is False
+    e = client.get(f"/contracts/{cid}/endorsements/{doc}", headers=w["ch"]).json()
+    assert e["approval"]["status"] == "approved" and e["approval"]["approved"] == 2
+    # Approved is not in force: the carrier signs, then every reinsurer.
+    assert _versions(w, cid, "cession_pct")[-1]["pending"] is True
+    assert client.post(f"/contracts/{cid}/endorsements/{doc}/send-for-approval",
+                       headers=w["ch"]).status_code == 409
+    # A reinsurer cannot sign before the carrier has.
+    assert client.post(f"/treaty-view/{t}/endorsements/{doc}/sign", headers=h,
+                       json={"signer_name": "Sam", "consent": True}).status_code == 409
+    import treaty_routes
+    sign_links = []
+    monkeypatch.setattr(treaty_routes, "_send_link_email",
+                        lambda s, link, c, token, code, **kw:
+                        sign_links.append((link.party_id, token, code, kw.get("kind"))) or True)
+    r = client.post(f"/contracts/{cid}/endorsements/{doc}/sign", headers=w["ch"],
+                    json={"signer_name": "Dana"})
+    assert r.status_code == 200, r.text
+    assert r.json()["approval"]["status"] == "carrier_signed"
+    assert {k for *_, k in sign_links} == {"endorsement_sign"}
+    assert {pid for pid, *_ in sign_links} == {w["swiss"], w["munich"]}
+    signed = {}
+    for pid, token, code, _k in sign_links:
+        v = client.post(f"/treaty-view/{token}/verify", json={"code": code})
+        signed.setdefault(pid, (token, {"X-Treaty-Session": v.json()["session"]}))
+    t, h = signed[w["swiss"]]
+    view = client.get(f"/treaty-view/{t}", headers=h).json()
+    assert next(x for x in view["endorsements"] if x["id"] == doc)["can_sign"] is True
+    assert client.post(f"/treaty-view/{t}/endorsements/{doc}/sign", headers=h,
+                       json={"signer_name": "Sam"}).status_code == 400       # no consent
+    assert client.post(f"/treaty-view/{t}/endorsements/{doc}/sign", headers=h,
+                       json={"signer_name": "Sam", "consent": True}).json()["in_force"] is False
+    assert _versions(w, cid, "cession_pct")[-1]["pending"] is True           # one of two
+    t2, h2 = signed[w["munich"]]
+    assert client.post(f"/treaty-view/{t2}/endorsements/{doc}/sign", headers=h2,
+                       json={"signer_name": "Mia", "consent": True}).json()["in_force"] is True
+    assert _versions(w, cid, "cession_pct")[-1]["pending"] is False
+    e = client.get(f"/contracts/{cid}/endorsements/{doc}", headers=w["ch"]).json()
+    assert e["approval"]["status"] == "in_force" and e["approval"]["signed"] == 2
+    assert _lines(_statement(w, cid, "2027-08"), "A1")[0]["ceded_pct"] == 30
+
+
+def test_a2_a_reinsurer_asking_for_changes_holds_the_endorsement(w, monkeypatch):
+    cid = _treaty(w, _qs(w, 40), "A2 changes", setup=False)
+    _active(cid)
+    doc = _endorse(w, cid, "2027-07-01", [{"term": "cession_pct", "value": 30}]
+                   ).json()["endorsement"]["document_id"]
+    _out, links = _sent_links(w, cid, doc, monkeypatch)
+    t, h = links[w["munich"]]
+    assert client.post(f"/treaty-view/{t}/endorsements/{doc}/request-changes", headers=h,
+                       json={"note": ""}).status_code == 400
+    r = client.post(f"/treaty-view/{t}/endorsements/{doc}/request-changes", headers=h,
+                    json={"note": "Make it 35%"})
+    assert r.status_code == 200, r.text
+    e = client.get(f"/contracts/{cid}/endorsements/{doc}", headers=w["ch"]).json()
+    assert e["approval"]["status"] == "changes_requested"
+    munich = next(p for p in e["approval"]["parties"] if p["party_id"] == w["munich"])
+    assert munich["note"] == "Make it 35%"
+    # The other reinsurer can no longer approve it as it stands.
+    t2, h2 = links[w["swiss"]]
+    assert client.post(f"/treaty-view/{t2}/endorsements/{doc}/approve", headers=h2,
+                       json={"signer_name": "Sam"}).status_code == 409
+    assert _versions(w, cid, "cession_pct")[-1]["pending"] is True
+    # Sent again, it waits for fresh answers from everyone.
+    out, _ = _sent_links(w, cid, doc, monkeypatch)
+    assert out["approval"]["status"] == "pending" and out["approval"]["approved"] == 0
+
+
+def test_a3_changing_an_applied_endorsement_needs_approving_again(w, monkeypatch):
+    cid = _treaty(w, _qs(w, 40), "A3 reapply", setup=False)
+    doc = _upload_endorsement(w, cid)
+    rd = _read(w, cid, doc, monkeypatch).json()["reading"]
+    url = f"/contracts/{cid}/endorsements/{doc}/confirm"
+    assert client.post(url, headers=w["ch"], json={
+        "effective_date": "2027-07-01", "changes": rd["changes"], "clauses": rd["clauses"]}).status_code == 200
+    _approve_endorsements(w, cid)
+    assert _versions(w, cid, "cession_pct")[-1]["pending"] is False
+    assert client.post(url, headers=w["ch"], json={
+        "effective_date": "2027-07-01", "changes": [{"term": "cession_pct", "value": 25}],
+        "clauses": []}).status_code == 200
+    e = client.get(f"/contracts/{cid}/endorsements/{doc}", headers=w["ch"]).json()
+    assert e["approval"]["status"] == "draft"
+    assert _versions(w, cid, "cession_pct")[-1]["pending"] is True
+
+
+def test_a4_a_draft_endorsement_is_not_sent_before_it_is_applied(w, monkeypatch):
+    cid = _treaty(w, _qs(w, 40), "A4 unread", setup=False)
+    doc = _upload_endorsement(w, cid)
+    assert client.post(f"/contracts/{cid}/endorsements/{doc}/send-for-approval",
+                       headers=w["ch"]).status_code == 409
+
+
+# ── a change entered on the basis: draft → sent → approved by every reinsurer ─
+def _send_basis(w, cid):
+    got = []
+    real = treaty_routes._send_link_email
+    treaty_routes._send_link_email = lambda s, link, c, token, code, **kw: (
+        got.append((token, code)) or True)
+    try:
+        r = client.post(f"/contracts/{cid}/basis/send-for-approval", headers=w["ch"])
+    finally:
+        treaty_routes._send_link_email = real
+    sessions = []
+    for token, code in got:
+        v = client.post(f"/treaty-view/{token}/verify", json={"code": code})
+        sessions.append((token, {"X-Treaty-Session": v.json()["session"]}))
+    return r, sessions
+
+
+def test_b1_a_change_is_a_draft_and_unused_until_every_reinsurer_approves(w):
+    _inward(w, [("B1", 100_000, 1000, None, None)], period="2027-09")
+    cid = _treaty(w, _qs(w, 40), "B1 approval")
+    assert _change(w, cid, "cession_pct", 25, "2027-08-01", approve=False).status_code == 200
+    v = _versions(w, cid, "cession_pct")[-1]
+    assert v["approval"] == "draft" and v["pending"]
+    assert _lines(_statement(w, cid, "2027-09"), "B1")[0]["ceded_pct"] == 40
+    b = client.get(f"/contracts/{cid}/basis", headers=w["ch"]).json()
+    assert b["approval"]["draft"] == 1 and b["approval"]["round"] is None
+
+    r, sessions = _send_basis(w, cid)
+    assert r.status_code == 200, r.text and sessions
+    rd = r.json()["approval"]["round"]
+    assert rd["status"] == "pending" and [c["value"] for c in rd["changes"]] == ["25%"]
+    assert _versions(w, cid, "cession_pct")[-1]["approval"] == "pending"
+    # The reinsurer sees what it is asked to approve.
+    view = client.get(f"/treaty-view/{sessions[0][0]}", headers=sessions[0][1]).json()
+    assert view["basis_changes"][0]["can_answer"] and \
+        view["basis_changes"][0]["changes"][0]["value"] == "25%"
+    # Still not used while any reinsurer has not answered.
+    assert _lines(_statement(w, cid, "2027-09"), "B1")[0]["ceded_pct"] == 40
+    for token, h in sessions:
+        a = client.post(f"/treaty-view/{token}/basis/{rd['id']}/approve", headers=h,
+                        json={"signer_name": "Approver"})
+        assert a.status_code in (200, 409), a.text
+    assert _versions(w, cid, "cession_pct")[-1]["approval"] == "approved"
+    assert _lines(_statement(w, cid, "2027-09"), "B1")[0]["ceded_pct"] == 25
+
+
+def test_b2_a_request_for_changes_sends_it_back_and_send_again_starts_over(w):
+    cid = _treaty(w, _qs(w, 40), "B2 changes", setup=False)
+    _change(w, cid, "cession_pct", 30, "2027-06-01", approve=False)
+    r, sessions = _send_basis(w, cid)
+    rid = r.json()["approval"]["round"]["id"]
+    token, h = sessions[0]
+    assert client.post(f"/treaty-view/{token}/basis/{rid}/request-changes", headers=h,
+                       json={"note": ""}).status_code == 400
+    a = client.post(f"/treaty-view/{token}/basis/{rid}/request-changes", headers=h,
+                    json={"note": "35%, not 30%"})
+    assert a.status_code == 200, a.text
+    b = client.get(f"/contracts/{cid}/basis", headers=w["ch"]).json()
+    assert b["approval"]["round"]["status"] == "changes_requested"
+    assert _versions(w, cid, "cession_pct")[-1]["approval"] == "changes_requested"
+    # No more answers to a request sent back.
+    assert client.post(f"/treaty-view/{token}/basis/{rid}/approve", headers=h,
+                       json={"signer_name": "X"}).status_code == 409
+    # Corrected and sent again: a new request, with no answers yet.
+    entry = _versions(w, cid, "cession_pct")[-1]["id"]
+    assert client.delete(f"/contracts/{cid}/basis/{entry}", headers=w["ch"]).status_code == 200
+    _change(w, cid, "cession_pct", 35, "2027-06-01", approve=False)
+    r2, _ = _send_basis(w, cid)
+    rd2 = r2.json()["approval"]["round"]
+    assert rd2["id"] != rid and rd2["approved"] == 0 and rd2["status"] == "pending"
+    assert [c["value"] for c in rd2["changes"]] == ["35%"]
+
+
+def test_b3_removing_a_change_withdraws_the_request_and_nothing_to_send_is_refused(w):
+    cid = _treaty(w, _qs(w, 40), "B3 withdraw", setup=False)
+    assert client.post(f"/contracts/{cid}/basis/send-for-approval",
+                       headers=w["ch"]).status_code == 409          # nothing entered
+    _change(w, cid, "cession_pct", 30, "2027-06-01", approve=False)
+    _change(w, cid, "ceding_commission_pct", 25, "2027-06-01", approve=False)
+    r, sessions = _send_basis(w, cid)
+    rid = r.json()["approval"]["round"]["id"]
+    entry = _versions(w, cid, "cession_pct")[-1]["id"]
+    assert client.delete(f"/contracts/{cid}/basis/{entry}", headers=w["ch"]).status_code == 200
+    b = client.get(f"/contracts/{cid}/basis", headers=w["ch"]).json()
+    # The request is withdrawn; the other change is a draft again.
+    assert b["approval"]["round"] is None and b["approval"]["draft"] == 1
+    token, h = sessions[0]
+    assert client.post(f"/treaty-view/{token}/basis/{rid}/approve", headers=h,
+                       json={"signer_name": "X"}).status_code == 409
+    # Only the carrier sends.
+    assert client.post(f"/contracts/{cid}/basis/send-for-approval").status_code == 401

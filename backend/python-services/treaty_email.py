@@ -67,6 +67,121 @@ def sign_email(*, link: str, name: str, carrier: str, reinsurer: str,
                 f"new browser session."))
 
 
+def approve_email(*, link: str, name: str, carrier: str, reinsurer: str,
+                  treaty: str, type_label: str, term: str, expires: str,
+                  otp: str) -> str:
+    """A draft treaty sent to a reinsurer to approve, or to ask for changes —
+    the same private link, which carries the two buttons."""
+    return _shell(
+        f"{carrier} asks you to approve a treaty",
+        f"""<p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 8px">
+              Hi {_esc(name)},</p>
+            <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 18px">
+              {_esc(carrier)} asks you to review <b>{_esc(treaty)}</b> for
+              {_esc(reinsurer)}. Open the link, enter the code below, and
+              approve it, or ask for changes. No account is needed.</p>
+            {_facts([("Treaty", treaty), ("Type", type_label), ("Term", term),
+                     ("Sent by", carrier), ("Your organisation", reinsurer)])}
+            <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 4px">
+              You will see your own lines only. Once every reinsurer has
+              approved, {_esc(carrier)} signs it and asks you to sign.</p>
+            {_code_block(otp)}""",
+        link=link, cta="Review the treaty",
+        footer=(f"This link is yours alone and works until {_esc(expires)}. "
+                f"Opening it asks for the code above every time you start a "
+                f"new browser session."))
+
+
+def endorsement_email(*, link: str, name: str, carrier: str, reinsurer: str,
+                      treaty: str, endorsement: str, effective: str,
+                      changes: list[str], expires: str, otp: str,
+                      sign: bool = False) -> str:
+    """An endorsement to a treaty, sent to a reinsurer to approve — or, once
+    every reinsurer approved it and the carrier signed it, to sign. It is used
+    only once every reinsurer has signed it."""
+    items = "".join(f"<li>{_esc(x)}</li>" for x in changes)
+    if sign:
+        return _shell(
+            f"{carrier} asks you to sign an endorsement",
+            f"""<p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 8px">
+                  Hi {_esc(name)},</p>
+                <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 18px">
+                  Every reinsurer approved <b>{_esc(endorsement)}</b> to
+                  <b>{_esc(treaty)}</b>, and {_esc(carrier)} has signed it. Open the
+                  link, enter the code below, and sign it for {_esc(reinsurer)}.</p>
+                {_facts([("Treaty", treaty), ("Endorsement", endorsement),
+                         ("Takes effect", effective or "—"), ("Signed by", carrier)])}
+                {f'<ul style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 12px;padding-left:18px">{items}</ul>' if items else ''}
+                <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 4px">
+                  It is in force once every reinsurer on the treaty has signed it.</p>
+                {_code_block(otp)}""",
+            link=link, cta="Review and sign",
+            footer=(f"This link is yours alone and works until {_esc(expires)}. "
+                    f"Opening it asks for the code above every time you start a "
+                    f"new browser session."))
+    return _shell(
+        f"{carrier} asks you to approve an endorsement",
+        f"""<p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 8px">
+              Hi {_esc(name)},</p>
+            <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 18px">
+              {_esc(carrier)} has endorsed <b>{_esc(treaty)}</b> and asks
+              {_esc(reinsurer)} to approve it. Open the link, enter the code
+              below, and approve it, or ask for changes.</p>
+            {_facts([("Treaty", treaty), ("Endorsement", endorsement),
+                     ("Takes effect", effective or "—"), ("Sent by", carrier)])}
+            {f'<ul style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 12px;padding-left:18px">{items}</ul>' if items else ''}
+            <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 4px">
+              Once every reinsurer has approved it, {_esc(carrier)} signs it and
+              asks you to sign. Nothing changes until every reinsurer has
+              signed it.</p>
+            {_code_block(otp)}""",
+        link=link, cta="Review the endorsement",
+        footer=(f"This link is yours alone and works until {_esc(expires)}. "
+                f"Opening it asks for the code above every time you start a "
+                f"new browser session."))
+
+
+def basis_email(*, link: str, name: str, carrier: str, reinsurer: str,
+                treaty: str, changes: list[str], expires: str, otp: str) -> str:
+    """Changes to a treaty's terms (its calculation basis), sent to a
+    reinsurer to approve. They are used only once every reinsurer approves."""
+    items = "".join(f"<li>{_esc(x)}</li>" for x in changes)
+    return _shell(
+        f"{carrier} asks you to approve changes to a treaty",
+        f"""<p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 8px">
+              Hi {_esc(name)},</p>
+            <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 18px">
+              {_esc(carrier)} wants to change the terms of <b>{_esc(treaty)}</b>
+              and asks {_esc(reinsurer)} to approve. Open the link, enter the
+              code below, and approve the changes, or ask for changes.</p>
+            {_facts([("Treaty", treaty), ("Sent by", carrier)])}
+            {f'<ul style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 12px;padding-left:18px">{items}</ul>' if items else ''}
+            <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 4px">
+              Nothing changes until every reinsurer on the treaty has approved.</p>
+            {_code_block(otp)}""",
+        link=link, cta="Review the changes",
+        footer=(f"This link is yours alone and works until {_esc(expires)}. "
+                f"Opening it asks for the code above every time you start a "
+                f"new browser session."))
+
+
+def answer_email(*, name: str, reinsurer: str, what: str, approved: bool,
+                 note: str | None, link: str, all_approved: bool) -> str:
+    """To the carrier: a reinsurer answered a treaty or an endorsement."""
+    verb = "approved" if approved else "asked for changes to"
+    after = ""
+    if approved and all_approved:
+        after = "Every reinsurer has now approved it."
+    return _shell(
+        f"{reinsurer} {verb} {what}",
+        f"""<p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 8px">
+              Hi {_esc(name)},</p>
+            <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 12px">
+              <b>{_esc(reinsurer)}</b> {verb} <b>{_esc(what)}</b>. {_esc(after)}</p>
+            {f'<p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 4px"><b>Their note:</b> {_esc(note)}</p>' if note else ''}""",
+        link=link, cta="Open it in Kavachio")
+
+
 def code_email(*, name: str, treaty: str, otp: str) -> str:
     """No link in it, on purpose — the one they already have still works, and
     a message holding both is one more thing that can be forwarded whole."""

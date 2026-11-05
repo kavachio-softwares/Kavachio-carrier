@@ -62,6 +62,10 @@ BASIS: dict[str, list[tuple[str, str, str, str]]] = {
     ],
 }
 SOURCES = ("structure", "manual", "wording", "endorsement")
+# Changes entered on the Calculation basis itself. Each is a draft — listed,
+# not used — until it is sent and every reinsurer on the treaty approves it.
+# (An endorsement's changes go through the endorsement's own approval.)
+NEEDS_APPROVAL = ("manual", "wording")
 
 
 def spec(treaty_type: Optional[str]) -> list[dict]:
@@ -233,6 +237,13 @@ def schedule(s, c, st: Optional[dict] = None) -> dict:
     if not st:
         return {"treaty_type": None, "terms": [], "inception": None}
     rows = _entries(s, c)
+    # An endorsement's terms count only once every reinsurer approved it;
+    # until then they are listed, marked as waiting, and not used.
+    import treaty_endorsement as te
+    approved = te.approved_document_ids(s, c) if any(
+        r.source == "endorsement" and r.document_id for r in rows) else set()
+    # A change entered here counts only once every reinsurer approved it.
+    entered = change_status(c)
     inception = c.inception_dt.isoformat() if c.inception_dt else None
     out = []
     import treaty_types as tt
@@ -258,6 +269,12 @@ def schedule(s, c, st: Optional[dict] = None) -> dict:
                     versions.append({"id": r.id, "effective_from": r.effective_from.isoformat(),
                                      "value": r.value, "source": r.source, "note": r.note,
                                      "document_id": r.document_id,
+                                     "pending": bool(r.source == "endorsement" and r.document_id
+                                                     and r.document_id not in approved)
+                                     or (r.source in NEEDS_APPROVAL
+                                         and entered.get(r.id, "draft") != "approved"),
+                                     "approval": (entered.get(r.id, "draft")
+                                                  if r.source in NEEDS_APPROVAL else None),
                                      "entered_by": r.created_by_name,
                                      "entered_at": r.created_at.isoformat() if r.created_at else None})
             versions.sort(key=lambda v: v["effective_from"] or "")
@@ -273,7 +290,8 @@ def in_force(sched: dict, on: dt.date) -> dict:
     out = {}
     for t in sched["terms"]:
         live = [v for v in t["versions"]
-                if v["effective_from"] is None or _date(v["effective_from"]) <= on]
+                if not v.get("pending")
+                and (v["effective_from"] is None or _date(v["effective_from"]) <= on)]
         if live:
             out[(t["term"], t["layer"])] = live[-1]
     return out
@@ -357,10 +375,20 @@ def add(s, c, *, term: str, layer: Optional[int], value: Any, effective_from: An
 
 
 def remove(s, c, entry_id: int, user_id: Optional[int]) -> bool:
+    """Raises BasisError for a change every reinsurer has approved — that is
+    agreed, and moves only by a new dated change sent to them in turn."""
     from db import TreatyTerm
     r = s.get(TreatyTerm, entry_id)
     if r is None or r.contract_id != c.id or r.removed_at is not None:
         return False
+    if r.source in NEEDS_APPROVAL:
+        state = change_status(c).get(r.id, "draft")
+        if state == "approved":
+            raise BasisError({"entry": "Every reinsurer approved this change, so it stays. "
+                                       "Enter a new dated change and send that for approval."})
+        # What the reinsurers were asked about has changed: that request
+        # no longer stands, and its other changes go back to draft.
+        _supersede(c, lambda rd: r.id in rd.get("term_ids", []))
     r.removed_at = dt.datetime.now(dt.timezone.utc)
     r.removed_by_user_id = user_id
     return True
@@ -433,3 +461,167 @@ def endorsement_changes(s, c, items: list, effective_from: Any) -> list[dict]:
                     # What the calculation basis takes from it.
                     "basis": {"term": t["term"], "layer": t["layer"], "value": new}})
     return out
+
+
+# ── changes entered here: sent to the reinsurers, used once all approve ─────
+# Held on the treaty (contract.extracted["basis_approval"]) as ROUNDS: each
+# send is one round naming the changes it asked about, with every reinsurer's
+# answer. A change is approved once a round holding it is approved by every
+# reinsurer on the treaty; until then it is a draft, waiting, or sent back.
+BASIS_APPROVAL_LABEL = {"draft": "Not sent for approval", "pending": "Waiting for approval",
+                        "changes_requested": "Changes requested", "approved": "Approved"}
+
+
+def _rounds(c) -> list[dict]:
+    ex = getattr(c, "extracted", None)
+    a = (ex if isinstance(ex, dict) else {}).get("basis_approval")
+    return [r for r in (a or {}).get("rounds") or [] if isinstance(r, dict)]
+
+
+def _set_rounds(c, rounds: list[dict]) -> None:
+    from sqlalchemy.orm.attributes import flag_modified
+    c.extracted = {**(c.extracted if isinstance(c.extracted, dict) else {}),
+                   "basis_approval": {"rounds": rounds}}
+    flag_modified(c, "extracted")
+
+
+def _supersede(c, which) -> None:
+    rounds = _rounds(c)
+    hit = False
+    for rd in rounds:
+        if rd.get("status") in ("pending", "changes_requested") and which(rd):
+            rd["status"] = "superseded"
+            hit = True
+    if hit:
+        _set_rounds(c, rounds)
+
+
+def change_status(c) -> dict[int, str]:
+    """{change id: draft | pending | changes_requested | approved} for every
+    change any round asked about. One not listed is a draft."""
+    out: dict[int, str] = {}
+    for rd in _rounds(c):
+        st = rd.get("status")
+        if st == "superseded":
+            continue
+        for tid in rd.get("term_ids") or []:
+            if out.get(tid) != "approved":
+                out[tid] = st
+    return out
+
+
+def open_round(c) -> Optional[dict]:
+    """The round the reinsurers are answering now, if any."""
+    live = [rd for rd in _rounds(c) if rd.get("status") in ("pending", "changes_requested")]
+    return live[-1] if live else None
+
+
+def _unapproved(s, c) -> list:
+    st = change_status(c)
+    return [r for r in _entries(s, c)
+            if r.source in NEEDS_APPROVAL and st.get(r.id, "draft") != "approved"]
+
+
+def describe(s, c, ids: list[int]) -> list[dict]:
+    """The changes a round asks about, worded for the reinsurer and the carrier."""
+    import treaty_routes
+    from db import TreatyTerm
+    st = treaty_routes.load_structure(s, c.id, names=False) or {}
+    cur = ((st.get("terms") or {}).get("currency") or "").upper() or None
+    specs = {x["term"]: x for x in spec(st.get("treaty_type"))}
+    lays = st.get("layers") or []
+    out = []
+    for r in (s.query(TreatyTerm).filter(TreatyTerm.id.in_(ids or [0]))
+              .order_by(TreatyTerm.effective_from, TreatyTerm.id)):
+        sp = specs.get(r.term) or {"label": r.term, "kind": ""}
+        lname = (lays[r.layer_index].get("name") if r.layer_index is not None
+                 and r.layer_index < len(lays) else None)
+        out.append({"id": r.id, "label": sp["label"] + (f" — {lname}" if lname else ""),
+                    "value": _show(sp["kind"], r.value, cur),
+                    "effective_from": r.effective_from.isoformat(),
+                    "note": r.note, "removed": r.removed_at is not None})
+    return out
+
+
+def send_round(s, c, *, who: Optional[str], user_id: Optional[int],
+               email: Optional[str]) -> dict:
+    """Every change not yet approved, sent to the reinsurers as one round. A
+    round already out is replaced: its answers were to a different list."""
+    rows = _unapproved(s, c)
+    if not rows:
+        raise BasisError({"basis": "There is no change waiting to be sent."})
+    rounds = _rounds(c)
+    for rd in rounds:
+        if rd.get("status") in ("pending", "changes_requested"):
+            rd["status"] = "superseded"
+    rd = {"id": max([x.get("id") or 0 for x in rounds] + [0]) + 1,
+          "term_ids": [r.id for r in rows], "status": "pending", "answers": {},
+          "sent_at": _now_iso(), "sent_by": who, "sent_by_user_id": user_id,
+          "sent_by_email": email}
+    rounds.append(rd)
+    _set_rounds(c, rounds)
+    return rd
+
+
+def answer_round(s, c, round_id: int, *, party_id: int, status: str,
+                 signer_name: Optional[str], note: Optional[str],
+                 email: Optional[str], ip: Optional[str]) -> dict:
+    """A reinsurer's answer. Every reinsurer approving puts the changes in
+    force; one asking for changes sends them back to the carrier."""
+    import treaty_routes
+    rounds = _rounds(c)
+    rd = next((x for x in rounds if x.get("id") == round_id), None)
+    if rd is None:
+        raise LookupError("no such request")
+    if rd.get("status") != "pending":
+        raise ValueError("These changes are not waiting for an answer.")
+    answers = dict(rd.get("answers") or {})
+    answers[str(party_id)] = {"status": status, "signer_name": signer_name, "note": note,
+                              "email": email, "ip": ip, "at": _now_iso()}
+    rd["answers"] = answers
+    panel = treaty_routes._panel_party_ids(s, c)
+    if status == "changes_requested":
+        rd["status"] = "changes_requested"
+    elif panel and all((answers.get(str(pid)) or {}).get("status") == "approved"
+                       for pid in panel):
+        rd["status"] = "approved"
+        rd["approved_at"] = _now_iso()
+    _set_rounds(c, rounds)
+    return rd
+
+
+def round_status(s, c, rd: Optional[dict]) -> Optional[dict]:
+    """A round with each reinsurer's answer, for the carrier."""
+    import treaty_routes
+    from db import Party
+    if rd is None:
+        return None
+    answers = rd.get("answers") or {}
+    panel = sorted(treaty_routes._panel_party_ids(s, c))
+    names = {p.id: p.legal_name for p in s.query(Party).filter(Party.id.in_(panel or [0]))}
+    parties = [{"party_id": pid, "party_name": names.get(pid),
+                "is_lead": pid == c.broker_party_id,
+                "status": (answers.get(str(pid)) or {}).get("status") or "pending",
+                "signer_name": (answers.get(str(pid)) or {}).get("signer_name"),
+                "note": (answers.get(str(pid)) or {}).get("note"),
+                "at": (answers.get(str(pid)) or {}).get("at")} for pid in panel]
+    return {"id": rd.get("id"), "status": rd.get("status"),
+            "label": BASIS_APPROVAL_LABEL.get(rd.get("status"), rd.get("status")),
+            "sent_at": rd.get("sent_at"), "sent_by": rd.get("sent_by"),
+            "approved_at": rd.get("approved_at"), "parties": parties,
+            "approved": sum(1 for p in parties if p["status"] == "approved"),
+            "total": len(parties), "changes": describe(s, c, rd.get("term_ids") or [])}
+
+
+def approval_summary(s, c) -> dict:
+    """What the Calculation basis shows about approval: how many changes are
+    drafts, and the round out with the reinsurers, if any."""
+    st = change_status(c)
+    rows = [r for r in _entries(s, c) if r.source in NEEDS_APPROVAL]
+    return {"draft": sum(1 for r in rows if st.get(r.id, "draft") == "draft"),
+            "unapproved": sum(1 for r in rows if st.get(r.id, "draft") != "approved"),
+            "round": round_status(s, c, open_round(c))}
+
+
+def _now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()

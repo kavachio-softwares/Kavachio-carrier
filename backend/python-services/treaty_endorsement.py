@@ -276,6 +276,8 @@ def confirm(s, c, d, *, effective_date: Any, changes: list, clauses: list,
               "clauses": kept}
     d.extracted = {**(d.extracted if isinstance(d.extracted, dict) else {}), "review": review}
     flag_modified(d, "extracted")
+    # What it applies may have changed: it goes to the reinsurers again.
+    reset_approval(d)
     return review
 
 
@@ -319,20 +321,178 @@ def payload(s, c, d) -> dict:
                      "effective_from": r.effective_from.isoformat()}
                     for r in applied_versions(s, c, d)],
         "terms": terms, "treaty": c.name, "contract_id": c.id,
+        "approval": approval_status(s, c, d),
     }
 
 
 
 def treaty_rules(s, c) -> list[dict]:
     """Every rule read from this treaty's applied endorsements — those still
-    attached (a retired endorsement's rules stop with it)."""
+    attached (a retired endorsement's rules stop with it) and approved by every
+    reinsurer (one waiting for approval is not used yet)."""
     from db import ContractDocument
     out = []
+    ok = approved_document_ids(s, c)
     for d in (s.query(ContractDocument)
               .filter(ContractDocument.contract_id == c.id,
                       ContractDocument.kind == "endorsement",
                       ContractDocument.is_active.is_(True))
               .order_by(ContractDocument.id)):
+        if d.id not in ok:
+            continue
         review = (d.extracted or {}).get("review") if isinstance(d.extracted, dict) else None
         out += (review or {}).get("rules") or []
     return out
+
+
+# ── approval: an endorsement is used only once every reinsurer approved it ──
+#
+#   draft              applied (or drafted) here; not yet sent — not used
+#   pending            sent to the reinsurers; waiting on their answers
+#   changes_requested  a reinsurer asked for changes — edit it and send again
+#   approved           every reinsurer approved it — the carrier signs next
+#   carrier_signed     the carrier signed — each reinsurer signs next
+#   in_force           every reinsurer signed — its terms and rules are used
+#
+# Held on the endorsement's own document (extracted["approval"]), the answers
+# keyed by reinsurer. Changing what it applies (confirm again) puts it back to
+# draft: an approval is of what was sent, not of whatever it says later.
+
+APPROVAL_LABEL = {"draft": "Not sent for approval", "pending": "Waiting for approval",
+                  "changes_requested": "Changes requested",
+                  "approved": "Approved — waiting for your signature",
+                  "carrier_signed": "Signed by you — waiting for the reinsurers to sign",
+                  "in_force": "In force"}
+
+
+def _approval(d) -> dict:
+    ex = d.extracted if isinstance(d.extracted, dict) else {}
+    a = ex.get("approval")
+    return a if isinstance(a, dict) else {"status": "draft", "answers": {}}
+
+
+def _set_approval(d, a: dict) -> None:
+    from sqlalchemy.orm.attributes import flag_modified
+    d.extracted = {**(d.extracted if isinstance(d.extracted, dict) else {}), "approval": a}
+    flag_modified(d, "extracted")
+
+
+def reset_approval(d) -> None:
+    """What the endorsement applies changed: any answer was to something else."""
+    a = _approval(d)
+    if a.get("status") != "draft" or a.get("answers"):
+        _set_approval(d, {"status": "draft", "answers": {},
+                          "previous": {k: a.get(k) for k in ("status", "sent_at", "answers")}})
+
+
+def approved_document_ids(s, c) -> set[int]:
+    """The endorsements on this treaty whose terms may be used: approved and
+    signed by every reinsurer on the treaty."""
+    from db import ContractDocument
+    if s is None:
+        return set()
+    return {d.id for d in (s.query(ContractDocument)
+                           .filter(ContractDocument.contract_id == c.id,
+                                   ContractDocument.kind == "endorsement"))
+            if _approval(d).get("status") == "in_force"}
+
+
+def approval_status(s, c, d) -> dict:
+    """Where the endorsement stands, with each reinsurer's answer."""
+    import treaty_routes
+    from db import Party
+    a = _approval(d)
+    answers = a.get("answers") or {}
+    panel = sorted(treaty_routes._panel_party_ids(s, c))
+    names = {p.id: p.legal_name for p in s.query(Party).filter(Party.id.in_(panel or [0]))}
+    parties = []
+    for pid in panel:
+        ans = answers.get(str(pid)) or {}
+        sig = (a.get("signatures") or {}).get(str(pid))
+        parties.append({"party_id": pid, "party_name": names.get(pid),
+                        "is_lead": pid == c.broker_party_id,
+                        "status": ans.get("status") or "pending",
+                        "signer_name": ans.get("signer_name"), "note": ans.get("note"),
+                        "at": ans.get("at"),
+                        "signed": ({"name": sig.get("name"), "title": sig.get("title"),
+                                    "at": sig.get("at")} if sig else None)})
+    status = a.get("status") or "draft"
+    return {"status": status, "label": APPROVAL_LABEL.get(status, status),
+            "sent_at": a.get("sent_at"), "sent_by": a.get("sent_by"),
+            "approved_at": a.get("approved_at"), "parties": parties,
+            "approved": sum(1 for p in parties if p["status"] == "approved"),
+            "signed": sum(1 for p in parties if p["signed"]),
+            "carrier_signature": a.get("carrier_signature"),
+            "in_force_at": a.get("in_force_at"),
+            "total": len(parties)}
+
+
+def mark_sent(s, c, d, *, who: Optional[str], user_id: Optional[int], email: Optional[str]) -> None:
+    _set_approval(d, {"status": "pending", "answers": {}, "sent_at": _now(),
+                      "sent_by": who, "sent_by_user_id": user_id, "sent_by_email": email})
+
+
+def answer(s, c, d, *, party_id: int, status: str, signer_name: Optional[str],
+           note: Optional[str], email: Optional[str], ip: Optional[str]) -> dict:
+    """A reinsurer's answer. Returns the new approval status. Every reinsurer
+    on the treaty approving it puts it in force; one asking for changes sends
+    it back to the carrier."""
+    import treaty_routes
+    a = dict(_approval(d))
+    if a.get("status") != "pending":
+        raise ValueError("This endorsement is not waiting for an answer.")
+    answers = dict(a.get("answers") or {})
+    answers[str(party_id)] = {"status": status, "signer_name": signer_name, "note": note,
+                              "email": email, "ip": ip, "at": _now()}
+    a["answers"] = answers
+    panel = treaty_routes._panel_party_ids(s, c)
+    if status == "changes_requested":
+        a["status"] = "changes_requested"
+    elif panel and all((answers.get(str(pid)) or {}).get("status") == "approved"
+                       for pid in panel):
+        a["status"] = "approved"
+        a["approved_at"] = _now()
+    _set_approval(d, a)
+    return a
+
+
+def carrier_sign(s, c, d, *, name: str, title: Optional[str],
+                 user_id: Optional[int]) -> dict:
+    """The carrier signs the endorsement every reinsurer approved."""
+    a = dict(_approval(d))
+    if a.get("status") != "approved":
+        raise ValueError("Every reinsurer approves the endorsement before you sign it.")
+    a["carrier_signature"] = {"name": name, "title": title, "user_id": user_id, "at": _now()}
+    a["status"] = "carrier_signed"
+    a["signatures"] = {}
+    _set_approval(d, a)
+    return a
+
+
+def reinsurer_sign(s, c, d, *, party_id: int, name: str, title: Optional[str],
+                   email: Optional[str], ip: Optional[str]) -> dict:
+    """A reinsurer signs the endorsement on its link. The last one puts it in
+    force: from then its terms and rules are used, from its date."""
+    import treaty_routes
+    a = dict(_approval(d))
+    if a.get("status") != "carrier_signed":
+        raise ValueError("This endorsement is not waiting for your signature.")
+    sigs = dict(a.get("signatures") or {})
+    if str(party_id) in sigs:
+        raise ValueError("You have already signed this endorsement.")
+    sigs[str(party_id)] = {"name": name, "title": title, "email": email, "ip": ip,
+                           "at": _now()}
+    a["signatures"] = sigs
+    panel = treaty_routes._panel_party_ids(s, c)
+    if panel and all(str(pid) in sigs for pid in panel):
+        a["status"] = "in_force"
+        a["in_force_at"] = _now()
+    _set_approval(d, a)
+    return a
+
+
+def label(d) -> str:
+    ex = d.extracted if isinstance(d.extracted, dict) else {}
+    num = ((ex.get("review") or {}).get("endorsement_number")
+           or ex.get("endorsement_number"))
+    return f"Endorsement {num}" if num else (d.filename or "Endorsement")

@@ -1,13 +1,13 @@
 /**
- * Upload a treaty that was already signed — on paper, outside Kavachio.
+ * Upload a treaty from its document — it is saved as a DRAFT.
  *
  * The signed document already says everything: the term, the type, the
  * layers, who holds what. So the carrier gives only what the document cannot
  * know — which of THEIR programmes it is for — and the file. Kavachio reads it
  * (POST /treaties/read) and fills the form; the carrier checks what was read,
  * adds any reinsurer not yet on file, and confirms. Saving reads the signed
- * copy for its clauses and rules (treaty_wording) and puts it in force
- * (or sends it to the carrier admin, for a carrier user).
+ * copy for its clauses and rules (treaty_wording). It is not agreed until
+ * every reinsurer approves it: send it to them from the treaty.
  *
  * A file with no readable text, or a reading that fails, still works: the
  * same form is offered empty, to fill in by hand.
@@ -21,7 +21,7 @@ import { currentMga } from "../../auth";
 import { getCounterparties, fieldErrors } from "../../api/contractRecord";
 import { getHierarchy } from "../../api/hierarchy";
 import {
-  createReinsurer, getTreatyTypes, readSignedTreaty, uploadSignedTreaty,
+  approvalNotice, type ApprovalSent, createReinsurer, getTreatyTypes, readSignedTreaty, uploadSignedTreaty,
   type TreatyInput, type TreatyReading, type TreatyTypeSpec,
 } from "../../api/treaty";
 import { EMPTY_TREATY, TreatyEditor, treatyForSave } from "./TreatyEditor";
@@ -101,8 +101,7 @@ export function UploadTreatyModal({ open, onClose, programId: initialProgramId, 
       // Lock what was read, unless something essential is missing from it.
       setLocked(!!r.treaty && !!r.name && !!r.inception_dt && !!r.expiry_dt);
       setNote(r.treaty
-        ? "Read from the signed treaty. These are the signed terms, so they are "
-          + "shown as read — check them against the document."
+        ? "Read from the treaty. Check the terms against the document."
         : "The details were read, but not the treaty type — choose it below.");
     } catch (e) {
       setErr(`${fieldErrors(e).message} You can fill it in below instead.`);
@@ -157,7 +156,8 @@ export function UploadTreatyModal({ open, onClose, programId: initialProgramId, 
         treaty: treatyForSave(treaty), program_ids: extra, reading,
       });
       onClose();
-      nav(`/contracts/${rec.id}`);
+      nav(`/contracts/${rec.id}`, { state: approvalNotice(
+        (rec as { approval_sent?: ApprovalSent }).approval_sent) });
     } catch (e) {
       const fe = fieldErrors(e);
       setErr(fe.message);
@@ -177,14 +177,14 @@ export function UploadTreatyModal({ open, onClose, programId: initialProgramId, 
               onClick={() => setStage("file")}>Back</button>
       <button className="btn" type="button" onClick={onClose}>Cancel</button>
       <button className="btn pri" type="button" disabled={busy} onClick={save}>
-        {busy ? "Uploading and reading its clauses and rules…" : "Upload and put in force"}
+        {busy ? "Uploading and reading its clauses and rules…" : "Upload and send for approval"}
       </button>
     </>
   ) : (
     <>
       <button className="btn" type="button" style={{ marginRight: "auto" }}
               disabled={stage === "reading" || !file || !programId}
-              title={!file ? "Attach the signed treaty first" : undefined}
+              title={!file ? "Attach the treaty first" : undefined}
               onClick={() => setStage("check")}>
         Fill it in by hand
       </button>
@@ -201,7 +201,7 @@ export function UploadTreatyModal({ open, onClose, programId: initialProgramId, 
   return (
     <Modal open={open} onClose={onClose}
            size={stage === "check" ? "4xl" : "lg"}
-           title="Upload a signed treaty" footer={footer}>
+           title="Upload a treaty" footer={footer}>
       <div className="proto proto-embed">
         {stage === "file" && switcher}
         {stage !== "check" ? (
@@ -219,7 +219,7 @@ export function UploadTreatyModal({ open, onClose, programId: initialProgramId, 
                 {programmes.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </div>
-            <FileDrop label="Signed treaty" required tone="required"
+            <FileDrop label="Treaty document" required tone="required"
                       icon={<FileText size={15} />} accept=".pdf,.docx"
                       file={file} onPick={setFile} disabled={stage === "reading"}
                       hint="The signed slip or wording — PDF or Word" />

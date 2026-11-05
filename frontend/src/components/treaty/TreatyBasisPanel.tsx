@@ -13,17 +13,31 @@
  * before they are saved.
  */
 import { useEffect, useState } from "react";
-import { CalendarClock, Calculator, Loader2, Plus, Trash2 } from "lucide-react";
+import { CalendarClock, Calculator, CheckCircle2, Loader2, Plus, Send, Trash2 } from "lucide-react";
 import { InfoTip } from "../InfoTip";
 import {
   DEFAULT_PROFIT, DEFAULT_SCALE, ProfitCommissionEditor, SlidingScaleEditor, profitText, scaleText,
 } from "./CommissionEditors";
 import { fieldErrors } from "../../api/contractRecord";
 import {
-  addBasis, evaluateBasis, getBasis, removeBasis, type Basis, type BasisTerm,
-  type BasisVersion, type ProfitCommission, type SlidingScale,
+  addBasis, evaluateBasis, getBasis, removeBasis, sendBasisForApproval, type Basis,
+  type BasisChangeStatus, type BasisTerm, type BasisVersion, type ProfitCommission,
+  type SlidingScale,
 } from "../../api/treaty";
-import { fmtDate } from "../../utils/date";
+import { fmtDate, fmtStamp } from "../../utils/date";
+
+/** A change entered here, with the reinsurers. */
+const CHANGE: Record<BasisChangeStatus, [string, string]> = {
+  draft: ["b-mut", "Draft — not sent"],
+  pending: ["b-warn", "Waiting for approval"],
+  changes_requested: ["b-crit", "Changes requested"],
+  approved: ["b-ok", "Approved"],
+};
+const ANSWER: Record<string, [string, string]> = {
+  pending: ["b-mut", "Not answered"],
+  approved: ["b-ok", "Approved"],
+  changes_requested: ["b-crit", "Asked for changes"],
+};
 
 const SOURCE: Record<string, string> = {
   structure: "As agreed", manual: "Changed", wording: "From the wording", endorsement: "Endorsement",
@@ -44,8 +58,8 @@ function show(t: BasisTerm, v: BasisVersion["value"]): string {
 /** The version in force today. */
 function current(t: BasisTerm): BasisVersion | undefined {
   const today = new Date().toISOString().slice(0, 10);
-  return [...t.versions].filter(v => !v.effective_from || v.effective_from <= today).pop()
-    ?? t.versions[0];
+  return [...t.versions].filter(v => !v.pending && (!v.effective_from || v.effective_from <= today)).pop()
+    ?? t.versions.find(v => !v.pending);
 }
 
 export default function TreatyBasisPanel({ contractId }: { contractId: number }) {
@@ -53,6 +67,7 @@ export default function TreatyBasisPanel({ contractId }: { contractId: number })
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
   const [open, setOpen] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
 
   useEffect(() => { getBasis(contractId).then(setB).catch(e => setErr(fieldErrors(e).message)); },
             [contractId]);
@@ -64,6 +79,20 @@ export default function TreatyBasisPanel({ contractId }: { contractId: number })
   const key = (t: BasisTerm) => `${t.term}:${t.layer ?? ""}`;
   const basis = b.terms.filter(t => BASIS_TERMS.has(t.term));
   const commission = b.terms.filter(t => !BASIS_TERMS.has(t.term));
+
+  async function send() {
+    setErr(""); setNote(""); setSending(true);
+    try {
+      const r = await sendBasisForApproval(contractId);
+      setB(r);
+      const failed = r.sent.filter(x => !x.emailed).length;
+      setNote(`Sent for approval to ${r.sent.length} ${r.sent.length === 1 ? "person" : "people"} `
+        + `at the reinsurers.`
+        + (failed ? ` ${failed} email${failed === 1 ? "" : "s"} could not be sent — send again.` : "")
+        + (r.missing.length ? ` No contact with an email at ${r.missing.join(", ")}.` : ""));
+    } catch (e) { setErr(fieldErrors(e).message); }
+    finally { setSending(false); }
+  }
 
   async function remove(id: number) {
     setErr(""); setNote("");
@@ -104,9 +133,18 @@ export default function TreatyBasisPanel({ contractId }: { contractId: number })
                         <span>{show(t, v.value)}</span>
                         <span className="badge b-mut" style={{ fontSize: 10.5 }}>{SOURCE[v.source] ?? v.source}</span>
                         {v === cur && <span className="badge b-ok" style={{ fontSize: 10.5 }}>In force</span>}
+                        {v.approval ? (
+                          <span className={`badge ${CHANGE[v.approval][0]}`} style={{ fontSize: 10.5 }}
+                                title={v.approval === "approved" ? undefined
+                                  : "Not used until every reinsurer on the treaty has approved it"}>
+                            {CHANGE[v.approval][1]}</span>
+                        ) : v.pending && (
+                          <span className="badge b-warn" style={{ fontSize: 10.5 }}
+                                title="Not used until every reinsurer on the treaty has approved and signed the endorsement">
+                            Waiting for approval</span>)}
                         {(v.note || v.entered_by) && (
                           <span className="sub">{[v.note, v.entered_by && `by ${v.entered_by}`].filter(Boolean).join(" · ")}</span>)}
-                        {b.can_edit && v.id != null && (
+                        {b.can_edit && v.id != null && v.approval !== "approved" && (
                           <button className="btn sm ghost" type="button" title="Remove this change"
                                   onClick={() => remove(v.id!)}><Trash2 size={12} /></button>
                         )}
@@ -145,12 +183,94 @@ export default function TreatyBasisPanel({ contractId }: { contractId: number })
       </div>
       {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
       {note && <div className="note ok" style={{ marginBottom: 14 }}>{note}</div>}
+      <ApprovalCard b={b} sending={sending} onSend={send} />
       {basis.length > 0 && section("Calculation basis",
         "The cession, the lines and each layer's attachment and limit — what every ceded figure is worked from.",
         basis)}
       {commission.length > 0 && section("Commission terms",
         "Ceding commission, and the sliding-scale and profit commission the treaty agrees — each with the date it applies from.",
         commission)}
+    </div>
+  );
+}
+
+/** Changes entered here go to every reinsurer on the treaty to approve;
+ *  only approved ones are used. Draft → Waiting for approval → Approved. */
+function ApprovalCard({ b, sending, onSend }: {
+  b: Basis; sending: boolean; onSend: () => void;
+}) {
+  const a = b.approval;
+  if (!a || (a.unapproved === 0 && !a.round)) return null;
+  const rd = a.round;
+  const stage = rd ? (rd.status === "approved" ? 2 : 1) : 0;
+  const canSend = b.can_edit && a.unapproved > 0;
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card-h">
+        <CheckCircle2 size={16} className="ci" />
+        <h3>
+          Reinsurers&rsquo; approval of changes
+          <InfoTip text={"A change you enter here is a draft and is not used. Send it to the "
+            + "reinsurers — once every reinsurer on the treaty has approved it, it is used "
+            + "from its date."} />
+        </h3>
+        {canSend && (
+          <div className="right">
+            <button className="btn pri sm" type="button" disabled={sending} onClick={onSend}>
+              {sending ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
+              {" "}{rd ? "Send again" : "Send for approval"}
+            </button>
+          </div>
+        )}
+      </div>
+      <div style={{ padding: "12px 20px", display: "grid", gap: 10 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          {["Draft", "Waiting for approval", "In force"].map((label, i) => (
+            <span key={label} style={{ display: "contents" }}>
+              {i > 0 && <span className="sub">→</span>}
+              <span className={`badge ${i < stage ? "b-ok"
+                : i === stage ? (rd?.status === "changes_requested" ? "b-crit" : "b-warn") : "b-mut"}`}>
+                <span className="d" />
+                {i === 1 && rd?.status === "changes_requested" ? "Changes requested" : label}
+              </span>
+            </span>
+          ))}
+        </div>
+        {a.draft > 0 && (
+          <div className="sub">
+            {a.draft} change{a.draft === 1 ? " is" : "s are"} not sent yet and not used.
+            {rd ? " Send again to add them to the request." : " Send them to the reinsurers to approve."}
+          </div>
+        )}
+        {rd?.status === "changes_requested" && (
+          <div className="sub">A reinsurer asked for changes. Remove or correct the change, then send again.</div>
+        )}
+        {rd && (
+          <table className="panel-tbl" style={{ textAlign: "left" }}>
+            <thead><tr><th>Reinsurer</th><th>Answer</th></tr></thead>
+            <tbody>
+              {rd.parties.map(p => {
+                const [cls, lbl] = ANSWER[p.status] ?? ANSWER.pending;
+                return (
+                  <tr key={p.party_id} style={{ verticalAlign: "top" }}>
+                    <td>{p.party_name ?? "—"}{p.is_lead && <span className="sub"> · lead</span>}</td>
+                    <td>
+                      <span className={`badge ${cls}`}><span className="d" />{lbl}</span>
+                      {p.signer_name && <div className="sub">{p.signer_name}{p.at ? ` · ${fmtStamp(p.at)}` : ""}</div>}
+                      {p.note && <div className="sub" style={{ marginTop: 4 }}>&ldquo;{p.note}&rdquo;</div>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+        {rd?.sent_at && (
+          <div className="sub">
+            Sent {fmtStamp(rd.sent_at)}{rd.sent_by ? ` by ${rd.sent_by}` : ""} · {rd.approved} of {rd.total} approved
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -181,7 +301,8 @@ function ChangeForm({ contractId, t, base, b, onDone, onCancel }: {
     try {
       const nb = await addBasis(contractId, { term: t.term, layer: t.layer, value,
         effective_from: from, note: why || null, source });
-      onDone(nb, `${t.label}${t.layer_name ? ` (${t.layer_name})` : ""} changed from ${fmtDate(from)}.`);
+      onDone(nb, `${t.label}${t.layer_name ? ` (${t.layer_name})` : ""} from ${fmtDate(from)} `
+        + `saved as a draft. It is used once every reinsurer approves it — send it for approval.`);
     } catch (e) {
       const fe = fieldErrors(e);
       setErr(Object.values(fe.errors).join(" ") || fe.message);

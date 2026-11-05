@@ -386,7 +386,7 @@ def test_revoking_closes_the_link_and_says_so(w, sent):
     r = client.post(f"/contracts/{cid}/reinsurer-access/{lid}/revoke",
                     headers=w["ch"])
     assert r.status_code == 200
-    assert r.json()["links"][0]["status"] == "revoked"
+    assert next(lk for lk in r.json()["links"] if lk["id"] == lid)["status"] == "revoked"
     view = client.get(f"/treaty-view/{token}").json()
     assert view["closed"] is True and view["title"] == "This link has been withdrawn"
 
@@ -493,7 +493,7 @@ def test_the_dashboard_lists_treaties_about_to_expire(w):
     assert row["days_left"] == 30 and row["renewal_id"] is None
 
 
-def test_a_signed_treaty_is_uploaded_and_put_in_force(w):
+def test_an_uploaded_treaty_is_a_draft_until_the_reinsurers_agree(w):
     import json as _j
     r = client.post("/treaties/upload", headers=w["ch"], data={
         "program_id": w["p1"], "name": "Signed QS 2027",
@@ -508,14 +508,14 @@ def test_a_signed_treaty_is_uploaded_and_put_in_force(w):
     }, files={"file": ("signed-slip.pdf", b"%PDF-1.4 signed", "application/pdf")})
     assert r.status_code == 200, r.text
     rec = r.json()
-    assert rec["lifecycle"] == "active"
+    # Uploading is not the reinsurers agreeing: it is a draft, sent to them next.
+    assert rec["lifecycle"] == "draft"
     assert rec["counterparty"]["id"] == w["hann"]
     assert rec["is_uploaded"] is True
     docs = [d for d in rec["documents"] if d["kind"] == "contract"]
-    assert docs and docs[0]["is_executed_copy"]
-    # Signed means fixed: its shares and terms cannot be edited on the record.
+    assert docs
     t = client.get(f"/contracts/{rec['id']}/treaty", headers=w["ch"]).json()
-    assert t["can_edit"] is False and t["can_edit_programmes"] is True
+    assert t["can_edit"] is True
 
 
 def test_an_uploaded_treaty_is_read_for_its_clauses_and_rules(w, monkeypatch):
@@ -873,11 +873,10 @@ def test_the_lead_reinsurer_signs_on_its_link_and_the_treaty_goes_live(w, sent):
     acc = client.get(f"/contracts/{cid}/reinsurer-access", headers=w["ch"]).json()
     assert acc["signing"]["can_request"] is True
 
-    # Munich's plain link carries no signature box.
+    # The carrier's signature asked every reinsurer to sign: Munich's link
+    # now carries its signature box too.
     ((t_m, h_m),) = _links_for(w, cid, sent, [w["c_munich"]])
-    assert client.get(f"/treaty-view/{t_m}", headers=h_m).json()["signature"] is None
-    assert client.post(f"/treaty-view/{t_m}/sign", headers=h_m, json={
-        "signer_name": "Mia", "consent": True}).status_code == 403
+    assert client.get(f"/treaty-view/{t_m}", headers=h_m).json()["signature"]["can_sign"] is True
 
     r = client.post(f"/contracts/{cid}/reinsurer-access", headers=w["ch"],
                     json={"contact_ids": [w["c_swiss"]], "sign": True})
@@ -894,8 +893,13 @@ def test_the_lead_reinsurer_signs_on_its_link_and_the_treaty_goes_live(w, sent):
     r = client.post(f"/treaty-view/{token}/sign", headers=h, json={
         "signer_name": "Sam Swiss", "signer_title": "Underwriter", "consent": True})
     assert r.status_code == 200, r.text
-    assert r.json()["in_force"] is True
+    # The lead has signed; Munich has not, so it is not in force yet.
+    assert r.json()["in_force"] is False
     assert r.json()["view"]["signature"]["signed"]["name"] == "Sam Swiss"
+    r = client.post(f"/treaty-view/{t_m}/sign", headers=h_m, json={
+        "signer_name": "Mia", "consent": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["in_force"] is True              # every reinsurer has signed
 
     rec = client.get(f"/contracts/{cid}", headers=w["ch"]).json()
     assert rec["lifecycle"] == "active"
@@ -1013,3 +1017,67 @@ def test_a_stop_loss_basis_lists_only_the_terms_its_measure_uses(monkeypatch):
     am = tb.schedule(None, c, {"treaty_type": "stop_loss",
                                "terms": {"measure": "amount"}, "layers": [layer]})
     assert {t["term"] for t in am["terms"]} == {"attachment_amount", "limit_amount"}
+
+
+def test_a_draft_treaty_is_sent_to_every_reinsurer_to_approve(w, monkeypatch):
+    got = []
+    monkeypatch.setattr(treaty_routes, "_send_link_email",
+                        lambda s, link, c, token, code, **kw:
+                        got.append((link.party_id, kw.get("kind"))) or True)
+    cid = _create(w).json()["id"]                       # Swiss lead, Munich
+    r = client.post(f"/contracts/{cid}/send-for-approval", headers=w["ch"])
+    assert r.status_code == 200, r.text
+    assert {pid for pid, _ in got} == {w["swiss"], w["munich"]}
+    assert {k for _, k in got} == {"approve"}
+    assert r.json()["missing"] == [] and len(r.json()["sent"]) == 2
+    # Only a draft goes out for approval.
+    _set_state(cid, "agreed")
+    assert client.post(f"/contracts/{cid}/send-for-approval",
+                       headers=w["ch"]).status_code == 409
+
+
+def test_once_the_carrier_signs_the_reinsurers_are_asked_to_sign(w, monkeypatch):
+    got = []
+    monkeypatch.setattr(treaty_routes, "_send_link_email",
+                        lambda s, link, c, token, code, **kw:
+                        got.append((link.party_id, kw.get("sign"))) or True)
+    cid = _carrier_signed(w)
+    r = client.post(f"/contracts/{cid}/sign", headers=w["ch"], json={"signer_name": "Dana"})
+    assert r.status_code == 200, r.text
+    assert {pid for pid, sign in got if sign} == {w["swiss"], w["munich"]}
+    assert len(r.json()["signing_requested"]) == 2
+
+
+def test_a_new_treaty_goes_to_every_reinsurer_for_approval(w, monkeypatch):
+    got = []
+    monkeypatch.setattr(treaty_routes, "_send_link_email",
+                        lambda s, link, c, token, code, **kw:
+                        got.append((link.party_id, kw.get("kind"))) or True)
+    r = _create(w)
+    assert r.status_code == 200, r.text
+    assert r.json()["lifecycle"] == "draft"
+    assert {pid for pid, k in got if k == "approve"} == {w["swiss"], w["munich"]}
+    assert len(r.json()["approval_sent"]["sent"]) == 2
+
+
+def test_a_treaty_is_in_force_only_once_every_reinsurer_signed(w, sent):
+    cid = _carrier_signed(w)                    # Swiss lead, Munich
+    client.post(f"/contracts/{cid}/sign", headers=w["ch"], json={"signer_name": "Dana"})
+    last = {lid: (token, code) for lid, token, code in sent}   # the newest URL per link
+    links = {}
+    for lid, (token, code) in last.items():
+        with SessionLocal() as s:
+            pid = s.get(treaty_routes.ReinsurerAccessLink, lid).party_id
+        links[pid] = (token, _unlock(token, code))
+    t, h = links[w["swiss"]]
+    r = client.post(f"/treaty-view/{t}/sign", headers=h,
+                    json={"signer_name": "Sam", "consent": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["in_force"] is False and "Munich" in r.json()["blocked_by"]
+    assert client.get(f"/contracts/{cid}", headers=w["ch"]).json()["lifecycle"] != "active"
+    t, h = links[w["munich"]]
+    r = client.post(f"/treaty-view/{t}/sign", headers=h,
+                    json={"signer_name": "Mia", "consent": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["in_force"] is True
+    assert client.get(f"/contracts/{cid}", headers=w["ch"]).json()["lifecycle"] == "active"

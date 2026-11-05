@@ -9,7 +9,9 @@
  *
  * Confirming makes each term a dated version from the effective date (source
  * Endorsement, linked to this document) and puts its clauses among the
- * treaty's. Confirming again replaces what it applied before.
+ * treaty's. Confirming again replaces what it applied before — and needs the
+ * reinsurers' approval again: its terms and rules are used only once every
+ * reinsurer on the treaty has approved it (EndorsementApprovalCard).
  */
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -25,6 +27,7 @@ import {
 import {
   DEFAULT_PROFIT, DEFAULT_SCALE, ProfitCommissionEditor, SlidingScaleEditor, profitText, scaleText,
 } from "../components/treaty/CommissionEditors";
+import { EndorsementApprovalCard } from "../components/treaty/EndorsementApprovalCard";
 import { fmtDate, fmtStamp } from "../utils/date";
 
 const key = (t: { term: string; layer: number | null }) => `${t.term}:${t.layer ?? ""}`;
@@ -117,7 +120,8 @@ export default function TreatyEndorsementReview() {
         + (nr ? `, giving ${nr} rule${nr === 1 ? "" : "s"} checked on the reinsurance bordereau from that date.`
               : ".")
         + (others ? ` It also changes ${others} other term${others === 1 ? "" : "s"} — see `
-                    + "“Its other changes” below." : ""));
+                    + "“Its other changes” below." : "")
+        + " Send it for approval: it is used once every reinsurer has approved and signed it.");
     } catch (e) {
       const fe = fieldErrors(e);
       setErr(Object.values(fe.errors).join(" ") || fe.message);
@@ -175,7 +179,8 @@ export default function TreatyEndorsementReview() {
         )}
         {rec.document.drafted_here && (
           <div className="note" style={{ marginBottom: 14 }}>
-            Drafted in Kavachio — its changes were applied to the treaty when it was made.
+            Drafted in Kavachio — its changes were set when it was made. They are used once every
+            reinsurer has approved and signed it.
           </div>
         )}
         {rec.review && (
@@ -188,6 +193,7 @@ export default function TreatyEndorsementReview() {
             {rec.review.clauses.length} clause{rec.review.clauses.length === 1 ? "" : "s"} added.
           </div>
         )}
+        <EndorsementApprovalCard contractId={cid} rec={rec} onChange={seed} />
         {rec.document.validation.status !== "valid" && (
           <div className="note warn" style={{ marginBottom: 14 }}>
             {rec.document.validation.label}. Enter its changes and clauses by hand below.

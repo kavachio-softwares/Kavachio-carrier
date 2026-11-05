@@ -261,6 +261,9 @@ def _doc_dict(d: ContractDocument, names: Optional[dict] = None) -> dict:
         # and applied, or drafted in Kavachio (applied when it was made).
         "endorsement_applied": d.kind == "endorsement"
                                and bool(ex.get("review") or ex.get("endorsement_number")),
+        # Where it stands with the reinsurers — used only once all approved.
+        "endorsement_approval": (((ex.get("approval") or {}).get("status") or "draft")
+                                 if d.kind == "endorsement" else None),
         "satisfies_reference": d.satisfies_reference,
         "effective_from": str(d.effective_from) if d.effective_from else None,
         # The signed copy, as opposed to a draft. Reported from outside — see
@@ -1284,6 +1287,11 @@ def _allowed_actions(c: Contract, missing: list[str],
     carrier_voice = _speaks_for_carrier(p)
     unsigned = ["carrier", "counterparty"] if unsigned is None else unsigned
     my_side = "counterparty" if is_broker else "carrier"
+    # A treaty is agreed only by every reinsurer approving it on its link
+    # (treaty_routes.send_treaty_for_approval) — never by the carrier settling
+    # it alone. So no skip, no self-acceptance, and no signing a draft.
+    treaty = (c.contract_type or "") == "insurer_reinsurer"
+    sign_states = ("agreed", "signed") if treaty else ("draft", "agreed", "signed")
 
     return {
         # The carrier revises while the ball is with it — including after the
@@ -1339,11 +1347,11 @@ def _allowed_actions(c: Contract, missing: list[str],
         # review" is not the answer to it. Offering it there was a button that
         # 409'd with "a pending contract's terms have already been out".
         "skip_review": (is_carrier and not blocked and state == "draft"
-                        and not signed_copy_due),
+                        and not signed_copy_due and not treaty),
         # An uploaded contract's way up to the carrier admin. It has no terms to
         # negotiate and no broker to ask, so it does not go out for review — it
         # goes to the one person who can accept it on the carrier's behalf.
-        "submit_for_approval": (is_carrier and not blocked
+        "submit_for_approval": (is_carrier and not blocked and not treaty
                                 and state == "draft" and _is_uploaded(c)),
         # …and the admin's answer to it. Review and accept, in one act: there is
         # no signature to give on a contract that was executed before it got
@@ -1403,7 +1411,7 @@ def _allowed_actions(c: Contract, missing: list[str],
         # sign it": the screen said yes and the API said no, and nothing on
         # either told you which was wrong. An uploaded contract is accepted
         # (accept_contract), never signed.
-        "sign": (state in ("draft", "agreed", "signed")
+        "sign": (state in sign_states
                  and my_side in unsigned
                  and (not is_broker or "carrier" not in unsigned)
                  and (not is_broker or broker_voice)
@@ -1414,7 +1422,7 @@ def _allowed_actions(c: Contract, missing: list[str],
         # since a reinsurer has no seat here. Still a signing act, and still
         # the carrier's word, so it is the carrier admin's too.
         "record_signature": (is_carrier and carrier_voice
-                             and state in ("draft", "agreed", "signed")
+                             and state in sign_states
                              and "counterparty" in unsigned and has_wording),
         "terminate": state in ("active", "expired") and is_carrier,
         # renewal_gate: expired or terminated, or active within the renewal
@@ -2128,7 +2136,15 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
             _store_authored_clauses(s, c, authored_sections)
             s.commit()
         _notify_contract_raised(s, c, p)
-        return _record(s, c, p=p)
+        # A treaty goes to its reinsurers to approve the moment it exists:
+        # nothing is agreed, and the carrier signs nothing, until they all have.
+        sent = None
+        if is_treaty and treaty_clean and _effective_lifecycle(c) == "draft":
+            sent = tr.send_on_create(s, c, p)
+        rec = _record(s, c, p=p)
+        if sent is not None:
+            rec["approval_sent"] = sent
+        return rec
 
 
 
@@ -3162,6 +3178,10 @@ def submit_for_approval(contract_id: int, body: AcceptNote = AcceptNote(),
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
         state = _effective_lifecycle(c)
+        if (c.contract_type or "") == "insurer_reinsurer":
+            raise HTTPException(409, "a treaty's terms are agreed by its reinsurers, not settled here. "
+                     "Send it to them for approval — once every reinsurer has "
+                     "approved, it is agreed and you can sign it.")
         if state != "draft":
             raise HTTPException(
                 409, f"only a draft goes up for approval — this one is {state}.")
@@ -3371,6 +3391,10 @@ def skip_review(contract_id: int, body: ReviewRequest = ReviewRequest(),
         # a second press would have written a second `review_skipped` row and
         # reported success. A skip is a fact about a contract, not a setting,
         # and it happens once.
+        if (c.contract_type or "") == "insurer_reinsurer":
+            raise HTTPException(409, "a treaty's terms are agreed by its reinsurers, not settled here. "
+                     "Send it to them for approval — once every reinsurer has "
+                     "approved, it is agreed and you can sign it.")
         state = _effective_lifecycle(c)
         if state != "draft":
             raise HTTPException(
@@ -4041,6 +4065,12 @@ def settle_signatures(s, c: Contract) -> tuple[list, bool, Optional[str]]:
         if missing:
             blocked_by = ("it defers to document(s) nobody has supplied: "
                           + ", ".join(missing))
+        # A treaty is in force once EVERY reinsurer on it has signed its lines,
+        # not only the lead whose signature is the counterparty's.
+        if not blocked_by and (c.contract_type or "") == "insurer_reinsurer":
+            waiting = _reinsurers_yet_to_sign(s, c)
+            if waiting:
+                blocked_by = "waiting for " + ", ".join(waiting) + " to sign"
         # Signed by both, but something else genuinely in the way: recorded as
         # signed and said plainly, rather than activated with a hole in it or
         # refused after the signature was given.
@@ -4049,6 +4079,19 @@ def settle_signatures(s, c: Contract) -> tuple[list, bool, Optional[str]]:
         if not blocked_by:
             _move(c, "active")
     return sigs, both, blocked_by
+
+
+def _reinsurers_yet_to_sign(s, c: Contract) -> list[str]:
+    """The reinsurers on a treaty that have not signed their lines yet."""
+    import treaty_placement as tp
+    import treaty_routes
+    signed = set(tp.live_signatures(s, c))
+    if c.broker_party_id and "counterparty" not in _unsigned_sides(_signatures(s, c.id)):
+        signed.add(c.broker_party_id)
+    waiting = sorted(treaty_routes._panel_party_ids(s, c) - signed)
+    names = {pt.id: pt.legal_name for pt in
+             s.query(Party).filter(Party.id.in_(waiting or [0]))}
+    return [names.get(pid) or f"reinsurer {pid}" for pid in waiting]
 
 
 def counterparty_signing_block(s, c: Contract) -> Optional[str]:
@@ -4117,6 +4160,10 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
             raise HTTPException(
                 409, f"this contract is {state} and is not waiting on a "
                      f"signature.")
+        if state == "draft" and (c.contract_type or "") == "insurer_reinsurer":
+            raise HTTPException(409, "a treaty's terms are agreed by its reinsurers, not settled here. "
+                     "Send it to them for approval — once every reinsurer has "
+                     "approved, it is agreed and you can sign it.")
 
         # Counted exactly as _record counts it (see `has_wording` there),
         # blob included. The two had drifted: the record said an old contract
@@ -4255,6 +4302,11 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
         if side == "carrier":
             _log_contract_event(s, c, p, "contract_signed_off")
             _notify_contract_signed(s, c, p, author)
+            # A treaty: every reinsurer that may now sign its lines is sent
+            # its signing link — the carrier signs first, then they do.
+            if (c.contract_type or "") == "insurer_reinsurer" and not both:
+                import treaty_routes
+                rec["signing_requested"] = treaty_routes.ask_reinsurers_to_sign(s, c, p)
         rec["signature_note"] = (
             f"Signed for the {'carrier' if side == 'carrier' else 'counterparty'}"
             f" by {name}."

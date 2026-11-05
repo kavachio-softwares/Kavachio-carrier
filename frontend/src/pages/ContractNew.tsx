@@ -41,8 +41,7 @@ import {
   EMPTY_TREATY, TreatyEditor, firstTreatyError, treatyForSave,
 } from "../components/treaty/TreatyEditor";
 import {
-  getTreaty, getTreatyTypes, type TreatyInput, type TreatyTypeSpec,
-} from "../api/treaty";
+  getTreaty, getTreatyTypes, type TreatyInput, type TreatyTypeSpec, approvalNotice, type ApprovalSent } from "../api/treaty";
 import { FLOW_PARAM, ProgrammeFlowBar } from "../components/ProgrammeFlowBar";
 import { SubSteps } from "../components/FlowStepper";
 import { InfoTip } from "../components/InfoTip";
@@ -56,6 +55,7 @@ import {
   chipEdits, readTermMove, restoreChips, type TermMove,
 } from "../utils/wordingEdits";
 import { currentMga, getTenantBrand } from "../auth";
+import { counterpartyWord } from "../utils/counterparty";
 import {
   createContract, createEndorsement, downloadDraft, fieldErrors, getContract,
   getContractTypes, getCounterparties, listContracts, previewEndorsement,
@@ -438,6 +438,8 @@ export default function ContractNew() {
   // condition the server does not impose.
   const gatedOnProgramme = spec?.counterparty_must_be_on_programme ?? true;
   const isTreaty = typeKey === "insurer_reinsurer";
+  // The other side in words: "reinsurer" on a treaty, else "broker".
+  const party = counterpartyWord(typeKey);
   // ON A TREATY THE PANEL NAMES THE REINSURER. The lead — the starred share
   // on the first layer — is who the contract is with, so The basics does not
   // ask for it separately: two pickers for one fact drift apart, and a
@@ -636,7 +638,7 @@ export default function ContractNew() {
       desc: "The lines printed under each signature on the document." },
     { heading: "How the two blocks sit on the page",
       desc: "Kavachio can place them for you, or you can drop them where your "
-            + "broker's lawyers want them." },
+            + `${party}'s lawyers want them.` },
     { heading: "What you are about to create",
       desc: "None of the three ways to finish makes the contract active: both "
             + "signatures do that, on its own signature page." },
@@ -934,7 +936,9 @@ export default function ContractNew() {
         }
         return;
       }
-      nav(`/contracts/${created.id}`);
+      nav(`/contracts/${created.id}`, isTreaty
+        ? { state: approvalNotice((created as { approval_sent?: ApprovalSent }).approval_sent) }
+        : undefined);
     } catch (err) {
       const { message: m, errors: fe } = fieldErrors(err);
       // The treaty structure's own objections point at its own boxes, so they
@@ -1096,7 +1100,7 @@ export default function ContractNew() {
     { key: "sum", heading: "Summary",
       desc: "What this contract adds up to, before you read it." },
     { key: "doc", heading: "The document",
-      desc: "Exactly what the broker will open, with every live value filled in." },
+      desc: `Exactly what the ${party} will open, with every live value filled in.` },
     { key: "checks", heading: "Rules to be set up",
       desc: "From the moment both parties sign. These do nothing until the "
             + "contract is created and active — a draft never checks anything." },
@@ -1146,7 +1150,7 @@ export default function ContractNew() {
           <div className="note" style={{ marginTop: 12 }}>
             <b>Which contract is this the renewal of?</b>
             <p style={{ margin: "4px 0 10px" }}>
-              Its terms, limits and wording come across so the broker only
+              Its terms, limits and wording come across so the {party} only
               reads the numbers that moved. Last year's contract is not
               touched — everything already checked against it keeps its
               meaning.
@@ -1931,15 +1935,16 @@ export default function ContractNew() {
                 {kind !== "endorse" && (
                 <p className="muted" style={{ fontSize: 12.5, lineHeight: 1.6,
                      textAlign: "center", margin: "16px auto 0", maxWidth: 640 }}>
-                  {isTreaty ? "Already signed with the reinsurers?"
+                  {isTreaty ? "Already have the treaty document?"
                             : "Already have a contract somebody else drafted?"}{" "}
                   <span className="linkish" role="button" onClick={() => setUploading(true)}>
-                    {isTreaty ? "Upload the signed treaty instead →"
+                    {isTreaty ? "Upload the treaty instead →"
                               : "Upload the signed PDF instead →"}
                   </span>
                   <InfoTip text={isTreaty
-                    ? "Record its terms and who holds it, attach the signed copy, "
-                      + "and it goes straight in force — no review and no signing here."
+                    ? "Kavachio reads its terms and who holds it from the document. "
+                      + "It is saved as a draft and goes to the reinsurers to approve, "
+                      + "then both sides sign."
                     : "Kavachio reads the terms out of it and builds "
                       + "what checks it can — but a contract written from its own "
                       + "terms never has a clause the checks cannot read."} />
@@ -2215,7 +2220,7 @@ export default function ContractNew() {
                   <div className="note">
                     <b>Kavachio adds the signature page.</b> Both signature
                     blocks are placed on it for you. You can move them in the
-                    next step if your broker's lawyers want them somewhere else.
+                    next step if your {party}'s lawyers want them somewhere else.
                   </div>
                 </>
               )}
@@ -2341,17 +2346,19 @@ export default function ContractNew() {
               ]}
               title={SIGN_PARTS[signPane].heading}
               desc={SIGN_PARTS[signPane].desc}
-              foot={`${signPane + 1} of 3 · nothing is emailed from this step`}
+              foot={`${signPane + 1} of 3 · ${isTreaty
+                ? "the reinsurers are emailed only when you create it"
+                : "nothing is emailed from this step"}`}
               nextLabel={signPane < 2
                 ? "Next →"
                 : busy === "create" ? "Creating…"
-                // A reinsurer has no seat in Kavachio, so a treaty has nobody
-                // to review it — the server refuses "review" for one. Its
-                // road is settle-and-sign.
-                : isTreaty ? "Create and sign it now" : "Create and send it for review"}
+                // A treaty's terms are agreed by its reinsurers on their
+                // private links: it is saved as a draft and sent to every one
+                // of them for approval. The carrier signs only once all agree.
+                : isTreaty ? "Create and send for approval" : "Create and send it for review"}
               nextDisabled={signPane === 2 && (!!busy || blocksUnplaced)}
               onNext={() => (signPane < 2 ? setSignPane(signPane + 1)
-                             : create(isTreaty ? "sign" : "review"))}
+                             : create(isTreaty ? "draft" : "review"))}
             >
               {/* What the signature page ASKS FOR. Every contract used to get
                   the same four lines because they were written into the
@@ -2535,14 +2542,12 @@ export default function ContractNew() {
                       ?? `the ${spec?.counterparty_label?.toLowerCase() ?? "broker"}`;
                     if (isTreaty) return (
                       <ul className="hint" style={{ paddingLeft: 18, listStyle: "disc" }}>
-                        <li><b>Save as a draft</b> — only you can see it. You can
-                          still change the structure.</li>
-                        <li><b>Create and sign it now</b> — the terms are settled
-                          and you sign the treaty for the carrier, on the document.</li>
-                        <li>{other} is then emailed it with a one-time code and
-                          signs on the same document — no Kavachio account needed.
-                          Their signature puts it in force, and both get the
-                          signed copy.</li>
+                        <li><b>Create and send for approval</b> — it is saved as a
+                          draft and every reinsurer on it is emailed its private
+                          link, where it approves or asks for changes — no
+                          Kavachio account needed.</li>
+                        <li>Once every reinsurer has approved, you sign it for the
+                          carrier, then each reinsurer signs. That puts it in force.</li>
                       </ul>
                     );
                     return (
@@ -2559,6 +2564,7 @@ export default function ContractNew() {
                       </ul>
                     );
                   })()}
+                  {!isTreaty && (
                   <div className="rowacts">
                     <button className="btn" type="button"
                             disabled={!!busy || blocksUnplaced}
@@ -2570,15 +2576,14 @@ export default function ContractNew() {
                         counterparty has no seat here to read it. Kept out of the
                         primary slot: not asking the other side is the exception,
                         and it should not be the easiest button to hit. */}
-                    {!isTreaty && (
                     <button className="btn" type="button"
                             disabled={!!busy || blocksUnplaced}
                             onClick={() => create("sign")}>
                       <PenLine size={14} />
                       {busy === "create" ? "Creating…" : "Create and sign it now"}
                     </button>
-                    )}
                   </div>
+                  )}
                 </>
               )}
             </WizardStep>

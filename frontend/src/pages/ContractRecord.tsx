@@ -37,12 +37,13 @@ import { ClauseText } from "../components/ClauseText";
 import { WordingEditor } from "../components/WordingEditor";
 import { TreatyRecordPanel } from "../components/treaty/TreatyRecordPanel";
 import TreatySetupNudge from "../components/treaty/TreatySetupNudge";
-import { ReinsurerSharing } from "../components/treaty/ReinsurerSharing";
+import { ReinsurerSharing, TreatyFlowCard } from "../components/treaty/ReinsurerSharing";
 import { fmtDate, fmtStamp } from "../utils/date";
 import { describeChecks } from "../utils/contractChecks";
 import { TermDurationField, useTermDuration } from "../components/TermDuration";
 import { EXPIRY_FIELD, INCEPTION_FIELD, type TermSpec } from "../utils/term";
 import { documentsEmptyMessage } from "../utils/documentsEmpty";
+import { counterpartyWord, type CounterpartyWord } from "../utils/counterparty";
 import { Dropzone } from "../components/Dropzone";
 import { FileDrop, MultiFileDrop } from "../components/ui/FileDrop";
 
@@ -101,38 +102,41 @@ const DATE_FIELD_LABEL: Record<string, string> = {
   expiry_dt: "End date",
 };
 
-const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
+// `note` takes the other side's name: "broker" on a broker contract,
+// "reinsurer" on a treaty (utils/counterparty).
+const STATE: Record<Lifecycle, { label: string; cls: string;
+                                 note: (party: CounterpartyWord) => string }> = {
   // The note is filled in per contract — a carrier's own draft has nobody to
   // submit it to, so "not submitted" would be describing a queue that does not
   // exist for it. See draftNote().
-  draft: { label: "Draft", cls: "b-mut", note: "" },
+  draft: { label: "Draft", cls: "b-mut", note: () => "" },
   pending: { label: "Awaiting review", cls: "b-warn",
-             note: "One of your users raised this. It is with the carrier, "
-                   + "who reads the terms before they go to the broker." },
+             note: p => "One of your users raised this. It is with the carrier, "
+                   + `who reads the terms before they go to the ${p}.` },
   in_review: { label: "Out for review", cls: "b-warn",
-               note: "The terms are with the broker. They can agree them or "
+               note: p => `The terms are with the ${p}. They can agree them or `
                    + "ask for changes." },
   changes_requested: { label: "Changes requested", cls: "b-warn",
-                       note: "The broker has pushed back. Revise the terms and "
+                       note: p => `The ${p} has pushed back. Revise the terms and `
                            + "send them again." },
   // The note here says only that the terms are settled — WHO signs next is
   // not a property of the state. The carrier signs first and the broker after
   // it, and a contract stays `agreed` through both, so the sentence is
   // finished per contract from whose_turn. See turnNote().
   agreed: { label: "Terms agreed", cls: "b-ok",
-            note: "Both sides have settled the terms." },
+            note: () => "Both sides have settled the terms." },
   signed: { label: "Signed", cls: "b-ok",
-            note: "The broker signed and returned it. It is with the carrier "
+            note: p => `The ${p} signed and returned it. It is with the carrier `
                 + "to place and activate." },
   active: { label: "Active", cls: "b-ok",
-            note: "Signed by both sides and running. Bordereaux can be "
+            note: () => "Signed by both sides and running. Bordereaux can be "
                 + "produced against it." },
   expired: { label: "Expired", cls: "b-mut",
-             note: "Its term has run out. Renew it into a successor." },
+             note: () => "Its term has run out. Renew it into a successor." },
   terminated: { label: "Terminated", cls: "b-crit",
-                note: "Ended early. Nothing more can be attached to it." },
+                note: () => "Ended early. Nothing more can be attached to it." },
   superseded: { label: "Superseded", cls: "b-mut",
-                note: "Replaced by a renewal." },
+                note: () => "Replaced by a renewal." },
 };
 
 const DOC_KIND: Record<ContractDocumentKind, { label: string; blurb: string }> = {
@@ -236,7 +240,7 @@ function ContractRecordView() {
   // document that failed to attach is reported here — where it can be retried —
   // rather than as a failure to create a contract that in fact exists.
   const navState = useLocation().state as
-    { notice?: string; acceptError?: string } | null;
+    { notice?: string; noticeOk?: boolean; acceptError?: string } | null;
   const handoff = navState?.notice;
   // A renewal is accepted automatically once created; if that was refused,
   // the reason arrives here and is shown with "Make it active".
@@ -654,6 +658,8 @@ function ContractRecordView() {
   }
 
   const st = STATE[rec.lifecycle] ?? STATE.draft;
+  // Who is across the table, in words: "reinsurer" on a treaty, else "broker".
+  const party = counterpartyWord(rec.contract_type);
   // A draft belongs to the carrier — there is no other kind now — so it means
   // one thing: written down, not live, still editable.
   const draftNote = "Not live yet — nothing is checked against it. Its terms "
@@ -662,8 +668,8 @@ function ContractRecordView() {
   // whole signing round — carrier first, then broker — so the state cannot
   // say this and the record's own whose_turn has to.
   const turnNote = rec.lifecycle !== "agreed" ? ""
-    : rec.whose_turn === "carrier" ? " The carrier signs next, then the broker."
-    : rec.whose_turn === "broker" ? " The carrier has signed. The broker signs next, and returns it."
+    : rec.whose_turn === "carrier" ? ` The carrier signs next, then the ${party}.`
+    : rec.whose_turn === "broker" ? ` The carrier has signed. The ${party} signs next, and returns it.`
     : "";
   const a = rec.actions;
   const docs = rec.documents ?? [];
@@ -1392,7 +1398,8 @@ function ContractRecordView() {
         {/* A refused automatic accept (acceptError) is shown in the
             "Make it active" card on the Summary tab, not here. */}
         {handoff && !note && (
-          <div className="note warn" style={{ marginBottom: 14, maxWidth: 700 }}>{handoff}</div>
+          <div className={`note ${navState?.noticeOk ? "ok" : "warn"}`}
+               style={{ marginBottom: 14, maxWidth: 700 }}>{handoff}</div>
         )}
 
         {/* ── whose move it is ──
@@ -1401,7 +1408,7 @@ function ContractRecordView() {
         {rec.whose_turn && (
           <div className="note" style={{ marginBottom: 14 }}>
             {rec.whose_turn === "broker"
-              ? <>Waiting on <b>{rec.counterparty?.name ?? "the broker"}</b>{" "}
+              ? <>Waiting on <b>{rec.counterparty?.name ?? `the ${party}`}</b>{" "}
                   {rec.lifecycle === "in_review"
                     ? "to agree these terms or ask for changes."
                     : "to answer."}</>
@@ -1532,10 +1539,14 @@ function ContractRecordView() {
           <TreatyBasisPanel contractId={id} />
         )}
         {curTab === "access" && isTreaty && (
-          <ReinsurerSharing contractId={id} />
+          <ReinsurerSharing contractId={id} lifecycle={rec.lifecycle} />
         )}
 
         {curTab === "summary" && (<>
+        {/* ── where the treaty stands with its reinsurers ── */}
+        {isTreaty && rec.treaty?.has_structure && !isBrokerSeat() && (
+          <TreatyFlowCard contractId={id} lifecycle={rec.lifecycle} />
+        )}
         {/* ── the treaty, at a glance ── */}
         {isTreaty && rec.treaty && (
           <div className="card" style={{ marginBottom: 14 }}>
@@ -1860,7 +1871,7 @@ function ContractRecordView() {
           <div className="card-h">
             <span className={`badge ${st.cls}`}><span className="d" />{st.label}</span>
             <span className="sub">
-              {rec.lifecycle === "draft" ? draftNote : st.note + turnNote}
+              {rec.lifecycle === "draft" ? draftNote : st.note(party) + turnNote}
             </span>
           </div>
           <div style={{ padding: "16px 20px" }}>
@@ -1878,12 +1889,13 @@ function ContractRecordView() {
               && ["draft", "agreed", "signed", "active"].includes(rec.lifecycle) && (
               <div className="note" style={{ marginTop: 0, marginBottom: 10 }}>
                 {rec.lifecycle === "draft" ? (
-                  <><b>Get the reinsurers&apos; approval.</b> Share the treaty
-                    with them under{" "}
+                  <><b>Draft — waiting for the reinsurers&apos; approval.</b> Send
+                    it to them with <b>Send to reinsurers for approval</b> (above, or
+                    under{" "}
                     <span className="linkish" role="button"
-                          onClick={() => setTab("access")}>Reinsurer access</span>
-                    {" "}— each approves on its private link, and once every one
-                    has, the terms are agreed.
+                          onClick={() => setTab("access")}>Reinsurer access</span>)
+                    {" "}— each approves or asks for changes on its private link, and
+                    once every one has approved, the terms are agreed.
                     {rec.treaty?.approvals && (
                       <> <b>{rec.treaty.approvals.approved} of {rec.treaty.approvals.total}</b>{" "}
                         approved so far
@@ -1891,20 +1903,18 @@ function ContractRecordView() {
                           ? `, ${rec.treaty.approvals.changes_requested} asked for a change`
                           : ""}.</>
                     )}{" "}
-                    You can also settle the terms yourself. Either way you then
-                    sign the treaty for the carrier, and the lead reinsurer is
-                    emailed it to sign on the same document.</>
+                    Then you sign the treaty for the carrier, and each reinsurer
+                    is emailed it to sign.</>
                 ) : rec.lifecycle === "agreed" ? (
-                  <><b>Terms settled.</b>{" "}
+                  <><b>Every reinsurer approved — terms agreed.</b>{" "}
                     {rec.unsigned_sides.includes("carrier")
                       ? "Sign for the carrier first, on the document. "
                       : "The carrier has signed. "}
-                    The lead reinsurer is then emailed the treaty with a one-time
-                    code and signs it on the same document, as a broker signs a
-                    contract — both get the sealed signed copy.</>
+                    Once you sign, each reinsurer is emailed its link with a
+                    one-time code to sign — no Kavachio account needed.</>
                 ) : rec.lifecycle === "signed" ? (
-                  <>Both sides have signed. It becomes active once nothing else
-                    is in the way.</>
+                  <>You and the lead reinsurer have signed. It is in force once
+                    every reinsurer on the treaty has signed its lines.</>
                 ) : (
                   <><b>In force.</b> The reinsurers can see their own lines
                     through a private link.{" "}
@@ -2154,21 +2164,30 @@ function ContractRecordView() {
                   // flow. It still has to say something true.
                   ? (a.carrier_admin_seat
                       ? "This was sent up to you before it went anywhere. Send "
-                        + "the terms to the broker, accept it as it stands, or "
+                        + `the terms to the ${party}, accept it as it stands, or `
                         + "send it back for a change."
                       : "They read it before it goes any further. They can send "
-                        + "the terms to the broker, accept it, or send it back "
+                        + `the terms to the ${party}, accept it, or send it back `
                         + "to you for a change.")
                   // The authored road, at its one gate: the broker has agreed.
+                  // A treaty's terms are settled by its reinsurers' approval
+                  // or by the carrier itself, so it does not say who agreed.
                   : (a.carrier_admin_seat
-                      ? "The broker has agreed these terms, so nothing is "
+                      ? (isTreaty ? "These terms are settled"
+                                  : "The broker has agreed these terms")
+                        + ", so nothing is "
                         + "moving any more. Read them and sign — a contract "
                         + "becomes active when both sides have signed, and the "
                         + "carrier signs first."
-                      : "The broker has agreed the terms. The carrier "
+                      : (isTreaty ? "The terms are settled"
+                                  : "The broker has agreed the terms")
+                        + ". The carrier "
                         + "signs for the company, so it sits with them now. "
-                        + "Once they have, you can build the bordereau setup "
-                        + "on it.")}
+                        + (isTreaty
+                            ? "Once they have, you can set up its reinsurance "
+                              + "bordereau."
+                            : "Once they have, you can build the bordereau setup "
+                              + "on it."))}
                 </>)}
               </div>
             )}
@@ -2213,7 +2232,7 @@ function ContractRecordView() {
                   <MessagesSquare size={13} />
                   {rec.lifecycle === "changes_requested"
                     ? "Send revised terms"
-                    : "Send to broker for review"}
+                    : `Send to ${party} for review`}
                 </button>
               )}
               {/* The carrier admin's third answer: not yet. Last in the row —
@@ -2388,8 +2407,7 @@ function ContractRecordView() {
                   send it up again — nobody re-raises the contract.
                 </p>
                 <p style={{ margin: "6px 0 0" }}>
-                  Nothing has gone to the {rec.contract_type === "insurer_reinsurer"
-                    ? "reinsurer" : "broker"}, and nothing will until you send
+                  Nothing has gone to the {party}, and nothing will until you send
                   it out yourself.
                 </p>
                 <div className="field" style={{ marginTop: 12, marginBottom: 0 }}>
@@ -2423,8 +2441,7 @@ function ContractRecordView() {
                 <b>Agree these terms without sending them out</b>
                 <p style={{ margin: "6px 0 0" }}>
                   The contract goes straight to signing. The
-                  {" "}{rec.contract_type === "insurer_reinsurer"
-                        ? "reinsurer" : "broker"}{" "}
+                  {" "}{party}{" "}
                   is not asked to read the terms first and gets no chance to
                   push back on them — so this is for a contract with nothing
                   left to agree, or one whose counterparty has no seat in
@@ -2675,7 +2692,7 @@ function ContractRecordView() {
                       + "as it is until the renewal is accepted and active."
                     : "This creates a draft for the next term with this contract's "
                       + "terms and wording copied in. Review and edit it, then send "
-                      + "it to the broker. This contract stays as it is until the "
+                      + `it to the ${party}. This contract stays as it is until the `
                       + "renewal is signed and active."}
                 </p>
                 <div className="grid g-3" style={{ marginTop: 12 }}>
@@ -3077,8 +3094,8 @@ function ContractRecordView() {
                     // belongs.
                     <div className="limgrp" key={g.key}>
                       <div className="limgrp-h">
-                        <div className="sub-h">{g.label}</div>
-                        <div className="hint">{g.sub}</div>
+                        <div className="sub-h">{(isTreaty && g.treaty_label) || g.label}</div>
+                        <div className="hint">{(isTreaty && g.treaty_sub) || g.sub}</div>
                       </div>
                       <div className="limgrp-b">
                       <div className="lim lim-h">
@@ -3092,7 +3109,8 @@ function ContractRecordView() {
                         return (
                           <div className="lim" key={l.name}>
                             <div className="lq">
-                              <b>{l.question}</b><span>{l.sub}</span>
+                              <b>{(isTreaty && l.treaty?.question) || l.question}</b>
+                              <span>{(isTreaty && l.treaty?.sub) || l.sub}</span>
                             </div>
                             <div className={l.kind === "choice" ? "" : "unit"}>
                               {l.choices ? (
@@ -3420,7 +3438,7 @@ function ContractRecordView() {
                           <tr key={g.key}>
                             <td colSpan={3} style={{ textAlign: "left",
                                  background: "var(--p-surface-2)" }}>
-                              <span className="sub-h">{g.label}</span>
+                              <span className="sub-h">{(isTreaty && g.treaty_label) || g.label}</span>
                             </td>
                           </tr>
                           {rows.map(l => {
@@ -3428,8 +3446,8 @@ function ContractRecordView() {
                             return (
                               <tr key={l.name}>
                                 <td>
-                                  <b>{l.question}</b>
-                                  <div className="sub">{l.sub}</div>
+                                  <b>{(isTreaty && l.treaty?.question) || l.question}</b>
+                                  <div className="sub">{(isTreaty && l.treaty?.sub) || l.sub}</div>
                                 </td>
                                 <td className="mono">
                                   {String(e.value)}{l.unit ? ` ${l.unit}` : ""}
@@ -3983,7 +4001,17 @@ function ContractRecordView() {
                         </div>
                         {unreviewed && <div className="flag warn">Not reviewed — its terms are not applied</div>}
                         {isTreaty && d.kind === "endorsement" && d.endorsement_applied && (
-                          <div className="flag ok">✓ Terms and clauses applied</div>)}
+                          d.endorsement_approval === "approved"
+                            ? <div className="flag warn">Approved by every reinsurer — sign it</div>
+                            : d.endorsement_approval === "carrier_signed"
+                            ? <div className="flag warn">Signed by you — waiting for the reinsurers to sign</div>
+                            : d.endorsement_approval === "in_force"
+                            ? <div className="flag ok">✓ Signed by every reinsurer — in force</div>
+                            : d.endorsement_approval === "pending"
+                              ? <div className="flag warn">Waiting for the reinsurers to approve</div>
+                              : d.endorsement_approval === "changes_requested"
+                                ? <div className="flag crit">A reinsurer asked for changes</div>
+                                : <div className="flag warn">Not sent for approval — not used yet</div>)}
                         {unreadable && <div className="flag crit">⚠ {d.validation!.label}</div>}
                       </div>
                       <div className="doc-acts">

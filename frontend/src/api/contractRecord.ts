@@ -183,6 +183,9 @@ export type ContractDocument = {
   party_id?: number | null;
   /** A treaty endorsement whose terms and clauses have been applied. */
   endorsement_applied?: boolean;
+  /** A treaty endorsement's approval by the reinsurers. */
+  endorsement_approval?: "draft" | "pending" | "changes_requested" | "approved"
+    | "carrier_signed" | "in_force" | null;
   uploaded_by?: string | null;
   validation?: DocumentValidation | null;
 };

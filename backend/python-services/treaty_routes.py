@@ -629,8 +629,14 @@ def get_basis(contract_id: int, p: Principal = Depends(current_principal)):
     _cr()._require_carrier(p)
     with SessionLocal() as s:
         c = _treaty_contract(s, p, contract_id)
-        return {**tb.schedule(s, c), "can_edit": _cr()._speaks_for_carrier(p)
-                and _state(c) not in CLOSED_STATES}
+        return _basis_out(s, c, _cr()._speaks_for_carrier(p)
+                          and _state(c) not in CLOSED_STATES)
+
+
+def _basis_out(s, c: Contract, can_edit: bool) -> dict:
+    import treaty_basis as tb
+    return {**tb.schedule(s, c), "can_edit": can_edit,
+            "approval": tb.approval_summary(s, c)}
 
 
 class BasisIn(BaseModel):
@@ -661,7 +667,7 @@ def add_basis(contract_id: int, body: BasisIn, p: Principal = Depends(current_pr
         except tb.BasisError as e:
             raise HTTPException(400, {"message": str(e), "errors": e.errors})
         s.commit()
-        return {**tb.schedule(s, c), "can_edit": True}
+        return _basis_out(s, c, True)
 
 
 @router.delete("/contracts/{contract_id}/basis/{entry_id}")
@@ -672,10 +678,36 @@ def remove_basis(contract_id: int, entry_id: int, p: Principal = Depends(current
     cr._assert_speaks_for_carrier(p, "change a treaty's calculation basis")
     with SessionLocal() as s:
         c = _treaty_contract(s, p, contract_id)
-        if not tb.remove(s, c, entry_id, p.user_id):
-            raise HTTPException(404, "no such change on this treaty")
+        try:
+            if not tb.remove(s, c, entry_id, p.user_id):
+                raise HTTPException(404, "no such change on this treaty")
+        except tb.BasisError as e:
+            raise HTTPException(409, {"message": str(e), "errors": e.errors})
         s.commit()
-        return {**tb.schedule(s, c), "can_edit": True}
+        return _basis_out(s, c, True)
+
+
+@router.post("/contracts/{contract_id}/basis/send-for-approval")
+def send_basis_for_approval(contract_id: int, p: Principal = Depends(current_principal)):
+    """Send every change on the Calculation basis not yet approved to every
+    reinsurer on the treaty. None of them is used until every one approves."""
+    import treaty_basis as tb
+    cr = _cr()
+    cr._require_carrier(p)
+    cr._assert_speaks_for_carrier(p, "send changes to the reinsurers")
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        if _state(c) in CLOSED_STATES:
+            raise HTTPException(409, f"this treaty is {_state(c)}")
+        who = s.get(AppUser, p.user_id) if p.user_id else None
+        try:
+            rd = tb.send_round(s, c, who=(who.full_name or who.email) if who else None,
+                               user_id=p.user_id, email=getattr(who, "email", None))
+        except tb.BasisError as e:
+            raise HTTPException(409, {"message": str(e), "errors": e.errors})
+        out = _send_to_panel(s, c, p, kind="basis", basis_round=rd)
+        s.refresh(c)
+        return {**_basis_out(s, c, True), "sent": out["sent"], "missing": out["missing"]}
 
 
 class EvaluateIn(BaseModel):
@@ -785,8 +817,8 @@ def record_party_signature(contract_id: int, party_id: int, body: PartySignature
                 document_id=d.id,
                 note=f"Signed on paper for {getattr(party, 'legal_name', 'the lead')}; "
                      f"recorded against {d.filename}."))
-            s.flush()
-            cr.settle_signatures(s, c)
+        s.flush()
+        cr.settle_signatures(s, c)
         s.commit()
         out = tp.placement(s, c)
         out["can_record"] = {str(pid): tp.signing_block(s, c, pid)
@@ -1239,13 +1271,13 @@ async def upload_signed_treaty(
     reading: Optional[str] = Form(default=None),
     p: Principal = Depends(current_principal),
 ):
-    """Bring in a treaty that was ALREADY SIGNED, outside Kavachio.
+    """Bring in a treaty from its document.
 
-    Nothing to negotiate and nobody to sign: the reinsurers signed the slip on
-    paper. So this is the uploaded road every contract already has, in one
-    request — the contract is recorded with its structure, the signed copy is
-    attached as the executed wording, and it is accepted (by the carrier admin,
-    which puts it in force) or sent up to them (by a carrier user).
+    The contract is recorded with its structure and the document attached as
+    its wording — and it stays a DRAFT. Uploading is not the reinsurers
+    agreeing: it goes the same road as a treaty written here — sent to every
+    reinsurer to approve, agreed once they all have, then signed by the
+    carrier and by each reinsurer, which puts it in force.
 
     The file is read for its clauses and for the conditions the ceded
     business must meet (treaty_wording.read_clauses_and_rules) — not for the
@@ -1304,11 +1336,9 @@ async def upload_signed_treaty(
                 pass
         s.commit()
     await run_in_threadpool(_read_clauses_and_rules, cid)
-    # The uploaded road from here: the carrier admin's acceptance puts it in
-    # force; a carrier user's sends it up to them.
-    return await run_in_threadpool(
-        cr.submit_for_approval, cid,
-        cr.AcceptNote(note="Signed treaty uploaded."), p)
+    # A draft: nothing is agreed until every reinsurer has approved it.
+    out = await run_in_threadpool(cr.get_contract, cid, p)
+    return {**out, "approval_sent": rec.get("approval_sent")}
 
 
 def _protected_bordereaux(s, tid: int, programme_ids: set[int]) -> dict:
@@ -1662,13 +1692,63 @@ def _issue(s, link: ReinsurerAccessLink, c: Contract, p: Principal) -> tuple[str
 
 
 def _send_link_email(s, link: ReinsurerAccessLink, c: Contract,
-                     token: str, code: str, *, sign: bool = False) -> bool:
+                     token: str, code: str, *, sign: bool = False,
+                     kind: str = "share", endorsement=None,
+                     basis_round: Optional[dict] = None) -> bool:
     import treaty_email
     carrier = _carrier_name(s, c)
     party = s.get(Party, link.party_id)
     summ = tt.summarise(load_structure(s, c.id, names=False))
     term = (f"{c.inception_dt:%d %b %Y} to {c.expiry_dt:%d %b %Y}"
             if c.inception_dt and c.expiry_dt else "")
+    if kind == "approve":
+        html = treaty_email.approve_email(
+            link=_view_link(token), name=link.name, carrier=carrier,
+            reinsurer=getattr(party, "legal_name", "") or "",
+            treaty=c.name or f"Treaty {c.id}",
+            type_label=(summ or {}).get("type_label") or "Reinsurance treaty",
+            term=term, expires=f"{_aware(link.expires_at):%d %b %Y}", otp=code)
+        return treaty_email.safe_send(
+            link.email, f"{carrier} asks you to approve {c.name or 'a treaty'}", html,
+            text=(f"{carrier} asks you to approve a treaty on Kavachio. Open "
+                  f"{_view_link(token)}, enter the code {code}, and approve it "
+                  f"or ask for changes there."))
+    if kind == "basis" and basis_round is not None:
+        import treaty_basis as tb
+        changes = tb.describe(s, c, basis_round.get("term_ids") or [])
+        html = treaty_email.basis_email(
+            link=_view_link(token), name=link.name, carrier=carrier,
+            reinsurer=getattr(party, "legal_name", "") or "",
+            treaty=c.name or f"Treaty {c.id}",
+            changes=[f"{ch['label']}: {ch['value']} from "
+                     f"{dt.date.fromisoformat(ch['effective_from']):%d %b %Y}"
+                     for ch in changes],
+            expires=f"{_aware(link.expires_at):%d %b %Y}", otp=code)
+        return treaty_email.safe_send(
+            link.email, f"{carrier} asks you to approve changes to {c.name or 'a treaty'}",
+            html, text=(f"{carrier} asks you to approve changes to a treaty's terms on "
+                        f"Kavachio. Open {_view_link(token)}, enter the code {code}, "
+                        f"and approve them or ask for changes there."))
+    if kind in ("endorsement", "endorsement_sign") and endorsement is not None:
+        import treaty_endorsement as te
+        ex = endorsement.extracted if isinstance(endorsement.extracted, dict) else {}
+        eff = endorsement.effective_from
+        html = treaty_email.endorsement_email(
+            link=_view_link(token), name=link.name, carrier=carrier,
+            reinsurer=getattr(party, "legal_name", "") or "",
+            treaty=c.name or f"Treaty {c.id}", endorsement=te.label(endorsement),
+            effective=f"{eff:%d %b %Y}" if eff else "",
+            changes=[ch.get("label") or ch.get("question") or ch.get("term") or ""
+                     for ch in ((ex.get("review") or {}).get("changes")
+                                or ex.get("changes") or []) if isinstance(ch, dict)],
+            expires=f"{_aware(link.expires_at):%d %b %Y}", otp=code,
+            sign=kind == "endorsement_sign")
+        verb = "sign" if kind == "endorsement_sign" else "approve"
+        return treaty_email.safe_send(
+            link.email, f"{carrier} asks you to {verb} {te.label(endorsement)} "
+                        f"to {c.name or 'a treaty'}", html,
+            text=(f"{carrier} asks you to {verb} an endorsement on Kavachio. Open "
+                  f"{_view_link(token)}, enter the code {code}, and {verb} it there."))
     if sign:
         html = treaty_email.sign_email(
             link=_view_link(token), name=link.name, carrier=carrier,
@@ -1759,6 +1839,208 @@ class ShareIn(BaseModel):
     sign: bool = False
 
 
+def _open_link(s, c: Contract, contact: PartyContact, p: Principal):
+    """This contact's link on the treaty — made if there is none — with a
+    fresh token and code. (link, token, code)"""
+    link = (s.query(ReinsurerAccessLink)
+            .filter(ReinsurerAccessLink.contract_id == c.id,
+                    ReinsurerAccessLink.contact_id == contact.id)
+            .order_by(ReinsurerAccessLink.id.desc()).first())
+    if link is None:
+        link = ReinsurerAccessLink(
+            contract_id=c.id, tenant_id=c.tenant_id,
+            party_id=contact.party_id, contact_id=contact.id,
+            name=contact.full_name or contact.email,
+            email=contact.email.strip(),
+            token_hash=secrets.token_hex(16),  # replaced by _issue
+            expires_at=_link_expiry(c))
+        s.add(link)
+        s.flush()
+    # The contact's details as they are NOW — a corrected email
+    # address must be where the new link goes.
+    link.name = contact.full_name or contact.email
+    link.email = contact.email.strip()
+    token, code = _issue(s, link, c, p)
+    return link, token, code
+
+
+def _panel_contacts(s, c: Contract) -> tuple[list[PartyContact], list[str]]:
+    """Every person with an email at every reinsurer on the treaty, and the
+    reinsurers that have nobody to send to."""
+    panel = _panel_party_ids(s, c)
+    people = (s.query(PartyContact)
+              .filter(PartyContact.party_id.in_(panel or {0}))
+              .order_by(PartyContact.id).all())
+    reach = [k for k in people if (k.email or "").strip()]
+    covered = {k.party_id for k in reach}
+    names = {pt.id: pt.legal_name for pt in
+             s.query(Party).filter(Party.id.in_(panel or {0}))}
+    return reach, [names.get(pid) or f"Reinsurer {pid}"
+                   for pid in sorted(panel - covered)]
+
+
+def _send_to_panel(s, c: Contract, p: Principal, *, kind: str,
+                   endorsement=None, basis_round: Optional[dict] = None) -> dict:
+    """A fresh link to every person at every reinsurer on the treaty, emailed
+    as `kind` ('approve' or 'endorsement'). Commits."""
+    cr = _cr()
+    people, missing = _panel_contacts(s, c)
+    if not people:
+        raise HTTPException(409, {
+            "message": "None of the reinsurers on this treaty has a contact "
+                       "with an email address. Add one on the reinsurer first.",
+            "missing": missing})
+    sends = []
+    for contact in people:
+        link, token, code = _open_link(s, c, contact, p)
+        _event(s, link, {"endorsement": "endorsement_sent",
+                         "endorsement_sign": "endorsement_sign_requested",
+                         "basis": "basis_sent"}.get(kind, "approval_requested"),
+               actor=cr._principal_email_for(s, p),
+               detail=({"document_id": endorsement.id} if endorsement is not None
+                       else {"round": basis_round.get("id")} if basis_round else None))
+        sends.append((link, token, code))
+    s.commit()
+    sent = []
+    for link, token, code in sends:
+        ok = _send_link_email(s, link, c, token, code, kind=kind, endorsement=endorsement,
+                              basis_round=basis_round)
+        sent.append({"link_id": link.id, "name": link.name, "email": link.email,
+                     "emailed": ok})
+    return {"sent": sent, "missing": missing}
+
+
+def ask_reinsurers_to_sign(s, c: Contract, p: Principal) -> list[dict]:
+    """Once the carrier has signed: a signing link to every person at every
+    reinsurer that may now sign its lines. Commits. Never raises — the
+    carrier's signature stands even if an email does not go."""
+    import treaty_placement as tp
+    try:
+        people, _missing = _panel_contacts(s, c)
+        sends = []
+        for contact in people:
+            if tp.signing_block(s, c, contact.party_id):
+                continue
+            link, token, code = _open_link(s, c, contact, p)
+            link.sign_requested_at = _now()
+            link.sign_requested_by_user_id = p.user_id
+            _event(s, link, "sign_requested", actor=_cr()._principal_email_for(s, p))
+            sends.append((link, token, code))
+        s.commit()
+        return [{"name": lk.name, "email": lk.email,
+                 "emailed": _send_link_email(s, lk, c, t, k, sign=True)}
+                for lk, t, k in sends]
+    except Exception as e:  # noqa: BLE001
+        s.rollback()
+        log.warning("treaty %s: could not ask the reinsurers to sign: %s", c.id, e)
+        return []
+
+
+def send_on_create(s, c: Contract, p: Principal) -> dict:
+    """A new treaty, straight to every reinsurer on it for approval. Never
+    fails the create: a reinsurer with no contact is reported, and the carrier
+    can send again from the treaty once one is added."""
+    try:
+        if not _cr()._speaks_for_carrier(p):
+            return {"sent": [], "missing": [], "error": "Only the carrier admin sends a treaty out."}
+        return _send_to_panel(s, c, p, kind="approve")
+    except HTTPException as e:
+        s.rollback()
+        d = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
+        return {"sent": [], "missing": d.get("missing") or [], "error": d.get("message")}
+    except Exception as e:  # noqa: BLE001
+        s.rollback()
+        log.warning("treaty %s: could not send for approval on create: %s", c.id, e)
+        return {"sent": [], "missing": [], "error": "It could not be sent just now — send it again from the treaty."}
+
+
+@router.post("/contracts/{contract_id}/send-for-approval")
+def send_treaty_for_approval(contract_id: int, p: Principal = Depends(current_principal)):
+    """Send the draft treaty to every reinsurer on it, to approve or ask for
+    changes. Each answers on its own private link; once every one has approved
+    THESE terms the treaty is agreed and the carrier signs."""
+    cr = _cr()
+    cr._require_carrier(p)
+    cr._assert_speaks_for_carrier(p, "send a treaty to its reinsurers")
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        if _state(c) not in ("draft", "pending"):
+            raise HTTPException(409, f"this treaty is {_state(c)} — only a draft "
+                                     f"is sent for approval")
+        if s.get(Treaty, c.id) is None:
+            raise HTTPException(409, "set up the treaty structure before "
+                                     "sending it")
+        out = _send_to_panel(s, c, p, kind="approve")
+    return {**out, **reinsurer_access(contract_id, p)}
+
+
+@router.post("/contracts/{contract_id}/endorsements/{doc_id}/send-for-approval")
+def send_endorsement_for_approval(contract_id: int, doc_id: int,
+                                  p: Principal = Depends(current_principal)):
+    """Send an endorsement to every reinsurer on the treaty. Its terms are not
+    used until every one of them has approved it."""
+    import treaty_endorsement as te
+    cr = _cr()
+    cr._require_carrier(p)
+    cr._assert_speaks_for_carrier(p, "send an endorsement to the reinsurers")
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        if _state(c) in CLOSED_STATES:
+            raise HTTPException(409, f"this treaty is {_state(c)}")
+        d = _endorsement_doc(s, c, doc_id)
+        ex = d.extracted if isinstance(d.extracted, dict) else {}
+        if not (ex.get("review") or ex.get("endorsement_number")):
+            raise HTTPException(409, "Check what the endorsement changes and "
+                                     "apply it first, then send it for approval.")
+        if te.approval_status(s, c, d)["status"] in ("approved", "carrier_signed", "in_force"):
+            raise HTTPException(409, "Every reinsurer has already approved this "
+                                     "endorsement.")
+        who = s.get(AppUser, p.user_id) if p.user_id else None
+        te.mark_sent(s, c, d, who=(who.full_name or who.email) if who else None,
+                     user_id=p.user_id, email=getattr(who, "email", None))
+        out = _send_to_panel(s, c, p, kind="endorsement", endorsement=d)
+        s.refresh(d)
+        res = te.payload(s, c, d)
+        res["can_edit"] = True
+    return {**res, "sent": out["sent"], "missing": out["missing"]}
+
+
+class EndorsementSignIn(BaseModel):
+    signer_name: str
+    signer_title: Optional[str] = None
+
+
+@router.post("/contracts/{contract_id}/endorsements/{doc_id}/sign")
+def sign_endorsement(contract_id: int, doc_id: int, body: EndorsementSignIn,
+                     p: Principal = Depends(current_principal)):
+    """The carrier signs an endorsement every reinsurer approved — and each
+    reinsurer is then sent its link to sign. It is in force once they all have."""
+    import treaty_endorsement as te
+    cr = _cr()
+    cr._require_carrier(p)
+    cr._assert_speaks_for_carrier(p, "sign an endorsement")
+    name = (body.signer_name or "").strip()
+    if not name:
+        raise HTTPException(400, {"message": "Type your name to sign.",
+                                  "errors": {"signer_name": "required"}})
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        if _state(c) in CLOSED_STATES:
+            raise HTTPException(409, f"this treaty is {_state(c)}")
+        d = _endorsement_doc(s, c, doc_id)
+        try:
+            te.carrier_sign(s, c, d, name=name,
+                            title=(body.signer_title or "").strip() or None,
+                            user_id=p.user_id)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        out = _send_to_panel(s, c, p, kind="endorsement_sign", endorsement=d)
+        s.refresh(d)
+        res = te.payload(s, c, d)
+        res["can_edit"] = True
+    return {**res, "sent": out["sent"], "missing": out["missing"]}
+
+
 @router.post("/contracts/{contract_id}/reinsurer-access")
 def share_with_reinsurer(contract_id: int, body: ShareIn,
                          p: Principal = Depends(current_principal)):
@@ -1797,25 +2079,7 @@ def share_with_reinsurer(contract_id: int, body: ShareIn,
             if not (contact.email or "").strip():
                 raise HTTPException(400, f"{contact.full_name} has no email "
                                          f"address to send the link to")
-            link = (s.query(ReinsurerAccessLink)
-                    .filter(ReinsurerAccessLink.contract_id == c.id,
-                            ReinsurerAccessLink.contact_id == contact.id)
-                    .order_by(ReinsurerAccessLink.id.desc()).first())
-            if link is None:
-                link = ReinsurerAccessLink(
-                    contract_id=c.id, tenant_id=c.tenant_id,
-                    party_id=contact.party_id, contact_id=contact.id,
-                    name=contact.full_name or contact.email,
-                    email=contact.email.strip(),
-                    token_hash=secrets.token_hex(16),  # replaced by _issue
-                    expires_at=_link_expiry(c))
-                s.add(link)
-                s.flush()
-            # The contact's details as they are NOW — a corrected email
-            # address must be where the new link goes.
-            link.name = contact.full_name or contact.email
-            link.email = contact.email.strip()
-            token, code = _issue(s, link, c, p)
+            link, token, code = _open_link(s, c, contact, p)
             if body.sign:
                 link.sign_requested_at = _now()
                 link.sign_requested_by_user_id = p.user_id
@@ -2014,12 +2278,296 @@ def _public_view(s, link: ReinsurerAccessLink, c: Contract) -> dict:
         "approval": _my_approval(s, c, link, st),
         # Whether they were asked to sign it here, and where that stands.
         "signature": _my_signature(s, c, link),
+        # Endorsements sent to the reinsurers, and this reinsurer's answer.
+        "endorsements": _my_endorsements(s, c, link),
+        # Changes to the calculation basis sent to the reinsurers.
+        "basis_changes": _my_basis_changes(s, c, link),
         # Its reinsurance bordereaux for this treaty (ceded_routes).
         "statements": __import__("ceded_routes").statements_for_link(
             s, c.id, link.party_id),
         "expires_at": _iso(link.expires_at),
         "expires_on": _aware(link.expires_at).date().isoformat(),
     }
+
+
+class ApproveIn(BaseModel):
+    signer_name: str
+    signer_title: Optional[str] = None
+
+
+class ChangeIn(BaseModel):
+    note: str
+
+
+def _my_endorsements(s, c: Contract, link: ReinsurerAccessLink) -> list[dict]:
+    """Each endorsement sent to the reinsurers: what it changes, from when,
+    where it stands, and this reinsurer's own answer."""
+    import treaty_endorsement as te
+    out = []
+    for d in (s.query(ContractDocument)
+              .filter(ContractDocument.contract_id == c.id,
+                      ContractDocument.kind == "endorsement",
+                      ContractDocument.is_active.is_(True))
+              .order_by(ContractDocument.id.desc())):
+        a = te._approval(d)
+        if a.get("status") in (None, "draft"):
+            continue
+        ex = d.extracted if isinstance(d.extracted, dict) else {}
+        review = ex.get("review") or {}
+        mine = (a.get("answers") or {}).get(str(link.party_id)) or {}
+        changes = []
+        for ch in (review.get("changes") or ex.get("changes") or []):
+            if not isinstance(ch, dict):
+                continue
+            # Read from a document: label + value. Drafted here: question,
+            # from and to, already worded.
+            changes.append({"label": ch.get("label") or ch.get("question") or ch.get("term"),
+                            "from": ch.get("from"),
+                            "to": ch.get("to") if "to" in ch else ch.get("value")})
+        out.append({
+            "id": d.id, "label": te.label(d),
+            "effective_from": d.effective_from.isoformat() if d.effective_from else None,
+            "status": a.get("status"), "status_label": te.APPROVAL_LABEL.get(a.get("status"), a.get("status")),
+            "sent_at": a.get("sent_at"),
+            "changes": changes,
+            "clauses": [cl.get("title") for cl in review.get("clauses") or [] if isinstance(cl, dict)],
+            "has_file": bool(d.blob_ref or d.blob),
+            "my_answer": ({"status": mine.get("status"), "signer_name": mine.get("signer_name"),
+                           "note": mine.get("note"), "at": mine.get("at")} if mine else None),
+            "can_answer": a.get("status") == "pending",
+            "carrier_signed": bool(a.get("carrier_signature")),
+            "my_signature": ((a.get("signatures") or {}).get(str(link.party_id))),
+            "can_sign": (a.get("status") == "carrier_signed"
+                         and str(link.party_id) not in (a.get("signatures") or {})),
+        })
+    return out
+
+
+def _my_basis_changes(s, c: Contract, link: ReinsurerAccessLink) -> list[dict]:
+    """Each request to change the treaty's terms sent to the reinsurers —
+    newest first — with this reinsurer's own answer."""
+    import treaty_basis as tb
+    out = []
+    for rd in reversed(tb._rounds(c)):
+        if rd.get("status") == "superseded":
+            continue
+        mine = (rd.get("answers") or {}).get(str(link.party_id)) or {}
+        out.append({
+            "id": rd.get("id"), "status": rd.get("status"),
+            "status_label": tb.BASIS_APPROVAL_LABEL.get(rd.get("status"), rd.get("status")),
+            "sent_at": rd.get("sent_at"),
+            "changes": [ch for ch in tb.describe(s, c, rd.get("term_ids") or [])
+                        if not ch["removed"]],
+            "my_answer": ({"status": mine.get("status"), "signer_name": mine.get("signer_name"),
+                           "note": mine.get("note"), "at": mine.get("at")} if mine else None),
+            "can_answer": rd.get("status") == "pending",
+        })
+    return out
+
+
+def _answer_basis(token: str, session: str, request: Request, round_id: int,
+                  status: str, *, signer_name: Optional[str], note: Optional[str]) -> dict:
+    import treaty_basis as tb
+    with SessionLocal() as s:
+        link, c = _require_open(s, token, session)
+        fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        ip = _client_ip(fwd or (request.client.host if request.client else None))
+        try:
+            rd = tb.answer_round(s, c, round_id, party_id=link.party_id, status=status,
+                                 signer_name=signer_name, note=note, email=link.email, ip=ip)
+        except LookupError:
+            raise HTTPException(404, "change request not found")
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        _event(s, link, f"basis_{status}", actor=link.email, request=request,
+               detail={"round": round_id, "signer_name": signer_name, "note": note})
+        s.commit()
+        party = s.get(Party, link.party_id)
+        org = getattr(party, "legal_name", None) or link.name
+        agreed = rd.get("status") == "approved"
+        try:
+            from audit import log_activity
+            log_activity(c.tenant_id, link.email,
+                         "treaty_basis_approved_by_reinsurer" if status == "approved"
+                         else "treaty_basis_changes_requested_by_reinsurer",
+                         target=f"contract:{c.id}",
+                         details={"contract_id": c.id, "round": round_id, "reinsurer": org,
+                                  "signer_name": signer_name, "note": note,
+                                  "in_force": agreed})
+        except Exception:  # noqa: BLE001
+            pass
+        _tell_carrier(s, c, rd.get("sent_by_user_id"), reinsurer=org,
+                      what=f"the changes to {c.name or 'the treaty'}'s terms",
+                      approved=status == "approved", note=note, all_approved=agreed,
+                      path=f"/contracts/{c.id}?tab=basis")
+        return {"ok": True, "agreed": agreed, "in_force": agreed,
+                "view": _public_view(s, link, c)}
+
+
+@public_router.post("/{token}/basis/{round_id}/approve")
+def approve_basis(token: str, round_id: int, body: ApproveIn, request: Request,
+                  session: str = Query("", alias="session"),
+                  x_treaty_session: str = Header(default="")):
+    """A reinsurer approves changes to the treaty's terms on its private link."""
+    name = (body.signer_name or "").strip()
+    if not name:
+        raise HTTPException(400, "Type your name to approve.")
+    return _answer_basis(token, _session_value(x_treaty_session, session), request,
+                         round_id, "approved", signer_name=name, note=None)
+
+
+@public_router.post("/{token}/basis/{round_id}/request-changes")
+def request_basis_changes(token: str, round_id: int, body: ChangeIn, request: Request,
+                          session: str = Query("", alias="session"),
+                          x_treaty_session: str = Header(default="")):
+    note = (body.note or "").strip()
+    if not note:
+        raise HTTPException(400, "Say what should change.")
+    with SessionLocal() as s:
+        who = _by_token(s, token).name
+    return _answer_basis(token, _session_value(x_treaty_session, session), request,
+                         round_id, "changes_requested", signer_name=who, note=note)
+
+
+def _tell_carrier(s, c: Contract, user_id: Optional[int], *, reinsurer: str,
+                  what: str, approved: bool, note: Optional[str],
+                  all_approved: bool, path: str) -> None:
+    """Email the person who sent it that a reinsurer answered. Never fails
+    the answer."""
+    try:
+        import os
+        import treaty_email
+        u = s.get(AppUser, user_id) if user_id else None
+        if u is None or not (u.email or "").strip():
+            return
+        base = (os.getenv("APP_BASE_URL", "http://localhost:5173") or "").rstrip("/")
+        verb = "approved" if approved else "asked for changes to"
+        html = treaty_email.answer_email(
+            name=u.full_name or u.email, reinsurer=reinsurer, what=what,
+            approved=approved, note=note, link=f"{base}{path}",
+            all_approved=all_approved)
+        treaty_email.safe_send(
+            u.email, f"{reinsurer} {verb} {what}", html,
+            text=f"{reinsurer} {verb} {what}." + (f" Their note: {note}" if note else ""))
+    except Exception as e:  # noqa: BLE001
+        log.warning("treaty %s: could not tell the carrier of an answer: %s", c.id, e)
+
+
+def _answer_endorsement(token: str, session: str, request: Request, doc_id: int,
+                        status: str, *, signer_name: Optional[str],
+                        note: Optional[str]) -> dict:
+    import treaty_endorsement as te
+    with SessionLocal() as s:
+        link, c = _require_open(s, token, session)
+        d = s.get(ContractDocument, doc_id)
+        if d is None or d.contract_id != c.id or d.kind != "endorsement" or not d.is_active:
+            raise HTTPException(404, "endorsement not found")
+        fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        ip = _client_ip(fwd or (request.client.host if request.client else None))
+        try:
+            a = te.answer(s, c, d, party_id=link.party_id, status=status,
+                          signer_name=signer_name, note=note, email=link.email, ip=ip)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        _event(s, link, f"endorsement_{status}", actor=link.email, request=request,
+               detail={"document_id": d.id, "signer_name": signer_name, "note": note})
+        s.commit()
+        party = s.get(Party, link.party_id)
+        org = getattr(party, "legal_name", None) or link.name
+        try:
+            from audit import log_activity
+            log_activity(c.tenant_id, link.email,
+                         "treaty_endorsement_approved_by_reinsurer" if status == "approved"
+                         else "treaty_endorsement_changes_requested_by_reinsurer",
+                         target=f"contract:{c.id}",
+                         details={"contract_id": c.id, "document_id": d.id,
+                                  "endorsement": te.label(d), "reinsurer": org,
+                                  "signer_name": signer_name, "note": note,
+                                  "in_force": a.get("status") == "approved"})
+        except Exception:  # noqa: BLE001
+            pass
+        _tell_carrier(s, c, a.get("sent_by_user_id"), reinsurer=org,
+                      what=f"{te.label(d)} to {c.name or 'the treaty'}",
+                      approved=status == "approved", note=note,
+                      all_approved=a.get("status") == "approved",
+                      path=f"/contracts/{c.id}/endorsements/{d.id}")
+        return {"ok": True, "agreed": a.get("status") == "approved", "in_force": False,
+                "view": _public_view(s, link, c)}
+
+
+@public_router.post("/{token}/endorsements/{doc_id}/approve")
+def approve_endorsement(token: str, doc_id: int, body: ApproveIn, request: Request,
+                        session: str = Query("", alias="session"),
+                        x_treaty_session: str = Header(default="")):
+    """A reinsurer approves an endorsement on its private link."""
+    name = (body.signer_name or "").strip()
+    if not name:
+        raise HTTPException(400, "Type your name to approve.")
+    return _answer_endorsement(token, _session_value(x_treaty_session, session), request,
+                               doc_id, "approved", signer_name=name, note=None)
+
+
+@public_router.post("/{token}/endorsements/{doc_id}/request-changes")
+def request_endorsement_changes(token: str, doc_id: int, body: ChangeIn, request: Request,
+                                session: str = Query("", alias="session"),
+                                x_treaty_session: str = Header(default="")):
+    note = (body.note or "").strip()
+    if not note:
+        raise HTTPException(400, "Say what should change.")
+    with SessionLocal() as s:
+        who = _by_token(s, token).name
+    return _answer_endorsement(token, _session_value(x_treaty_session, session), request,
+                               doc_id, "changes_requested", signer_name=who, note=note)
+
+
+class EndorsementLinkSignIn(BaseModel):
+    signer_name: str
+    signer_title: Optional[str] = None
+    consent: bool = False
+
+
+@public_router.post("/{token}/endorsements/{doc_id}/sign")
+def sign_endorsement_on_link(token: str, doc_id: int, body: EndorsementLinkSignIn,
+                             request: Request, session: str = Query("", alias="session"),
+                             x_treaty_session: str = Header(default="")):
+    """A reinsurer signs an endorsement on its private link, once every
+    reinsurer approved it and the carrier signed it. The last signature puts
+    it in force."""
+    import treaty_endorsement as te
+    name = (body.signer_name or "").strip()
+    if not name:
+        raise HTTPException(400, "Type your name to sign.")
+    if not body.consent:
+        raise HTTPException(400, "Tick the box to confirm you sign for your organisation.")
+    with SessionLocal() as s:
+        link, c = _require_open(s, token, _session_value(x_treaty_session, session))
+        d = s.get(ContractDocument, doc_id)
+        if d is None or d.contract_id != c.id or d.kind != "endorsement" or not d.is_active:
+            raise HTTPException(404, "endorsement not found")
+        fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        ip = _client_ip(fwd or (request.client.host if request.client else None))
+        try:
+            a = te.reinsurer_sign(s, c, d, party_id=link.party_id, name=name,
+                                  title=(body.signer_title or "").strip() or None,
+                                  email=link.email, ip=ip)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        _event(s, link, "endorsement_signed", actor=link.email, request=request,
+               detail={"document_id": d.id, "signer_name": name})
+        s.commit()
+        party = s.get(Party, link.party_id)
+        org = getattr(party, "legal_name", None) or link.name
+        in_force = a.get("status") == "in_force"
+        try:
+            from audit import log_activity
+            log_activity(c.tenant_id, link.email, "treaty_endorsement_signed_by_reinsurer",
+                         target=f"contract:{c.id}",
+                         details={"contract_id": c.id, "document_id": d.id,
+                                  "endorsement": te.label(d), "reinsurer": org,
+                                  "signer_name": name, "in_force": in_force})
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": True, "in_force": in_force, "view": _public_view(s, link, c)}
 
 
 def _my_approval(s, c: Contract, link: ReinsurerAccessLink,
@@ -2127,8 +2675,9 @@ def sign_treaty(token: str, body: SignIn, request: Request,
                 note=(f"Signed for {org or 'the reinsurer'} on the private treaty "
                       f"link sent to {link.email}, after the emailed code was "
                       f"entered" + (f" (IP {ip})" if ip else "") + ".")))
-            s.flush()
-            _sigs, both, blocked_by = cr.settle_signatures(s, c)
+        s.flush()
+        # Every reinsurer's signature may be the last one the treaty waits on.
+        _sigs, both, blocked_by = cr.settle_signatures(s, c)
         _event(s, link, "signed", actor=link.email, request=request,
                detail={"signer_name": name, "signer_title": title})
         s.commit()
@@ -2145,13 +2694,6 @@ def sign_treaty(token: str, body: SignIn, request: Request,
                 "blocked_by": blocked_by, "view": _public_view(s, link, c)}
 
 
-class ApproveIn(BaseModel):
-    signer_name: str
-    signer_title: Optional[str] = None
-
-
-class ChangeIn(BaseModel):
-    note: str
 
 
 def _answer(token: str, session: str, request: Request, status: str,
@@ -2199,6 +2741,9 @@ def _answer(token: str, session: str, request: Request, status: str,
                                   "note": note, "terms_agreed": settled})
         except Exception:  # noqa: BLE001 — the answer stands without the trail
             pass
+        _tell_carrier(s, c, link.sent_by_user_id, reinsurer=org or link.name,
+                      what=c.name or "the treaty", approved=status == "approved",
+                      note=note, all_approved=settled, path=f"/contracts/{c.id}")
         return {"ok": True, "terms_agreed": settled,
                 "view": _public_view(s, link, c)}
 
@@ -2361,7 +2906,11 @@ def treaty_view_document(token: str, document_id: int, request: Request,
         link, c = _require_open(s, token,
                                 _session_value(x_treaty_session, session))
         d = s.get(ContractDocument, document_id)
-        if (d is None or d.contract_id != c.id or d.kind != "contract"
+        import treaty_endorsement as te
+        sent_endorsement = (d is not None and d.kind == "endorsement"
+                            and te._approval(d).get("status") != "draft")
+        if (d is None or d.contract_id != c.id
+                or not (d.kind == "contract" or sent_endorsement)
                 or not d.is_active):
             raise HTTPException(404, "document not found")
         data = cr._doc_bytes(d)

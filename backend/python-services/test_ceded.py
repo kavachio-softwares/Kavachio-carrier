@@ -119,6 +119,79 @@ def _treaty(w, structure, name, *, setup=True, **setup_over):
     return cid
 
 
+def _approve_basis(w, cid):
+    """Send every change entered on the Calculation basis to the reinsurers,
+    and have every one approve — only then is it used."""
+    got = []
+    real = treaty_routes._send_link_email
+    treaty_routes._send_link_email = lambda s, link, c, token, code, **kw: (
+        got.append((token, code)) or True)
+    try:
+        r = client.post(f"/contracts/{cid}/basis/send-for-approval", headers=w["ch"])
+    finally:
+        treaty_routes._send_link_email = real
+    assert r.status_code == 200, r.text
+    rid = r.json()["approval"]["round"]["id"]
+    for token, code in got:
+        v = client.post(f"/treaty-view/{token}/verify", json={"code": code})
+        h = {"X-Treaty-Session": v.json()["session"]}
+        a = client.post(f"/treaty-view/{token}/basis/{rid}/approve",
+                        headers=h, json={"signer_name": "Approver"})
+        assert a.status_code in (200, 409), a.text
+    b = client.get(f"/contracts/{cid}/basis", headers=w["ch"]).json()
+    assert b["approval"]["unapproved"] == 0, b["approval"]
+    return b
+
+
+def _approve_endorsements(w, cid):
+    """Take every endorsement on the treaty that is not yet in force through
+    its whole road: sent to the reinsurers, approved by every one, signed by
+    the carrier, signed by every reinsurer — only then is it used."""
+    from db import ContractDocument
+    with SessionLocal() as s:
+        docs = [d.id for d in s.query(ContractDocument).filter(
+            ContractDocument.contract_id == cid, ContractDocument.kind == "endorsement",
+            ContractDocument.is_active.is_(True))
+            if ((d.extracted or {}).get("approval") or {}).get("status") != "in_force"]
+    for doc in docs:
+        got = []
+        real = treaty_routes._send_link_email
+        treaty_routes._send_link_email = lambda s, link, c, token, code, **kw: (
+            got.append((token, code)) or True)
+        try:
+            r = client.post(f"/contracts/{cid}/endorsements/{doc}/send-for-approval",
+                            headers=w["ch"])
+        finally:
+            treaty_routes._send_link_email = real
+        assert r.status_code == 200, r.text
+        for token, code in got:
+            v = client.post(f"/treaty-view/{token}/verify", json={"code": code})
+            h = {"X-Treaty-Session": v.json()["session"]}
+            a = client.post(f"/treaty-view/{token}/endorsements/{doc}/approve",
+                            headers=h, json={"signer_name": "Approver"})
+            # Two people at one reinsurer: the second finds it already answered.
+            assert a.status_code in (200, 409), a.text
+        assert client.get(f"/contracts/{cid}/endorsements/{doc}", headers=w["ch"]) \
+            .json()["approval"]["status"] == "approved"
+        got.clear()
+        treaty_routes._send_link_email = lambda s, link, c, token, code, **kw: (
+            got.append((token, code)) or True)
+        try:
+            r = client.post(f"/contracts/{cid}/endorsements/{doc}/sign",
+                            headers=w["ch"], json={"signer_name": "Carrier"})
+        finally:
+            treaty_routes._send_link_email = real
+        assert r.status_code == 200, r.text
+        for token, code in got:
+            v = client.post(f"/treaty-view/{token}/verify", json={"code": code})
+            h = {"X-Treaty-Session": v.json()["session"]}
+            a = client.post(f"/treaty-view/{token}/endorsements/{doc}/sign", headers=h,
+                            json={"signer_name": "Signer", "consent": True})
+            assert a.status_code in (200, 409), a.text
+        assert client.get(f"/contracts/{cid}/endorsements/{doc}", headers=w["ch"]) \
+            .json()["approval"]["status"] == "in_force"
+
+
 def _pdf(*pages: str) -> bytes:
     import fitz
     doc = fitz.open()
@@ -1143,19 +1216,23 @@ def test_a_term_changed_from_a_date_applies_from_that_date(w, mail):
     assert [(v["effective_from"], v["value"]) for v in cession["versions"]] == \
         [("2027-01-01", 40), ("2027-08-01", 25)]
 
+    pct = lambda cb: {ln["ceded_pct"] for ln in cb["lines"]}   # noqa: E731
+    # A draft: listed, not used, until every reinsurer approves it.
+    assert cession["versions"][1]["pending"] and cession["versions"][1]["approval"] == "draft"
+    sep = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                      json={"contract_id": cid, "period": "2027-09"}).json()
+    assert pct(sep) == {40}
+    _approve_basis(w, cid)
+
     jul = client.post("/reinsurance/bordereaux", headers=w["ch"],
                       json={"contract_id": cid, "period": "2027-07"}).json()
     sep = client.post("/reinsurance/bordereaux", headers=w["ch"],
                       json={"contract_id": cid, "period": "2027-09"}).json()
-    pct = lambda cb: {ln["ceded_pct"] for ln in cb["lines"]}   # noqa: E731
     assert pct(jul) == {40} and pct(sep) == {25}
 
-    # Removed: September goes back to 40%.
+    # Approved by every reinsurer: it stays — a new dated change moves it.
     entry = cession["versions"][1]["id"]
-    assert client.delete(f"/contracts/{cid}/basis/{entry}", headers=w["ch"]).status_code == 200
-    sep = client.post("/reinsurance/bordereaux", headers=w["ch"],
-                      json={"contract_id": cid, "period": "2027-09"}).json()
-    assert pct(sep) == {40}
+    assert client.delete(f"/contracts/{cid}/basis/{entry}", headers=w["ch"]).status_code == 409
 
 
 def test_sliding_scale_and_profit_commission_terms(w):
@@ -1192,7 +1269,9 @@ def test_sliding_scale_and_profit_commission_terms(w):
         "ceding_commission": 30_000}).json()
     assert ev["commission"] == 0 and ev["deficit_carried_forward"] == 15_000
 
-    # The provisional rate is charged on each line while the scale is in force.
+    # The provisional rate is charged on each line while the scale is in force
+    # — once every reinsurer has approved the changes.
+    _approve_basis(w, cid)
     with SessionLocal() as s:
         from db import Contract
         import treaty_routes
@@ -1235,6 +1314,11 @@ def test_an_endorsement_moves_the_calculation_basis_from_its_date(w, mail):
     assert (v["effective_from"], v["value"], v["source"], v["document_id"]) == \
         ("2027-07-01", 30, "endorsement", doc_id)
     assert v["note"] == "Endorsement 1"
+    # Not used until every reinsurer on the treaty has approved it.
+    assert v["pending"] is True
+    _approve_endorsements(w, cid)
+    b = client.get(f"/contracts/{cid}/basis", headers=w["ch"]).json()
+    assert next(t for t in b["terms"] if t["term"] == "cession_pct")["versions"][-1]["pending"] is False
 
     apr = client.post("/reinsurance/bordereaux", headers=w["ch"],
                       json={"contract_id": cid, "period": "2027-04"}).json()

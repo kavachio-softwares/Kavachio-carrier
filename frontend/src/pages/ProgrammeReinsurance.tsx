@@ -91,7 +91,7 @@ export default function ProgrammeReinsurance() {
           <div className="actions">
             <Link to="/programs" className="btn"><ArrowLeft size={14} /> Programmes</Link>
             <button className="btn" type="button" onClick={() => setUploading(true)}>
-              <Upload size={14} /> Upload signed treaty
+              <Upload size={14} /> Upload a treaty
             </button>
             <Link className="btn pri"
                   to={`/contracts/new?program_id=${pid}&type=insurer_reinsurer`}>

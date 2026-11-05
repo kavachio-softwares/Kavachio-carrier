@@ -29,7 +29,7 @@ import { Link } from "react-router-dom";
 import { fieldErrors } from "../../api/contractRecord";
 import {
   getReinsurerAccess, resendReinsurerLink, revokeReinsurerLink,
-  shareWithReinsurers, type AccessEvent, type AccessLink, type ReinsurerAccess,
+  sendTreatyForApproval, shareWithReinsurers, type AccessEvent, type AccessLink, type ReinsurerAccess,
 } from "../../api/treaty";
 import { fmtDate, fmtStamp } from "../../utils/date";
 import { InfoTip } from "../InfoTip";
@@ -55,7 +55,110 @@ const EVENT: Record<AccessEvent["type"], { label: string; icon: React.ElementTyp
   changes_requested: { label: "Asked for a change", icon: MessageSquare },
   sign_requested: { label: "Sent a link to sign", icon: PenLine },
   signed: { label: "Signed the treaty", icon: PenLine },
+  approval_requested: { label: "Sent the treaty to approve", icon: Send },
+  endorsement_sent: { label: "Sent an endorsement to approve", icon: Send },
+  endorsement_approved: { label: "Approved an endorsement", icon: CheckCircle2 },
+  endorsement_changes_requested: { label: "Asked for a change to an endorsement", icon: MessageSquare },
+  endorsement_sign_requested: { label: "Sent an endorsement to sign", icon: PenLine },
+  endorsement_signed: { label: "Signed an endorsement", icon: PenLine },
+  basis_sent: { label: "Sent changes to the terms to approve", icon: Send },
+  basis_approved: { label: "Approved changes to the terms", icon: CheckCircle2 },
+  basis_changes_requested: { label: "Asked for a change to the new terms", icon: MessageSquare },
 };
+
+/** Draft → With reinsurers → Agreed → Signed by you → In force. */
+const FLOW = ["Draft", "With reinsurers", "Agreed", "Signed by you", "In force"];
+
+function flowAt(lifecycle: string, data: ReinsurerAccess): number {
+  if (lifecycle === "active" || lifecycle === "expired") return 4;
+  if (data.signing?.carrier_signed) return 3;
+  if (lifecycle === "agreed" || lifecycle === "signed") return 2;
+  const sent = data.links.length > 0 || data.approvals.parties.some(p => p.status !== "pending");
+  return sent ? 1 : 0;
+}
+
+/** Where the treaty stands with its reinsurers, and the one thing to do next
+ *  while it is a draft: send it to every reinsurer to approve. */
+export function TreatyFlowCard({ contractId, lifecycle, data, onData }: {
+  contractId: number; lifecycle: string;
+  /** Pass when the caller already holds it; otherwise it is fetched. */
+  data?: ReinsurerAccess | null;
+  onData?: (d: ReinsurerAccess) => void;
+}) {
+  const [own, setOwn] = useState<ReinsurerAccess | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [note, setNote] = useState("");
+  useEffect(() => {
+    if (data === undefined) getReinsurerAccess(contractId).then(setOwn).catch(() => setOwn(null));
+  }, [contractId, data]);
+  const d = data ?? own;
+  if (!d) return null;
+  const at = flowAt(lifecycle, d);
+  const draft = lifecycle === "draft" || lifecycle === "pending";
+  const changes = d.approvals.parties.filter(p => p.status === "changes_requested");
+
+  async function send() {
+    setBusy(true); setErr(""); setNote("");
+    try {
+      const r = await sendTreatyForApproval(contractId);
+      setOwn(r); onData?.(r);
+      const failed = r.sent.filter(x => !x.emailed).length;
+      setNote(`Sent to ${r.sent.length} ${r.sent.length === 1 ? "person" : "people"} at the reinsurers.`
+        + (failed ? ` ${failed} email${failed === 1 ? "" : "s"} could not be sent — try again.` : "")
+        + (r.missing.length ? ` No contact with an email at ${r.missing.join(", ")}.` : ""));
+    } catch (e) {
+      setErr(fieldErrors(e).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card-h">
+        <ShieldCheck size={16} className="ci" />
+        <h3>
+          Treaty approval
+          <InfoTip text={"Each reinsurer on the treaty approves it, or asks for changes, on its "
+            + "private link. Once every one has approved, the terms are agreed and you sign. "
+            + "Then each reinsurer is asked to sign, and the treaty goes in force."} />
+        </h3>
+        {draft && (
+          <div className="right">
+            <button className="btn pri sm" type="button" disabled={busy} onClick={send}>
+              <Send size={13} /> {at === 0 ? "Send to reinsurers for approval" : "Send again"}
+            </button>
+          </div>
+        )}
+      </div>
+      <div style={{ padding: "12px 20px", display: "grid", gap: 10 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          {FLOW.map((label, i) => (
+            <span key={label} style={{ display: "contents" }}>
+              {i > 0 && <span className="sub">→</span>}
+              <span className={`badge ${i < at || (i === at && at === 4) ? "b-ok"
+                : i === at ? "b-warn" : "b-mut"}`}><span className="d" />{label}</span>
+            </span>
+          ))}
+        </div>
+        {err && <div className="note warn">{err}</div>}
+        {note && <div className="note ok">{note}</div>}
+        {at === 1 && (
+          <div className="sub">
+            {d.approvals.approved} of {d.approvals.total} reinsurers approved.
+            {changes.length > 0 && <> {changes.map(p => p.party_name).join(", ")} asked for
+              changes — update the treaty and send it again.</>}
+          </div>
+        )}
+        {at === 2 && <div className="sub">Every reinsurer approved. Sign the treaty — each
+          reinsurer is then asked to sign.</div>}
+        {at === 3 && <div className="sub">You signed. Each reinsurer has been sent its link to
+          sign — it is in force once every one has signed.</div>}
+      </div>
+    </div>
+  );
+}
 
 const APPROVAL: Record<string, { label: string; cls: string }> = {
   approved: { label: "Approved", cls: "b-ok" },
@@ -75,7 +178,9 @@ export function isLoopback(ip: string): boolean {
   return /^(127\.|::1$|::ffff:127\.|0\.0\.0\.0$)/.test(ip.trim());
 }
 
-export function ReinsurerSharing({ contractId }: { contractId: number }) {
+export function ReinsurerSharing({ contractId, lifecycle }: {
+  contractId: number; lifecycle?: string;
+}) {
   const [data, setData] = useState<ReinsurerAccess | null>(null);
   const [picked, setPicked] = useState<number[]>([]);
   const [err, setErr] = useState("");
@@ -116,6 +221,9 @@ export function ReinsurerSharing({ contractId }: { contractId: number }) {
     <div>
       {note && <div className="note ok" style={{ marginBottom: 12 }}>{note}</div>}
       {err && <div className="note warn" style={{ marginBottom: 12 }}>{err}</div>}
+
+      {lifecycle && <TreatyFlowCard contractId={contractId} lifecycle={lifecycle}
+                                    data={data} onData={setData} />}
 
       {/* ── approvals ── */}
       {data.approvals.total > 0 && (

@@ -420,7 +420,7 @@ export default function ContractSignature() {
           <div className="note" style={{ marginBottom: 16 }}>
             <b>
               <PenLine size={13} style={{ verticalAlign: "-2px" }} />{" "}
-              Signed on the document, as a broker&rsquo;s contract is.
+              Signed on the document itself.
             </b>{" "}
             You sign first, on the treaty itself. The lead reinsurer is then
             emailed the treaty carrying your signature, with a one-time code —

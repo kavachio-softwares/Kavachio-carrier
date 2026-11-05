@@ -223,7 +223,7 @@ export default function Contracts() {
               </Link>
             )}
             <button type="button" className="btn" onClick={() => setUploading(true)}>
-              <Upload size={14} /> {treaties ? "Upload signed treaty" : "Upload existing"}
+              <Upload size={14} /> {treaties ? "Upload a treaty" : "Upload existing"}
             </button>
             <Link to={treaties ? "/contracts/new?type=insurer_reinsurer" : "/contracts/new"}
                   className="btn pri">

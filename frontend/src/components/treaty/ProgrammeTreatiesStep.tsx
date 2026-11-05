@@ -199,7 +199,7 @@ export default function ProgrammeTreatiesStep({ programId, part, onChange, onAdd
           <span className="ml-auto flex gap-2">
             <button type="button" onClick={() => setUploading(true)}
               className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-2">
-              <Upload size={13} /> Upload signed treaty
+              <Upload size={13} /> Upload a treaty
             </button>
             <Link to={raiseUrl}
               className="inline-flex items-center gap-1.5 rounded bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy-dark hover:no-underline">
