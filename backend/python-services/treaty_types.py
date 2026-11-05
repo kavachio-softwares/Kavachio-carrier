@@ -542,7 +542,7 @@ def layer_facts(structure: dict | None, layer: dict) -> list[dict]:
     return out
 
 
-def fingerprint(structure: dict | None) -> str:
+def fingerprint(structure: dict | None, wording: list | None = None) -> str:
     """A short hash of what a reinsurer is agreeing to: the type, the terms,
     and every layer's terms and panel. Database ids and display names are left
     out, so re-saving the same structure gives the same fingerprint, and any
@@ -568,7 +568,16 @@ def fingerprint(structure: dict | None) -> str:
         } for lay in st.get("layers") or []],
     }
     raw = json.dumps(shaped, sort_keys=True, default=str)
-    return hashlib.sha256(raw.encode()).hexdigest()[:20]
+    base = hashlib.sha256(raw.encode()).hexdigest()[:20]
+    # The wording the reinsurer read, when there is one: its clauses as
+    # written, or the uploaded document's hash. Kept as a second part, so an
+    # approval given before the wording was covered can still be matched on
+    # its structure alone (treaty_routes.approvals). An empty wording still
+    # gets its part: "none yet" is what was approved, and adding one changes it.
+    if wording is None:
+        return base
+    w = hashlib.sha256(json.dumps(wording, sort_keys=True, default=str).encode()).hexdigest()[:20]
+    return f"{base}:{w}"
 
 
 def lead_of(structure: dict | None) -> int | None:

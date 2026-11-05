@@ -97,6 +97,9 @@ export function TreatyFlowCard({ contractId, lifecycle, data, onData }: {
   const at = flowAt(lifecycle, d);
   const draft = lifecycle === "draft" || lifecycle === "pending";
   const changes = d.approvals.parties.filter(p => p.status === "changes_requested");
+  // Answered, then the treaty or its wording changed: those answers no
+  // longer count until it is sent again.
+  const stale = d.approvals.parties.filter(p => p.status === "stale");
 
   async function send() {
     setBusy(true); setErr(""); setNote("");
@@ -144,6 +147,14 @@ export function TreatyFlowCard({ contractId, lifecycle, data, onData }: {
         </div>
         {err && <div className="note warn">{err}</div>}
         {note && <div className="note ok">{note}</div>}
+        {draft && stale.length > 0 && (
+          <div className="note warn">
+            <b>Changed since approved.</b> You changed the treaty or its wording after{" "}
+            {stale.map(p => p.party_name).join(", ")} answered, so{" "}
+            {stale.length === 1 ? "that answer no longer counts" : "those answers no longer count"}.
+            {" "}Press <b>Send again</b> so they see the new version.
+          </div>
+        )}
         {at === 1 && (
           <div className="sub">
             {d.approvals.approved} of {d.approvals.total} reinsurers approved.
@@ -237,8 +248,8 @@ export function ReinsurerSharing({ contractId, lifecycle }: {
             </span>
             <InfoTip text={"Each reinsurer approves the treaty on its private link. "
               + "When every one has approved a draft, its terms are agreed. If you "
-              + "change the treaty, earlier approvals no longer count and the "
-              + "reinsurers are asked again."} />
+              + "change the treaty or its wording, earlier approvals no longer count "
+              + "— send it again so they see the new version."} />
           </div>
           <div className="tbl-wrap">
             <table>

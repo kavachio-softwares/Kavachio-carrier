@@ -126,7 +126,7 @@ export type TreatyRecordSummary = {
   programmes: TreatyProgramme[];
   /** How many reinsurers on the panel have approved the treaty as it is now. */
   approvals: { approved: number; total: number; changes_requested: number;
-               all_approved: boolean } | null;
+               stale?: number; all_approved: boolean } | null;
 } & Partial<TreatyStatuses> & { placement?: PlacementSummary | null };
 
 // ── a master treaty: placement and each reinsurer's signature ───────────────
@@ -407,7 +407,7 @@ export type ShareableParty = {
 
 export type ReinsurerAccess = {
   approvals: { parties: ReinsurerApproval[]; approved: number; total: number;
-               changes_requested: number; all_approved: boolean };
+               changes_requested: number; stale?: number; all_approved: boolean };
   /** Whether the lead reinsurer can be asked to sign on its link now. */
   signing?: { lead_party_id: number | null; can_request: boolean;
               why_not: string | null; carrier_signed: boolean;

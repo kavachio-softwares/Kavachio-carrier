@@ -290,7 +290,7 @@ def record_summary(s, c: Contract) -> Optional[dict]:
         "programmes": programmes(s, c),
         "approvals": ({k: v for k, v in approvals(s, c, st).items()
                        if k in ("approved", "total", "changes_requested",
-                                "all_approved")} if st else None),
+                                "stale", "all_approved")} if st else None),
         # 26.3 — its lifecycle, documentation and configuration, kept apart,
         # and the signed wording it is configured from.
         **_statuses(s, c),
@@ -322,6 +322,40 @@ def _state(c: Contract) -> str:
 
 
 # ── reinsurers' approvals ───────────────────────────────────────────────────
+def wording_of(s, c: Contract) -> list:
+    """What a reinsurer reads besides the structure: every clause of a wording
+    written here (title and words), and the hash of each wording document
+    uploaded. Any change to either is a change to what was approved."""
+    ws = c.wording_sections if isinstance(c.wording_sections, dict) else {}
+    out: list = [[sec.get("key"), sec.get("title"), sec.get("body")]
+                 for sec in ws.get("sections") or [] if isinstance(sec, dict)]
+    out += sorted(["doc", d.fingerprint] for d in (
+        s.query(ContractDocument)
+        .filter(ContractDocument.contract_id == c.id, ContractDocument.kind == "contract",
+                ContractDocument.is_active.is_(True))) if d.fingerprint)
+    return out
+
+
+def treaty_fingerprint(s, c: Contract, st: Optional[dict]) -> Optional[str]:
+    """What an approval is tied to: the structure and the wording."""
+    return tt.fingerprint(st, wording_of(s, c)) if st else None
+
+
+def _answered_this(row_fp: Optional[str], fp: Optional[str], *, wording: bool = True) -> bool:
+    """Was this answer given on the treaty as it is now? Matched on the
+    structure alone when the answer was recorded before the wording was
+    covered (it has no wording part), or when `wording` is False — once the
+    terms are settled the wording cannot change, and the signed copy filed
+    afterwards must not make every approval look out of date."""
+    if not row_fp or not fp:
+        return False
+    if row_fp == fp:
+        return True
+    if ":" not in row_fp or not wording:
+        return row_fp.split(":")[0] == fp.split(":")[0]
+    return False
+
+
 def approvals(s, c: Contract, structure: Optional[dict] = None,
               names: Optional[dict] = None) -> dict:
     """Where every reinsurer on the panel stands on the treaty AS IT IS NOW.
@@ -331,7 +365,7 @@ def approvals(s, c: Contract, structure: Optional[dict] = None,
     structure; an answer to an earlier version is reported as `stale`.
     """
     st = structure if structure is not None else load_structure(s, c.id, names=False)
-    fp = tt.fingerprint(st) if st else None
+    fp = treaty_fingerprint(s, c, st)
     order: list[int] = []
     if c.broker_party_id:
         order.append(c.broker_party_id)
@@ -354,7 +388,8 @@ def approvals(s, c: Contract, structure: Optional[dict] = None,
         row = latest.get(pid)
         if row is None:
             status = "pending"
-        elif row.fingerprint != fp:
+        elif not _answered_this(row.fingerprint, fp,
+                                wording=_state(c) in EDITABLE_STATES):
             status = "stale"
         else:
             status = row.status
@@ -376,6 +411,9 @@ def approvals(s, c: Contract, structure: Optional[dict] = None,
         "total": len(parties),
         "changes_requested": sum(1 for p_ in parties
                                  if p_["status"] == "changes_requested"),
+        # Answered, then the treaty changed: those answers no longer count,
+        # and the reinsurers have to be sent it again.
+        "stale": sum(1 for p_ in parties if p_["status"] == "stale"),
         "all_approved": bool(parties) and approved == len(parties),
     }
 
@@ -2714,7 +2752,7 @@ def _answer(token: str, session: str, request: Request, status: str,
             contract_id=c.id, tenant_id=c.tenant_id, party_id=link.party_id,
             link_id=link.id, status=status, signer_name=signer_name,
             signer_title=signer_title, signer_email=link.email, note=note,
-            fingerprint=tt.fingerprint(st), ip=ip, at=_now()))
+            fingerprint=treaty_fingerprint(s, c, st), ip=ip, at=_now()))
         _event(s, link, status, actor=link.email, request=request,
                detail={"signer_name": signer_name, "note": note})
         s.flush()

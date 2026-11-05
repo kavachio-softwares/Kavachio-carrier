@@ -660,6 +660,39 @@ def test_changing_the_treaty_makes_an_approval_stale(w, sent):
     assert view["approval"]["status"] == "stale" and view["approval"]["can_answer"]
 
 
+def test_changing_only_the_wording_makes_an_approval_stale(w, sent):
+    """The wording is what the reinsurer read: a clause reworded after it
+    approved, with no term changed, means it has not approved this one."""
+    cid = _create(w).json()["id"]
+    ((t, h),) = _links_for(w, cid, sent, [w["c_munich"]])
+    client.post(f"/treaty-view/{t}/approve", headers=h, json={"signer_name": "Mia"})
+    a = client.get(f"/contracts/{cid}/reinsurer-access", headers=w["ch"]).json()["approvals"]
+    assert next(p for p in a["parties"] if p["party_id"] == w["munich"])["status"] == "approved"
+    secs = client.get(f"/contracts/{cid}", headers=w["ch"]).json().get("wording_sections") or []
+    secs = [{k: v for k, v in sec.items() if k not in ("rendered", "tokens")} for sec in secs]
+    secs.append({"key": "extra", "title": "Claims notification", "origin": "your own words",
+                 "body": "Claims are notified within 30 days."})
+    r = client.patch(f"/contracts/{cid}", headers=w["ch"], json={"wording_sections": secs})
+    assert r.status_code == 200, r.text
+    a = client.get(f"/contracts/{cid}/reinsurer-access", headers=w["ch"]).json()["approvals"]
+    munich = next(p for p in a["parties"] if p["party_id"] == w["munich"])
+    assert munich["status"] == "stale" and a["stale"] >= 1
+    # Approving again — on the new wording — counts.
+    client.post(f"/treaty-view/{t}/approve", headers=h, json={"signer_name": "Mia"})
+    a = client.get(f"/contracts/{cid}/reinsurer-access", headers=w["ch"]).json()["approvals"]
+    assert next(p for p in a["parties"] if p["party_id"] == w["munich"])["status"] == "approved"
+
+
+def test_an_approval_from_before_the_wording_was_covered_still_counts():
+    import treaty_routes as trr
+    fp = "abc123:def456"
+    assert trr._answered_this("abc123", fp)                 # older: structure only
+    assert trr._answered_this(fp, fp)
+    assert not trr._answered_this("abc123:zzz", fp)         # wording changed
+    assert trr._answered_this("abc123:zzz", fp, wording=False)   # settled: structure only
+    assert not trr._answered_this("other", fp)
+
+
 def test_a_reinsurer_can_ask_for_a_change(w, sent):
     cid = _create(w).json()["id"]
     ((t, h),) = _links_for(w, cid, sent, [w["c_munich"]])

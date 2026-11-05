@@ -164,6 +164,23 @@ export default function TreatyWordingReview() {
                    onChange: (v: unknown) => void, terms: Record<string, unknown>) => {
     if (!visible(f, terms)) return null;
     const missing = f.required && (value == null || value === "");
+    // A commission term is its own small structure, not one number: it takes
+    // the row's full width under its name, rather than a narrow value cell.
+    if (f.kind === "sliding" || f.kind === "profit") return (
+      <tr key={path}>
+        <td colSpan={2}>
+          <b style={{ fontWeight: 600 }}>{f.label}</b>
+          <span className="sub"> — optional</span>
+          {f.hint && <div className="sub" style={{ fontSize: 11.5 }}>{f.hint}</div>}
+          <div style={{ marginTop: 8 }}>
+            <OptionalCommission bare kind={f.kind} label={f.label}
+              value={value as SlidingScale | ProfitCommission | null | undefined}
+              onChange={onChange} />
+          </div>
+        </td>
+        <td style={{ width: 70, textAlign: "center", verticalAlign: "top" }}><Src path={path} /></td>
+      </tr>
+    );
     return (
       <tr key={path}>
         <td style={{ width: "42%" }}>
@@ -172,12 +189,7 @@ export default function TreatyWordingReview() {
           {f.hint && <div className="sub" style={{ fontSize: 11.5 }}>{f.hint}</div>}
         </td>
         <td style={missing ? { boxShadow: "inset 2px 0 0 var(--p-warn)" } : undefined}>
-          {f.kind === "sliding" || f.kind === "profit" ? (
-            // A commission term is its own small structure, not one number.
-            <OptionalCommission kind={f.kind} label={f.label}
-              value={value as SlidingScale | ProfitCommission | null | undefined}
-              onChange={onChange} />
-          ) : input(f, value, onChange)}
+          {input(f, value, onChange)}
         </td>
         <td style={{ width: 70, textAlign: "center" }}><Src path={path} /></td>
       </tr>

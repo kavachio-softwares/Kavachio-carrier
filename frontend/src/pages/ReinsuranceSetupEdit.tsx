@@ -18,10 +18,11 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, CheckCircle2, Columns3, FileSpreadsheet,
-  FileText, Info, ListChecks, Save, Send, ShieldCheck, Trash2, Unlink,
+  Info, ListChecks, Save, Send, Trash2, Unlink,
 } from "lucide-react";
 import { Modal } from "../components/ui/Modal";
 import OutputGrid from "../components/treaty/OutputGrid";
+import { ProgrammePicker } from "../components/treaty/ProgrammePicker";
 import { Stat } from "../components/treaty/SetupTiles";
 import { PageBody, PageHeader } from "../components/Layout";
 import Card from "../components/ui/Card";
@@ -179,65 +180,8 @@ export default function ReinsuranceSetupEdit() {
               Programmes that feed it
               <InfoTip text="The bordereaux of these programmes make up each statement. Only programmes this treaty protects can be chosen." />
             </div>
-              {/* Each programme with what it holds — its treaties (this one among
-                  them) and its broker contracts — so it is clear what feeds it. */}
-              <div className="grid g-2" style={{ gap: 10 }}>
-                {rec.options.programmes.map(p => {
-                  const on = (v.program_ids ?? []).includes(p.id);
-                  const treaties = (rec.options.treaties ?? []).filter(t => t.program_ids.includes(p.id));
-                  const contracts = (rec.options.contracts ?? []).filter(k => k.program_id === p.id);
-                  return (
-                    <label key={p.id} style={{ display: "block", cursor: "pointer", padding: "10px 12px",
-                             border: `1px solid ${on ? "var(--p-ok, #0f766e)" : "var(--p-border-2)"}`,
-                             borderRadius: 10, background: on ? "var(--p-ok-bg, #f0fdf9)" : "var(--p-surface)" }}>
-                      <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <input type="checkbox" checked={on} style={{ margin: 0 }}
-                               onChange={e => change({ program_ids: e.target.checked
-                                 ? [...(v.program_ids ?? []), p.id]
-                                 : (v.program_ids ?? []).filter(x => x !== p.id) })} />
-                        <b style={{ fontSize: 13 }}>{p.name}</b>
-                        {p.is_home && <span className="badge b-mut" style={{ fontSize: 10 }}>Home programme</span>}
-                      </span>
-                      <span style={{ display: "block", marginTop: 8, paddingLeft: 22, fontSize: 12.5 }}>
-                        <span className="sub" style={{ display: "block", fontSize: 11, textTransform: "uppercase",
-                              letterSpacing: ".03em", marginBottom: 3 }}>
-                          Treaties ({treaties.length})
-                        </span>
-                        {treaties.length === 0 && <span className="sub">None</span>}
-                        {treaties.map(t => (
-                          <span key={t.id} style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
-                            <ShieldCheck size={12} style={{ alignSelf: "center", flexShrink: 0 }} />
-                            {t.this ? <b>{t.name}</b>
-                              : <Link className="linkish" to={`/contracts/${t.id}`}
-                                      onClick={e => e.stopPropagation()}>{t.name}</Link>}
-                            <span className="sub">
-                              {[t.type_label, t.status && t.status[0].toUpperCase() + t.status.slice(1)]
-                                .filter(Boolean).join(" · ")}
-                            </span>
-                            {t.this && <span className="badge b-ok" style={{ fontSize: 10 }}>This treaty</span>}
-                          </span>
-                        ))}
-                        <span className="sub" style={{ display: "block", fontSize: 11, textTransform: "uppercase",
-                              letterSpacing: ".03em", margin: "8px 0 3px" }}>
-                          Contracts ({contracts.length})
-                        </span>
-                        {contracts.length === 0 && <span className="sub">None</span>}
-                        {contracts.map(k => (
-                          <span key={k.id} style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
-                            <FileText size={12} style={{ alignSelf: "center", flexShrink: 0 }} />
-                            <Link className="linkish" to={`/contracts/${k.id}`}
-                                  onClick={e => e.stopPropagation()}>{k.name}</Link>
-                            <span className="sub">
-                              {[k.broker, k.status && k.status[0].toUpperCase() + k.status.slice(1)]
-                                .filter(Boolean).join(" · ")}
-                            </span>
-                          </span>
-                        ))}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
+              <ProgrammePicker options={rec.options} value={v.program_ids ?? []}
+                               onChange={ids => change({ program_ids: ids })} />
               {bad("program_ids")}
           </>);
   const scheduleBody = (<>
