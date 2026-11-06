@@ -93,7 +93,7 @@ def route_by_period(members: list, named_id: Optional[int],
     decides. `named_id` is the contract the file named, only used to say so.
     """
     day = period_start(label)
-    names = ", ".join(f"{getattr(m, 'name', None) or f'contract {m.id}'}" for m in members)
+    names = ", ".join(f"{_label(m)}" for m in members)
     if day is None:
         return None, (f"Held: this programme's contract was renewed ({names}) and "
                       f"the period “{label or 'not given'}” does not say which term "
@@ -215,7 +215,10 @@ def last_day(v, next_version=None) -> Optional[dt.date]:
 
 
 def _label(v) -> str:
-    return (getattr(v, "name", None) or f"contract {getattr(v, 'id', '?')}")
+    # Its name, else the file it came in as — never its id, which means
+    # nothing to the person reading.
+    return (getattr(v, "name", None) or getattr(v, "filename", None)
+            or "the other contract")
 
 
 def _fmt(d: dt.date) -> str:

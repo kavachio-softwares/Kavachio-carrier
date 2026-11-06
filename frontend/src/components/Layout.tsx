@@ -149,16 +149,13 @@ const GROUPS: {
     // bordereau setup. Reading the section top to bottom IS the flow.
     items: [
       { to: "/programs", label: "Programmes", icon: Layers },
-      // Party and Contracts are hidden from the sidebar for now. Both routes
-      // and both access rules are unchanged — only the nav entries are
-      // commented out, the same as Program Management above and Files below.
-      //
-      // Neither screen is stranded by it: the Dashboard's "Parties" and
-      // "Contracts" tiles open them, Broker Performance has "All brokers →",
-      // and a contract is normally reached from the programme it hangs off
-      // rather than from a flat list of every contract in the book.
+      // Party is hidden from the sidebar for now (the Dashboard's "Parties"
+      // tile opens it).
       // { to: "/brokers", label: "Party", icon: Users2 },
-      // { to: "/contracts", label: "Contracts", icon: FileCheck },
+      // Broker contracts and reinsurance treaties, one list: its Type filter
+      // narrows it to either. Between Programmes and Bordereau Setup, as a
+      // contract hangs off a programme and a setup needs a contract.
+      { to: "/contracts", label: "Contracts", icon: FileCheck },
       // Signatures is NOT a sidebar entry. Watching a round is watching a
       // contract, so it is reached from Contracts ("Signature history") and
       // from the contract's own record, filtered to that contract. A top-level
@@ -265,12 +262,11 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // Programmes now own their own sub-screens (create, and a programme's
   // brokers), so they highlight Programmes rather than the old party directory.
   if (under("/programs")) return "/programs";
-  // Party has no sidebar entry any more, and neither do contracts. Both are
-  // opened from the Dashboard's tiles, so — like /files — they keep Dashboard
-  // lit rather than pointing at a row that is no longer drawn, which would
-  // leave nothing highlighted at all.
+  // Party has no sidebar entry any more. It is opened from the Dashboard's
+  // tile, so — like /files — it keeps Dashboard lit.
   if (under("/brokers")) return "/home";
-  if (under("/contracts")) return "/home";
+  // A contract, a new one and Signatures all belong to Contracts.
+  if (under("/contracts")) return "/contracts";
   // An output template is part of a Bordereau Setup, and that is where the user
   // came from — highlighting anything else while they review a template they
   // opened from the setup screen makes the sidebar lie about where they are.

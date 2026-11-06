@@ -349,7 +349,7 @@ def _clean_value(name: str, f: dict, raw: Any, errors: dict, path: str) -> Any:
 
 
 def validate(structure: dict, *, reinsurer_ids: set[int] | None = None,
-             strict: bool = True) -> dict:
+             strict: bool = True, require_panel: bool = False) -> dict:
     """Check a structure and return it cleaned.
 
     `reinsurer_ids` is the set of party ids the caller may name on a panel
@@ -359,6 +359,10 @@ def validate(structure: dict, *, reinsurer_ids: set[int] | None = None,
     Raises TreatyError naming every field at fault, with dotted paths the form
     can attach to the right box: `terms.cession_pct`, `layers.1.limit`,
     `layers.0.shares.2.share_pct`.
+
+    `require_panel` refuses a treaty with no reinsurer on it: one is needed to
+    create or save a treaty (a treaty with nobody to cede to cedes nothing).
+    The AI reading of a document does not ask for it — it reports what it found.
 
     `strict=False` is for the live wording preview, which runs on every
     keystroke of a half-filled form: it returns whatever is already sound and
@@ -473,6 +477,10 @@ def validate(structure: dict, *, reinsurer_ids: set[int] | None = None,
         name = str(raw.get("name") or "").strip() or (
             f"Layer {i + 1}" if t["multi_layer"] else t["default_layer"])
         layers.append({"name": name, "terms": lay_terms, "shares": shares})
+
+    if require_panel and layers and not any(l["shares"] for l in layers) \
+            and not any(k.startswith("layers.") and ".shares" in k for k in errors):
+        errors["layers.0.shares"] = "Add at least one reinsurer and its share."
 
     if errors and strict:
         n = len(errors)

@@ -12,6 +12,7 @@ import {
   AlertTriangle, ArrowLeft, Download, FileSpreadsheet, Loader2, RefreshCw, Send,
 } from "lucide-react";
 import { InfoTip } from "../components/InfoTip";
+import { TermsUsed, changeText } from "../components/treaty/TermsUsed";
 import { TreatyChecks } from "../components/treaty/TreatyRules";
 import { fieldErrors } from "../api/contractRecord";
 import {
@@ -167,6 +168,11 @@ export default function CededBordereauDetail() {
             period. What was sent stays as it was — the figures were worked out with the terms
             in force then.{" "}
             <Link className="linkish" to={`/contracts/${d.contract_id}?tab=basis`}>See the terms</Link>
+            {(d.basis_changes ?? []).length > 0 && (
+              <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                {d.basis_changes!.map((c, i) => <li key={i}>{changeText(c)}</li>)}
+              </ul>
+            )}
           </div>
         )}
         {d.status === "superseded" && (
@@ -368,6 +374,8 @@ export default function CededBordereauDetail() {
           </div>
         </div>
 
+        <TermsUsed basis={d.basis} contractId={d.contract_id} />
+
         {d.notes.length > 0 && (
           <div className="note" style={{ marginBottom: 18 }}>
             {d.notes.map((n, i) => <div key={i}>{n}</div>)}
@@ -438,7 +446,7 @@ export default function CededBordereauDetail() {
           </div>
           <div className="tbl-wrap">
             <table>
-              <thead><tr>{used.map(c => <th key={c.key}>{c.label}</th>)}</tr></thead>
+              <thead><tr>{used.map(c => <th key={c.key}>{c.label}</th>)}<th /></tr></thead>
               <tbody>
                 {d.lines.slice(0, lineLimit).map((l, i) => (
                   <tr key={i}>
@@ -450,6 +458,8 @@ export default function CededBordereauDetail() {
                           : String(l[c.key])}
                       </td>
                     ))}
+                    {/* The line's own sum (27.3). */}
+                    <td>{l.how ? <InfoTip text={String(l.how)} /> : null}</td>
                   </tr>
                 ))}
               </tbody>

@@ -103,7 +103,7 @@ export default function Contracts() {
 
   // ?program_id= opens the list already filtered — the Programmes stepper
   // links here for a programme whose contracts are all in place.
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const [programme, setProgramme] = useState(params.get("program_id") ?? "");
   // ?waiting=mine opens the list already narrowed to what is this side's move
   // — where both dashboard tiles land. Held as state, not read straight off
@@ -115,6 +115,16 @@ export default function Contracts() {
   // a link to this list while it is open keeps the same page mounted.
   const [type, setType] = useState(params.get("type") ?? "");
   useEffect(() => { setType(params.get("type") ?? ""); }, [params]);
+  // The type is kept in the address, so the sidebar lights the matching
+  // Contracts entry (All Contracts / Broker Contracts / Treaties).
+  function chooseType(t: string) {
+    setType(t);
+    setParams(cur => {
+      const n = new URLSearchParams(cur);
+      if (t) n.set("type", t); else n.delete("type");
+      return n;
+    }, { replace: true });
+  }
   // quota_share | surplus | xol | stop_loss | facultative — only offered while
   // the list is showing treaties.
   const [treatyType, setTreatyType] = useState("");
@@ -267,7 +277,9 @@ export default function Contracts() {
               // shows without opening anything.
               ...([{
                 key: "type", ariaLabel: "Filter by contract type",
-                value: type, onChange: setType,
+                // Kept in the address so the sidebar lights the matching
+                // Contracts entry (All / Broker Contracts / Treaties).
+                value: type, onChange: chooseType,
                 options: KIND_TABS.map(t => ({
                   value: t.key,
                   label: kindCounts[t.key] != null
@@ -309,10 +321,9 @@ export default function Contracts() {
               },
             ]}
             onClear={() => {
-              // Clearing on the Treaties list keeps it the Treaties list.
               setProgramme(""); setLifecycle(""); setQ("");
-              // Clearing on the Treaties list keeps it the Treaties list.
-              setType("");
+              // Back to every contract — the sidebar follows to All Contracts.
+              chooseType("");
               setTreatyType("");
               setWaiting(false);
             }}

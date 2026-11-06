@@ -172,9 +172,15 @@ def test_each_type_takes_its_own_required_terms(w):
                            "terms": {"currency": "USD"}})
     assert r.status_code == 400
     assert "terms.cession_pct" in r.json()["detail"]["errors"]
-    r = _create(w, treaty={"treaty_type": "quota_share",
-                           "terms": {"currency": "USD", "cession_pct": 40,
-                                     "ceding_commission_pct": 30}})
+    qs = {"treaty_type": "quota_share",
+          "terms": {"currency": "USD", "cession_pct": 40, "ceding_commission_pct": 30}}
+    # A treaty needs at least one reinsurer on it.
+    r = _create(w, treaty=qs)
+    assert r.status_code == 400
+    assert r.json()["detail"]["errors"] == {
+        "layers.0.shares": "Add at least one reinsurer and its share."}
+    r = _create(w, treaty=qs | {"layers": [{"shares": [
+        {"reinsurer_party_id": w["swiss"], "share_pct": 100, "is_lead": True}]}]})
     assert r.status_code == 200, r.text
     assert r.json()["treaty"]["headline"] == "40% quota share"
 

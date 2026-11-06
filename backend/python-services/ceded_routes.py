@@ -33,6 +33,7 @@ from sqlalchemy import func, or_
 
 import ceded_engine as ce
 import ceded_layout as cl
+import ceded_trace
 import treaty_rules as trr
 import treaty_types as tt
 from app_routes import _iso_utc, resolve_tenant_id
@@ -410,7 +411,8 @@ def gather(s, c: Contract, period: str, st: dict) -> dict:
     missing = [p for p in tr.programmes(s, c)
                if p["id"] in feeds and p["id"] not in have]
     return {"sources": sources, "result": result, "notes": notes,
-            "src_meta": src_meta, "missing": missing, "checks": checks}
+            "src_meta": src_meta, "missing": missing, "checks": checks,
+            "structure": st}
 
 
 def _own_rows(s, ci: CededInput, layout: dict) -> list[dict]:
@@ -455,7 +457,8 @@ def _gather_own(s, c: Contract, period: str, st: dict, layout: Optional[dict]) -
     if not files:
         notes.insert(0, f"No file of yours has been uploaded for {period} yet.")
     return {"sources": [], "result": result, "notes": notes,
-            "src_meta": src_meta, "missing": [], "checks": checks}
+            "src_meta": src_meta, "missing": [], "checks": checks,
+            "structure": st}
 
 
 def build(s, c: Contract, period: str, user_id: Optional[int], *,
@@ -509,7 +512,9 @@ def build(s, c: Contract, period: str, user_id: Optional[int], *,
         s.add(cb)
     cb.status = "draft"
     cb.currency = currency
-    cb.totals = result["totals"]
+    # The totals, and the record of the terms they were worked out with (27.3).
+    cb.totals = ceded_trace.with_basis(
+        result["totals"], ceded_trace.snapshot(s, g["structure"], currency))
     cb.notes = notes
     cb.skipped = result["skipped"]
     cb.lines = result["lines"]
@@ -543,8 +548,10 @@ def _write_statements(s, c: Contract, cb: CededBordereau, st: dict) -> None:
     fmt = (su.file_format if su is not None else None) or "xlsx"
     layout = (su.layout if su is not None else None) or {}
     own = layout.get("source") in ("uploaded", "standard", "contract")
+    snap = ceded_trace.basis_of(cb.totals)
     for pid, part in split.items():
         name = parties.get(pid) or f"Reinsurer {pid}"
+        mine = ceded_trace.for_reinsurer(snap, pid)
         ctx = cl.context(period=cb.period, treaty=c.name or f"Treaty {c.id}",
                          reinsured=carrier, reinsurer=name, currency=cb.currency)
         if own and fmt == "csv":
@@ -553,7 +560,8 @@ def _write_statements(s, c: Contract, cb: CededBordereau, st: dict) -> None:
             data = cl.fill_xlsx(
                 blob=su.layout_blob, layout=layout, columns=columns, ctx=ctx,
                 lines=part["lines"], summary={"rows": _summary_rows(
-                    carrier, name, c, summ, cb, part, prev_totals.get(pid))})
+                    carrier, name, c, summ, cb, part, prev_totals.get(pid)),
+                    "terms": ceded_trace.sheet_rows(mine)})
         elif fmt == "csv":
             data = ce.statement_csv(part["lines"], columns)
         else:
@@ -562,7 +570,8 @@ def _write_statements(s, c: Contract, cb: CededBordereau, st: dict) -> None:
                 type_label=summ.get("type_label") or "", period=cb.period,
                 version=cb.version_no, currency=cb.currency, shares=part["shares"],
                 totals=part["totals"], lines=part["lines"], notes=cb.notes or [],
-                previous=prev_totals.get(pid), columns=columns)
+                previous=prev_totals.get(pid), columns=columns,
+                basis_rows=ceded_trace.sheet_rows(mine))
         safe = "".join(ch if ch.isalnum() or ch in "-_ " else "_" for ch in name)
         s.add(CededStatement(
             cb_id=cb.id, contract_id=c.id, tenant_id=c.tenant_id,
@@ -660,7 +669,7 @@ def _summary(s, cb: CededBordereau, c: Contract, statements=None) -> dict:
         "type_label": tt.label((_tr().load_structure(s, c.id, names=False) or {})
                                .get("treaty_type")),
         "period": cb.period, "version_no": cb.version_no, "status": cb.status,
-        "currency": cb.currency, "totals": cb.totals or {},
+        "currency": cb.currency, "totals": ceded_trace.money_totals(cb.totals),
         "reinsurers": len(statements),
         "agreed": sum(1 for x in statements if x.status == "agreed"),
         "queried": sum(1 for x in statements if x.status == "queried"),
@@ -672,6 +681,18 @@ def _summary(s, cb: CededBordereau, c: Contract, statements=None) -> dict:
         "overdue": bool(due and not sent and dt.date.today() > due),
         "built_at": _iso(cb.built_at), "sent_at": _iso(cb.sent_at),
     }
+
+
+def _basis_changes(s, c: Contract, cb: CededBordereau, st: dict) -> list[dict]:
+    """The terms for `cb`'s period that differ now from those it was worked
+    out with (27.3) — [] when nothing changed or nothing was recorded."""
+    import treaty_basis
+    snap = ceded_trace.basis_of(cb.totals)
+    if not snap or not st or cb.status == "superseded":
+        return []
+    now = ceded_trace.snapshot(s, treaty_basis.structure_at(s, c, st, cb.period),
+                               cb.currency)
+    return ceded_trace.changes(snap, now)
 
 
 def _statement_json(x: CededStatement, names: dict) -> dict:
@@ -842,6 +863,10 @@ def detail(cb_id: int, p: Principal = Depends(current_principal)):
             "basis_changed": cb.status not in OPEN and cb.status != "superseded"
                              and bool(basis_part(cb.source_key))
                              and basis_part(current_key) != basis_part(cb.source_key),
+            # The terms it was worked out with, and which of them differ now
+            # (27.3). None for a statement made before the terms were kept.
+            "basis": ceded_trace.basis_of(cb.totals),
+            "basis_changes": _basis_changes(s, c, cb, st),
             # The treaty's rules the rows broke, with what is decided on each
             # row now; a Critical one stops Send while a row of it is open.
             "checks": checks,
@@ -1102,7 +1127,10 @@ def statements_for_link(s, contract_id: int, party_id: int) -> list[dict]:
              "previous_totals": x.previous_totals, "status": x.status,
              "sent_at": _iso(x.sent_at), "answered_by": x.answered_by,
              "answered_at": _iso(x.answered_at), "answer_note": x.answer_note,
-             "filename": x.filename} for x, cb in rows]
+             "filename": x.filename,
+             # The terms it was worked out with — its own share only.
+             "basis": ceded_trace.for_reinsurer(ceded_trace.basis_of(cb.totals),
+                                                party_id)} for x, cb in rows]
 
 
 def _link_statement(s, token: str, session: str, sid: int):

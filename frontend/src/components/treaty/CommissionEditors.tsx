@@ -8,14 +8,20 @@
  */
 import { Plus, Trash2 } from "lucide-react";
 import type { ProfitCommission, SlidingScale } from "../../api/treaty";
+import { InfoTip } from "../InfoTip";
 
+// What "Add" starts with: empty boxes, with an example in each placeholder.
+// Nothing is assumed — the carrier types what its treaty says, and the server
+// says what is still missing (treaty_basis.clean_value).
 export const DEFAULT_SCALE: SlidingScale = {
-  provisional_pct: 30, method: "linear",
-  points: [{ loss_ratio: 50, rate: 35 }, { loss_ratio: 70, rate: 25 }],
+  provisional_pct: null, method: "linear",
+  points: [{ loss_ratio: null, rate: null }, { loss_ratio: null, rate: null }],
 };
-export const DEFAULT_PROFIT: ProfitCommission = { rate_pct: 20, expense_pct: 5, deficit_years: 0 };
+export const DEFAULT_PROFIT: ProfitCommission = { rate_pct: null, expense_pct: null, deficit_years: null };
 
-const n = (v: string) => (v === "" ? 0 : Number(v));
+/** A typed number, or null while the box is empty. */
+const n = (v: string) => (v.trim() === "" ? null : Number(v));
+const shown = (v: number | null | undefined) => (v == null ? "" : String(v));
 
 /** A sliding scale in one line. */
 export function scaleText(s: SlidingScale | null | undefined): string {
@@ -42,7 +48,8 @@ export function SlidingScaleEditor({ value, onChange, disabled = false }: {
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 8 }}>
         <div className="field" style={FIELD}>
           <label>Provisional commission (%)</label>
-          <input inputMode="decimal" value={value.provisional_pct} disabled={disabled}
+          <input inputMode="decimal" value={shown(value.provisional_pct)} disabled={disabled}
+                 placeholder="e.g. 27.5"
                  onChange={e => onChange({ ...value, provisional_pct: n(e.target.value) })} />
         </div>
         <div className="field" style={FIELD}>
@@ -60,11 +67,13 @@ export function SlidingScaleEditor({ value, onChange, disabled = false }: {
         <tbody>
           {value.points.map((p, i) => (
             <tr key={i}>
-              <td><input style={{ width: "100%" }} inputMode="decimal" value={p.loss_ratio}
+              <td><input style={{ width: "100%" }} inputMode="decimal" value={shown(p.loss_ratio)}
+                         placeholder={i === 0 ? "e.g. 55" : "e.g. 65"}
                          disabled={disabled} aria-label="Loss ratio (%)"
                          onChange={e => onChange({ ...value, points: value.points.map((q, j) =>
                            j === i ? { ...q, loss_ratio: n(e.target.value) } : q) })} /></td>
-              <td><input style={{ width: "100%" }} inputMode="decimal" value={p.rate}
+              <td><input style={{ width: "100%" }} inputMode="decimal" value={shown(p.rate)}
+                         placeholder={i === 0 ? "e.g. 35" : "e.g. 25"}
                          disabled={disabled} aria-label="Commission (%)"
                          onChange={e => onChange({ ...value, points: value.points.map((q, j) =>
                            j === i ? { ...q, rate: n(e.target.value) } : q) })} /></td>
@@ -80,7 +89,7 @@ export function SlidingScaleEditor({ value, onChange, disabled = false }: {
       </table>
       {!disabled && (
         <button className="btn sm" type="button"
-                onClick={() => onChange({ ...value, points: [...value.points, { loss_ratio: 0, rate: 0 }] })}>
+                onClick={() => onChange({ ...value, points: [...value.points, { loss_ratio: null, rate: null }] })}>
           <Plus size={12} /> Add a point</button>
       )}
     </div>
@@ -94,17 +103,20 @@ export function ProfitCommissionEditor({ value, onChange, disabled = false }: {
     <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
       <div className="field" style={FIELD}>
         <label>Profit commission (% of profit)</label>
-        <input inputMode="decimal" value={value.rate_pct} disabled={disabled}
+        <input inputMode="decimal" value={shown(value.rate_pct)} disabled={disabled}
+               placeholder="e.g. 20"
                onChange={e => onChange({ ...value, rate_pct: n(e.target.value) })} />
       </div>
       <div className="field" style={FIELD}>
         <label>Reinsurers&rsquo; expenses (% of premium)</label>
-        <input inputMode="decimal" value={value.expense_pct} disabled={disabled}
+        <input inputMode="decimal" value={shown(value.expense_pct)} disabled={disabled}
+               placeholder="e.g. 5"
                onChange={e => onChange({ ...value, expense_pct: n(e.target.value) })} />
       </div>
       <div className="field" style={FIELD}>
         <label>Deficit carried forward (years)</label>
-        <input inputMode="numeric" value={value.deficit_years} disabled={disabled}
+        <input inputMode="numeric" value={shown(value.deficit_years)} disabled={disabled}
+               placeholder="e.g. 3"
                onChange={e => onChange({ ...value, deficit_years: n(e.target.value) })} />
       </div>
     </div>
@@ -113,6 +125,12 @@ export function ProfitCommissionEditor({ value, onChange, disabled = false }: {
 
 /** An optional commission term on a form: "Add" until it is agreed, then its
  *  editor and "Remove". */
+// What each one is, in a few words — the ⓘ beside it explains it in full.
+const SHORT: Record<"sliding" | "profit", string> = {
+  sliding: "Commission that goes up or down with claims.",
+  profit: "Extra commission when the treaty makes a profit.",
+};
+
 export function OptionalCommission({ kind, label, hint, value, onChange, disabled, error, bare }: {
   kind: "sliding" | "profit"; label: string; hint?: string | null;
   value: SlidingScale | ProfitCommission | null | undefined;
@@ -142,16 +160,13 @@ export function OptionalCommission({ kind, label, hint, value, onChange, disable
   return (
     <div className="card pad" style={{ boxShadow: "none", marginBottom: 12,
          borderColor: error ? "var(--p-crit)" : undefined }}>
+      {/* One short line; the full explanation and example sit behind the ⓘ. */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: on ? 10 : 0 }}>
         <b style={{ fontSize: 13 }}>{label}</b>
         <span className="muted" style={{ fontWeight: 500, fontSize: 12.5 }}>— optional</span>
-        {!on && hint && <span className="sub" style={{ flex: 1 }}>{hint}</span>}
-        {!disabled && (
-          <button className="btn sm" type="button" style={{ marginLeft: "auto" }}
-                  onClick={() => onChange(on ? null : kind === "sliding" ? DEFAULT_SCALE : DEFAULT_PROFIT)}>
-            {on ? <><Trash2 size={12} /> Remove</> : <><Plus size={12} /> Add</>}
-          </button>
-        )}
+        {hint && <InfoTip text={hint} />}
+        {!on && <span className="sub">{SHORT[kind]}</span>}
+        {toggle && <span style={{ marginLeft: "auto" }}>{toggle}</span>}
       </div>
       {on && (kind === "sliding"
         ? <SlidingScaleEditor value={value as SlidingScale} onChange={onChange} disabled={disabled} />

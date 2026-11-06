@@ -203,7 +203,7 @@ def _validate(s, c_or_tenant: Any, raw: dict, *, strict: bool = True) -> dict:
                  else c_or_tenant)
     try:
         return tt.validate(raw or {}, reinsurer_ids=reinsurer_ids(s, tenant_id),
-                           strict=strict)
+                           strict=strict, require_panel=strict)
     except tt.TreatyError as e:
         raise HTTPException(400, e.to_detail())
 
@@ -467,7 +467,8 @@ def treaty_preview(body: StructureIn, p: Principal = Depends(current_principal))
         clean = _validate(s, tid, body.model_dump(), strict=False)
         errors: dict = {}
         try:
-            tt.validate(body.model_dump(), reinsurer_ids=reinsurer_ids(s, tid))
+            tt.validate(body.model_dump(), reinsurer_ids=reinsurer_ids(s, tid),
+                        require_panel=True)
         except tt.TreatyError as e:
             errors = e.errors
         return {"summary": tt.summarise(clean) if clean["treaty_type"] else None,

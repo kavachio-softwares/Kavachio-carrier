@@ -217,6 +217,17 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
  *  successor, the "Renews contract N" link) keeps this same route, so without
  *  the key React reused the page — and the old contract's open forms, typed
  *  inputs and late-arriving load carried over onto the new one. */
+/** What to call the contract a renewal renews: its name and period, from the
+ *  record's renewal history — never its id. Names often repeat across a chain
+ *  ("Quota Share" renewed as "Quota Share"), so the period tells them apart. */
+function renewsLabel(rec: Rec): string {
+  const v = rec.renewal_history?.find(h => h.id === rec.renews_contract_id);
+  if (!v) return "the previous contract";
+  const span = v.inception_dt && v.expiry_dt
+    ? ` (${fmtDate(v.inception_dt)} – ${fmtDate(v.expiry_dt)})` : "";
+  return `${v.name}${span}`;
+}
+
 export default function ContractRecord() {
   const { contractId } = useParams();
   return <ContractRecordView key={contractId} />;
@@ -1291,7 +1302,11 @@ function ContractRecordView() {
         {!isBrokerSeat() && (rec.period_conflicts ?? []).map(c => {
           const block = c.severity === "block";
           const tone = block ? "crit" : "warn";
-          const other = c.with_id ? `contract ${c.with_id}` : "another version";
+          // Named by how it relates to this one — the contract it renews, or
+          // its renewal — never by id; the chip below gives its name.
+          const prior = c.with_id != null && c.with_id === rec.renews_contract_id;
+          const other = c.with_id == null ? "another contract"
+            : prior ? "the previous contract" : "the next contract";
           const chip: React.CSSProperties = {
             display: "inline-flex", alignItems: "center", gap: 6,
             padding: "5px 10px", borderRadius: 8, fontSize: 12.5,
@@ -1315,14 +1330,14 @@ function ContractRecordView() {
               </div>
               <div style={{ flex: 1, minWidth: 220 }}>
                 <div style={{ fontWeight: 600, fontSize: 14, color: "var(--p-ink)" }}>
-                  {block ? `Dates overlap ${other}` : `Gap between this contract and ${other}`}
+                  {block ? `Dates overlap ${other}` : `Gap between this contract and ${other}.`}
                 </div>
                 <div style={{ fontSize: 12.5, color: "var(--p-muted)",
                               marginTop: 3, lineHeight: 1.45 }}>
                   {c.span_from
                     ? (block
                         ? "Both contracts claim the same days, so a file for those days could match either one."
-                        : "These days belong to no contract, so a file for them has nothing to match.")
+                        : "These dates are not covered by any contract, so there is no contract to match the file with.")
                     : c.message}
                 </div>
                 {c.span_from && (
@@ -1357,7 +1372,7 @@ function ContractRecordView() {
               {c.with_id && (
                 <Link to={`/contracts/${c.with_id}`} className="btn sm"
                       style={{ alignSelf: "center" }}>
-                  Open contract {c.with_id} <ArrowRight size={13} />
+                  {prior ? "Open previous contract" : "Open next contract"} <ArrowRight size={13} />
                 </Link>
               )}
             </div>
@@ -1990,7 +2005,7 @@ function ContractRecordView() {
               <div className="hint">
                 Renews{" "}
                 <Link to={`/contracts/${rec.renews_contract_id}`} className="linkish">
-                  contract {rec.renews_contract_id}
+                  {renewsLabel(rec)}
                 </Link>
               </div>
             )}
@@ -2000,7 +2015,7 @@ function ContractRecordView() {
             {rec.awaiting_signed_copy && !rec.activation && !isBrokerSeat() && (
               <div className="note" style={{ marginTop: 14 }}>
                 <b>Next: attach the signed renewal contract.</b>{" "}
-                Contract {rec.renews_contract_id} was uploaded, so this renewal
+                The contract it renews was uploaded, so this renewal
                 needs no signing in Kavachio. Under <b>Documents</b>, choose{" "}
                 <b>Wording</b>, tick <b>This is the signed copy</b> and attach
                 the PDF — then accept it to make it active.
@@ -2073,7 +2088,7 @@ function ContractRecordView() {
                     ? <>Making it active puts it in force{rec.inception_dt
                         ? ` from ${fmtDate(rec.inception_dt)}` : ""}
                         {rec.renews_contract_id
-                          ? ` and replaces contract ${rec.renews_contract_id}` : ""}.</>
+                          ? ` and replaces ${renewsLabel(rec)}` : ""}.</>
                     : act.blockers.length === 1 ? line(act.blockers[0]) : null}
                   {!ready && act.blockers.length > 1 && (
                     <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
@@ -2890,113 +2905,149 @@ function ContractRecordView() {
             and (for a renewal read from a new PDF) mapping its rules onto the
             programme's existing Bordereau Setup. Nothing here runs on a
             bordereau until the renewal is accepted and active. */}
-        {rec.renews_contract_id && !isBrokerSeat() && (
+        {rec.renews_contract_id && !isBrokerSeat() && (() => {
+          const open = !["active", "expired", "terminated", "superseded"].includes(rec.lifecycle);
+          const ready = isUploaded && rec.has_clauses && !rec.awaiting_read
+            && !rec.awaiting_signed_copy && open;
+          const rc = ruleChanges;
+          const tiles: [string, number, string?][] = rc ? [
+            ["Previous contract", rc.previous_count],
+            ["This renewal", rc.renewal_count],
+            ["Unchanged", rc.unchanged],
+            ["New", rc.added.length, rc.added.length ? "var(--p-ok)" : undefined],
+            ["Changed", rc.changed.length, rc.changed.length ? "var(--p-warn)" : undefined],
+            ["No longer present", rc.removed.length,
+             rc.removed.length ? "var(--p-crit)" : undefined],
+          ] : [];
+          const rows = rc ? [
+            ...rc.changed.map(c => ({ key: `c${c.rule_id}`, name: c.rule_name,
+              badge: "b-warn", label: "Changed",
+              what: [c.settings.join(", "),
+                     c.previous_status !== c.status
+                       ? `was ${c.previous_status}, now ${c.status}` : ""]
+                .filter(Boolean).join(" · ") })),
+            ...rc.added.map(a => ({ key: `a${a.rule_id}`, name: a.rule_name,
+              badge: "b-ok", label: "New", what: "" })),
+            ...rc.removed.map((r, i) => ({ key: `r${i}`, name: r.rule_name,
+              badge: "b-crit", label: "No longer present", what: "" })),
+          ] : [];
+          return (
           <div className="card" style={{ marginBottom: 18 }}>
             <div className="card-h">
-              <h3>Rules for this renewal</h3>
-              <InfoTip text="Compared with the previous contract. These rules check bordereaux only once the renewal is accepted and active." />
-            </div>
-            <div style={{ padding: "16px 20px" }}>
-              <div className="rowacts" style={{ marginTop: 0 }}>
-                <button className="btn" type="button" disabled={!!busy}
+              <h3>
+                Rules for this renewal
+                <InfoTip text="Compared with the previous contract. These rules check bordereaux only once the renewal is accepted and active." />
+              </h3>
+              <div className="right" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <button className="btn sm" type="button" disabled={!!busy}
                   onClick={() => run("rule-changes", async () =>
                     setRuleChanges(await getRenewalRuleChanges(id)))}>
-                  {busy === "rule-changes" ? "Comparing…" : "Show rule changes"}
+                  {busy === "rule-changes" ? "Comparing…" : rc ? "Compare again" : "Show rule changes"}
                 </button>
-                {isUploaded && rec.has_clauses && !rec.awaiting_read && !rec.awaiting_signed_copy
-                  && rec.has_live_setup === false && rec.programme && rec.counterparty
-                  && !["active", "expired", "terminated", "superseded"].includes(rec.lifecycle) && (
-                  <Link className="btn pri"
+                {ready && rec.has_live_setup === false && rec.programme && rec.counterparty && (
+                  <Link className="btn pri sm"
                     to={`/direct/setup?program_id=${rec.programme.id}`
                       + `&broker_party_id=${rec.counterparty.id}`}>
                     Next: go to Bordereau Setup <ArrowRight size={13} />
                   </Link>
                 )}
-                {isUploaded && rec.has_clauses && !rec.awaiting_read && !rec.awaiting_signed_copy
-                  && rec.has_live_setup !== false
-                  && !["active", "expired", "terminated", "superseded"].includes(rec.lifecycle) && (
-                  <button className="btn pri" type="button" disabled={!!busy}
+                {ready && rec.has_live_setup !== false && (
+                  <button className="btn pri sm" type="button" disabled={!!busy}
                     onClick={() => run("reflect", async () =>
                       setRuleChanges(await reflectSetup(id)))}>
                     {busy === "reflect" ? "Working…" : "Reflect new contract rules in BDX setup"}
                   </button>
                 )}
               </div>
-              {isUploaded && !rec.has_clauses && !rec.awaiting_read
-                && !["active", "expired", "terminated", "superseded"].includes(rec.lifecycle) && (
-                <div className="hint" style={{ marginTop: 10 }}>
+            </div>
+            <div style={{ padding: "16px 20px", display: "grid", gap: 12 }}>
+              {!rc && (
+                <div className="sub">
+                  Press <b>Show rule changes</b> to compare this renewal&rsquo;s rules with
+                  the previous contract&rsquo;s.
+                </div>
+              )}
+              {isUploaded && !rec.has_clauses && !rec.awaiting_read && open && (
+                <div className="note warn">
                   No clauses yet, so there are no rules to reflect. Attach the
-                  signed PDF under Documents (Wording, “This is the signed copy”),
+                  signed PDF under Documents (Wording, &ldquo;This is the signed copy&rdquo;),
                   then read it.
                 </div>
               )}
-              {ruleChanges && (
-                <div style={{ marginTop: 12 }}>
-                  {ruleChanges.setup && (
-                    <div className="hint">
-                      Written for the live setup{ruleChanges.setup.name ? ` “${ruleChanges.setup.name}”` : ""};
-                      its templates and column mapping were not changed.
+              {rc && (<>
+                {rc.setup && (
+                  <div className="note ok">
+                    Written for the live setup{rc.setup.name ? ` “${rc.setup.name}”` : ""};
+                    its templates and column mapping were not changed.
+                  </div>
+                )}
+                <div style={{ display: "grid", gap: 10,
+                              gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))" }}>
+                  {tiles.map(([label, n, tone]) => (
+                    <div key={label} style={{ border: "1px solid var(--p-border)", borderRadius: 10,
+                                              padding: "10px 12px", background: "var(--p-surface)" }}>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: tone ?? "var(--p-ink)" }}>{n}</div>
+                      <div className="sub" style={{ fontSize: 12 }}>{label}</div>
                     </div>
-                  )}
-                  <p style={{ margin: "6px 0" }}>
-                    Previous contract: <b>{ruleChanges.previous_count}</b> rules ·
-                    this renewal: <b>{ruleChanges.renewal_count}</b> ·
-                    unchanged <b>{ruleChanges.unchanged}</b> · new <b>{ruleChanges.added.length}</b> ·
-                    no longer present <b>{ruleChanges.removed.length}</b> ·
-                    changed <b>{ruleChanges.changed.length}</b>
-                  </p>
-                  {ruleChanges.margin_note && <div className="note">{ruleChanges.margin_note}</div>}
-                  {(ruleChanges.kept_disabled?.length ?? 0) > 0 && (
-                    <div className="hint">Kept switched off as on the previous contract:{" "}
-                      {ruleChanges.kept_disabled!.join(", ")}</div>
-                  )}
-                  {ruleChanges.dates_to_review.length > 0 && (
-                    <div className="note warn" style={{ marginTop: 10 }}>
-                      <b>Check these rules.</b> They hold dates that are not the
-                      contract's start or end, so they were left as written and
-                      are still active:
-                      <ul style={{ margin: "6px 0 0" }}>
-                        {ruleChanges.dates_to_review.map(r => (
-                          <li key={r.rule_id}>{r.rule_name} — {r.dates.join(", ")}</li>))}
-                      </ul>
-                    </div>
-                  )}
-                  {ruleChanges.uncertain.length > 0 && (
-                    <div className="note warn" style={{ marginTop: 10 }}>
-                      <b>Compare by hand.</b> More than one rule checks the same
-                      column, so they could not be paired:
-                      <ul style={{ margin: "6px 0 0" }}>
-                        {ruleChanges.uncertain.map((u, i) => (
-                          <li key={i}>{String(u.column || u.check || "—")}: previous{" "}
-                            {u.previous.join(", ") || "none"} · renewal {u.renewal.join(", ") || "none"}</li>))}
-                      </ul>
-                    </div>
-                  )}
-                  {ruleChanges.changed.length > 0 && (
-                    <details style={{ marginTop: 10 }}>
-                      <summary>Changed ({ruleChanges.changed.length})</summary>
-                      <ul>{ruleChanges.changed.map(c => (
-                        <li key={c.rule_id}>{c.rule_name}{c.settings.length ? ` — ${c.settings.join(", ")}` : ""}
-                          {c.previous_status !== c.status ? ` (was ${c.previous_status}, now ${c.status})` : ""}</li>))}</ul>
-                    </details>
-                  )}
-                  {ruleChanges.added.length > 0 && (
-                    <details style={{ marginTop: 6 }}>
-                      <summary>New ({ruleChanges.added.length})</summary>
-                      <ul>{ruleChanges.added.map(a => <li key={a.rule_id}>{a.rule_name}</li>)}</ul>
-                    </details>
-                  )}
-                  {ruleChanges.removed.length > 0 && (
-                    <details style={{ marginTop: 6 }}>
-                      <summary>No longer present ({ruleChanges.removed.length})</summary>
-                      <ul>{ruleChanges.removed.map((r, i) => <li key={i}>{r.rule_name}</li>)}</ul>
-                    </details>
-                  )}
+                  ))}
                 </div>
-              )}
+                {rc.margin_note && <div className="note">{rc.margin_note}</div>}
+                {(rc.kept_disabled?.length ?? 0) > 0 && (
+                  <div className="note">
+                    <b>Kept switched off</b>, as on the previous contract:{" "}
+                    {rc.kept_disabled!.join(", ")}
+                  </div>
+                )}
+                {rc.dates_to_review.length > 0 && (
+                  <div className="note warn">
+                    <b>Check these rules.</b> They hold dates that are not the
+                    contract&rsquo;s start or end, so they were left as written and
+                    are still active:
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                      {rc.dates_to_review.map(r => (
+                        <li key={r.rule_id}>{r.rule_name} — {r.dates.join(", ")}</li>))}
+                    </ul>
+                  </div>
+                )}
+                {rc.uncertain.length > 0 && (
+                  <div className="note warn">
+                    <b>Compare by hand.</b> More than one rule checks the same
+                    column, so they could not be paired:
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                      {rc.uncertain.map((u, i) => (
+                        <li key={i}>{String(u.column || u.check || "—")}: previous{" "}
+                          {u.previous.join(", ") || "none"} · renewal {u.renewal.join(", ") || "none"}</li>))}
+                    </ul>
+                  </div>
+                )}
+                {rows.length === 0 ? (
+                  <div className="sub">No rule changed from the previous contract.</div>
+                ) : (
+                  <div className="tbl-wrap" style={{ border: "1px solid var(--p-border)", borderRadius: 10 }}>
+                    <table>
+                      <thead>
+                        <tr><th className="l">Rule</th><th className="l">Change</th>
+                            <th className="l">What changed</th></tr>
+                      </thead>
+                      <tbody>
+                        {rows.map(r => (
+                          <tr key={r.key}>
+                            <td className="l">{r.name}</td>
+                            <td className="l" style={{ whiteSpace: "nowrap" }}>
+                              <span className={`badge ${r.badge}`}><span className="d" />{r.label}</span>
+                            </td>
+                            <td className="l sub">{r.what || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>)}
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* ── renewal history ── Contract PERIODS linked by renewal, oldest
             first, the same from every contract in the chain. Kept apart from

@@ -14,7 +14,7 @@
  * A link the carrier has withdrawn, one past its date, or one whose treaty has
  * ended says exactly that, in a sentence, rather than "invalid link".
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Ban, CalendarClock, CheckCircle2, Download, FileText, KeyRound, Loader2,
@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import KavachioLogo from "../components/KavachioLogo";
 import { TreatyTower } from "../components/treaty/TreatyTower";
+import { TermsUsed } from "../components/treaty/TermsUsed";
 import {
   approveBasisOnLink, requestBasisChanges, type TreatyViewBasisChange,
   approveEndorsementOnLink, approveTreaty, clearViewSession, downloadTreatyDocument,
@@ -1125,6 +1126,8 @@ function StatementsCard({ token, v, onLock, onStatements }: {
   onStatements: (s: LinkStatement[]) => void;
 }) {
   const [open, setOpen] = useState<{ id: number; mode: "agree" | "query" } | null>(null);
+  // The statement whose terms are shown under its row (27.3).
+  const [termsOf, setTermsOf] = useState<number | null>(null);
   const [name, setName] = useState(v.viewer.name ?? "");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1164,8 +1167,8 @@ function StatementsCard({ token, v, onLock, onStatements }: {
                 <th>Recovery</th><th>Your answer</th><th /></tr>
           </thead>
           <tbody>
-            {(v.statements ?? []).map(st => (
-              <tr key={st.id} style={st.superseded ? { opacity: .55 } : undefined}>
+            {(v.statements ?? []).map(st => (<Fragment key={st.id}>
+              <tr style={st.superseded ? { opacity: .55 } : undefined}>
                 <td className="mono">
                   {st.period}
                   {st.version_no > 1 && <div className="sub">version {st.version_no}</div>}
@@ -1191,6 +1194,10 @@ function StatementsCard({ token, v, onLock, onStatements }: {
                           })}>
                     <Download size={12} /> Excel
                   </button>{" "}
+                  <button className="btn sm" type="button" aria-expanded={termsOf === st.id}
+                          onClick={() => setTermsOf(t => t === st.id ? null : st.id)}>
+                    Terms used
+                  </button>{" "}
                   {!st.superseded && st.status !== "agreed" && (
                     <button className="btn sm pri" type="button"
                             onClick={() => setOpen({ id: st.id, mode: "agree" })}>Agree</button>
@@ -1201,7 +1208,19 @@ function StatementsCard({ token, v, onLock, onStatements }: {
                   )}
                 </td>
               </tr>
-            ))}
+              {termsOf === st.id && (
+                <tr>
+                  <td colSpan={6} style={{ background: "var(--p-surface-2)" }}>
+                    <div className="sub" style={{ marginBottom: 6 }}>
+                      Every figure for {st.period} was worked out with these terms
+                      {st.basis?.as_of ? `, in force on ${fmtDate(st.basis.as_of)}` : ""}.
+                      Each line&rsquo;s sum is in the Excel file.
+                    </div>
+                    <TermsUsed bare basis={st.basis} />
+                  </td>
+                </tr>
+              )}
+            </Fragment>))}
           </tbody>
         </table>
       </div>

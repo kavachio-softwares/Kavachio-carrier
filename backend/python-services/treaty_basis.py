@@ -309,6 +309,7 @@ def structure_at(s, c, st: dict, period: str) -> dict:
     on = bounds[0] if bounds else dt.date.today()
     sched = schedule(s, c, st)
     live = in_force(sched, on)
+    about = {(t["term"], t["layer"]): t for t in sched["terms"]}
     out = copy.deepcopy(st)
     used = []
     for (term, layer), v in live.items():
@@ -325,9 +326,15 @@ def structure_at(s, c, st: dict, period: str) -> dict:
             out.setdefault("terms", {})[term] = value
         elif layer < len(out.get("layers") or []):
             out["layers"][layer].setdefault("terms", {})[term] = value
+        t = about.get((term, layer)) or {}
         used.append({"term": term, "layer": layer, "id": v["id"],
                      "effective_from": v["effective_from"], "source": v["source"],
-                     "value": value})
+                     "value": value,
+                     # What it is called and where it came from, so the record
+                     # of a statement's terms reads on its own (27.3).
+                     "label": t.get("label"), "kind": t.get("kind"),
+                     "layer_name": t.get("layer_name"), "note": v.get("note"),
+                     "document_id": v.get("document_id")})
     out["_basis"] = {"as_of": on.isoformat(), "terms": used}
     return out
 

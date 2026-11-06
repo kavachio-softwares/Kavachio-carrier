@@ -63,6 +63,27 @@ export type CededStatement = {
 
 export type CededLine = Record<string, string | number | null>;
 
+/** What a statement was worked out with (27.3): every dated term in force on
+ *  its period's first day — which version, from when, where agreed — and each
+ *  layer's reinsurers. Each line's own sum is its `how`. */
+export type CededBasis = {
+  as_of: string | null; treaty_type: string | null; type_label: string | null;
+  terms: {
+    term: string; layer: number | null; id: number | null; label: string;
+    layer_name: string | null; kind: string | null; value_text: string;
+    effective_from: string | null; source: string | null; source_text: string;
+  }[];
+  layers: {
+    index: number; name: string | null;
+    shares: { reinsurer_party_id: number; reinsurer: string | null;
+              share_pct: number; is_lead: boolean }[];
+  }[];
+};
+export type BasisChange = {
+  label: string; layer_name: string | null; was: string; now: string;
+  effective_from: string | null; source_text: string | null;
+};
+
 export type CededSource = {
   export_id: number; program_id: number; programme: string | null;
   broker: string | null; filename: string | null; period: string | null;
@@ -89,6 +110,10 @@ export type CededDetail = CededSummary & {
   /** Sent, and the treaty's terms for its period changed since — a dated
    *  change reaching back into it. What was sent stays as it was. */
   basis_changed?: boolean;
+  /** The terms it was worked out with (27.3); null for one made before. */
+  basis?: CededBasis | null;
+  /** Terms for its period that differ now from those it used. */
+  basis_changes?: BasisChange[];
   can_send: boolean;
   columns: { key: string; label: string; kind: "text" | "money" | "pct" }[];
   sent?: { emails: number; of: number; no_contact: (string | null)[] };
@@ -175,6 +200,8 @@ export type LinkStatement = {
   status: "sent" | "agreed" | "queried";
   sent_at: string | null; answered_by: string | null; answered_at: string | null;
   answer_note: string | null; filename: string | null;
+  /** The terms it was worked out with — this reinsurer's own share only. */
+  basis?: CededBasis | null;
 };
 
 const linkHeaders = (token: string) => ({ "X-Treaty-Session": getViewSession(token) });

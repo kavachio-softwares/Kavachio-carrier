@@ -286,7 +286,9 @@ def compute(structure: dict, rows: list[dict], *,
 
     comm_pct = num(terms.get("ceding_commission_pct"))
 
-    def proportional(row: dict, fraction: float, layer_name: str):
+    def proportional(row: dict, fraction: float, layer_name: str, why: str = ""):
+        """`why` says, in words, how `fraction` came about when it is not
+        simply the cession — it starts the line's "how" (27.3)."""
         prem = num(first(row, PREMIUM))
         si = num(first(row, SUM_INSURED))
         paid = num(first(row, CLAIM_PAID))
@@ -296,6 +298,17 @@ def compute(structure: dict, rows: list[dict], *,
             return
         ceded = prem * fraction if prem is not None else None
         comm = ceded * comm_pct / 100 if ceded is not None and comm_pct else None
+        f = _p(fraction * 100)
+        how = [why] if why else []
+        if ceded is not None:
+            how.append(f"premium {_m(prem)} × {f} ceded = {_m(ceded)}")
+            if comm is not None:
+                how.append(f"commission {_p(comm_pct)} × {_m(ceded)} = {_m(comm)}")
+                how.append(f"net {_m(ceded)} − {_m(comm)} = {_m(ceded - comm)}")
+        if paid is not None:
+            how.append(f"claims paid {_m(paid)} × {f} = {_m(paid * fraction)}")
+        if res is not None:
+            how.append(f"outstanding {_m(res)} × {f} = {_m(res * fraction)}")
         lines.append({
             **base(row), "claim": _s(first(row, CLAIM_NO)), "layer": layer_name,
             "layer_index": 0,
@@ -306,6 +319,9 @@ def compute(structure: dict, rows: list[dict], *,
             "claims_paid": _r(paid * fraction) if paid is not None else None,
             "claims_outstanding": _r(res * fraction) if res is not None else None,
             "recovery": None,
+            # The rates this line was worked out with, and the sum (27.3).
+            "commission_pct": comm_pct if ceded is not None and comm_pct else None,
+            "how": _sentence(how),
         })
 
     layer0 = layers[0]["name"] if layers else (tt.TREATY_TYPES.get(ttype) or {}).get(
@@ -315,11 +331,14 @@ def compute(structure: dict, rows: list[dict], *,
         c = (num(terms.get("cession_pct")) or 0) / 100
         limit = num(terms.get("treaty_limit"))
         for row in rows:
-            frac = c
+            frac, why = c, ""
             si = num(first(row, SUM_INSURED))
             if limit and si and si * c > limit:
                 frac = limit / si
-            proportional(row, frac, layer0)
+                why = (f"cession {_p(c * 100)} of sum insured {_m(si)} would pass "
+                       f"the limit per risk {_m(limit)}, so {_m(limit)} ÷ {_m(si)} "
+                       f"= {_p(frac * 100)} is ceded")
+            proportional(row, frac, layer0, why)
         if limit:
             notes.append("Risks above the limit per risk are ceded only up to it.")
 
@@ -336,7 +355,11 @@ def compute(structure: dict, rows: list[dict], *,
             if frac == 0:
                 skip(row, f"sum insured within the retention line ({tt.money(line)})")
                 continue
-            proportional(row, frac, layer0)
+            over = si - line
+            why = (f"sum insured {_m(si)} − retention {_m(line)} = {_m(over)}"
+                   + (f", up to {n:g} lines = {_m(cap)}" if over > cap else "")
+                   + f"; {_m(min(over, cap))} ÷ {_m(si)} = {_p(frac * 100)} ceded")
+            proportional(row, frac, layer0, why)
 
     elif ttype == "facultative":
         ref = str(terms.get("risk_reference") or "").strip().lower()
@@ -345,7 +368,7 @@ def compute(structure: dict, rows: list[dict], *,
         for row in rows:
             pol = str(first(row, POLICY) or "").strip().lower()
             if ref and pol == ref:
-                proportional(row, frac, layer0)
+                proportional(row, frac, layer0, f"share ceded {_p(frac * 100)}")
                 hit += 1
         if not hit:
             notes.append(f"No row for policy {terms.get('risk_reference')} in "
@@ -377,7 +400,12 @@ def compute(structure: dict, rows: list[dict], *,
                               "ceded_pct": None, "ceded_premium": None,
                               "ceding_commission": None, "net_premium": None,
                               "claims_paid": None, "claims_outstanding": None,
-                              "claim_incurred": _r(inc), "recovery": _r(rec)})
+                              "claim_incurred": _r(inc), "recovery": _r(rec),
+                              "how": (f"Claim {_m(inc)} − retention {_m(ret)} = "
+                                      f"{_m(inc - ret)}"
+                                      + (f", capped at the limit {_m(lim)}"
+                                         if inc - ret > lim else "")
+                                      + f": recovery {_m(rec)}")})
 
     elif ttype == "stop_loss":
         lay = layers[0] if layers else {"terms": {}}
@@ -394,12 +422,19 @@ def compute(structure: dict, rows: list[dict], *,
             att, cov = num(lt.get("attachment_pct")) or 0, num(lt.get("limit_pct")) or 0
             pts = max(0.0, min((lr or 0) - att, cov))
             rec = pts / 100 * base_prem if base_prem else 0
+            how = (f"Loss ratio {_m(loss)} ÷ {_m(base_prem)} = {(lr or 0):.2f}%; "
+                   f"above the attachment {_p(att)}: {pts:.2f} points"
+                   + (f" (cover is {cov:g} points)" if (lr or 0) - att > cov else "")
+                   + f"; {pts:.2f}% × {_m(base_prem)} = recovery {_m(rec)}")
             notes.append(f"Treaty year to date: premium {tt.full_money(base_prem)}, "
                          f"losses {tt.full_money(loss)}, loss ratio "
                          f"{(lr or 0):.2f}% against {att:g}%.")
         else:
             att, cov = num(lt.get("attachment_amount")) or 0, num(lt.get("limit_amount")) or 0
             rec = max(0.0, min(loss - att, cov))
+            how = (f"Losses {_m(loss)} − attachment {_m(att)} = {_m(loss - att)}"
+                   + (f", capped at the cover {_m(cov)}" if loss - att > cov else "")
+                   + f": recovery {_m(rec)}")
             notes.append(f"Treaty year to date: aggregate losses "
                          f"{tt.full_money(loss)} against {tt.full_money(att)}.")
         if rec > 0:
@@ -411,10 +446,27 @@ def compute(structure: dict, rows: list[dict], *,
                           "ceded_pct": None, "ceded_premium": None,
                           "ceding_commission": None, "net_premium": None,
                           "claims_paid": None, "claims_outstanding": None,
-                          "claim_incurred": _r(loss), "recovery": _r(rec)})
+                          "claim_incurred": _r(loss), "recovery": _r(rec),
+                          "how": how})
 
     totals = _sum(lines)
     return {"lines": lines, "skipped": skipped, "notes": notes, "totals": totals}
+
+
+def _sentence(steps: list[str]) -> str:
+    """A line's steps as one sentence: "Premium 1,000.00 × 40% ceded = 400.00;
+    commission …"."""
+    out = "; ".join(x for x in steps if x)
+    return out[:1].upper() + out[1:]
+
+
+def _m(v: Optional[float]) -> str:
+    """An amount in a line's "how": two decimals, no currency."""
+    return "—" if v is None else f"{v:,.2f}"
+
+
+def _p(v: Optional[float]) -> str:
+    return "—" if v is None else f"{round(v, 4):g}%"
 
 
 def _incurred(row: dict) -> Optional[float]:
@@ -465,6 +517,18 @@ def by_reinsurer(structure: dict, lines: list[dict]) -> dict[int, dict]:
                 for k in MONEY_KEYS:
                     if ln.get(k) is not None:
                         mine[k] = round(ln[k] * f, 2)
+                # The last step of the sum: this reinsurer's share of it.
+                key = next((k for k in ("net_premium", "recovery", "ceded_premium",
+                                        "claims_paid", "claims_outstanding")
+                            if ln.get(k) is not None), None)
+                if key:
+                    label = {"net_premium": "net", "recovery": "recovery",
+                             "ceded_premium": "ceded", "claims_paid": "claims paid",
+                             "claims_outstanding": "outstanding"}[key]
+                    mine["how"] = _sentence([
+                        ln.get("how") or "", f"your share {_p(pct)} of each amount: "
+                                             f"{label} {_m(ln[key])} × {_p(pct)} = "
+                                             f"{_m(mine[key])}"])
                 st["lines"].append(mine)
     for st in out.values():
         st["totals"] = _sum(st["lines"])
@@ -501,7 +565,8 @@ def statement_xlsx(*, carrier: str, reinsurer: str, treaty: str,
                    currency: Optional[str], shares: dict, totals: dict,
                    lines: list[dict], notes: list[str],
                    previous: Optional[dict] = None,
-                   columns: Optional[list[dict]] = None) -> bytes:
+                   columns: Optional[list[dict]] = None,
+                   basis_rows: Optional[list] = None) -> bytes:
     """One reinsurer's statement as a workbook: a summary, then its lines in
     the setup's columns (`columns` = [{key, heading}], in order)."""
     import openpyxl
@@ -551,15 +616,20 @@ def statement_xlsx(*, carrier: str, reinsurer: str, treaty: str,
 
     ld = wb.create_sheet("Lines")
     used = _used_columns(lines, columns)
-    ld.append([h for _k, h in used] + ["Your share %"])
+    ld.append([h for _k, h in used] + ["Your share %", "How it was worked out"])
     for c in ld[1]:
         c.font = bold
         c.fill = head
         c.alignment = Alignment(wrap_text=True)
     for ln in lines:
-        ld.append([ln.get(k) for k, _h in used] + [ln.get("share_pct")])
+        ld.append([ln.get(k) for k, _h in used] + [ln.get("share_pct"), ln.get("how")])
     for i in range(1, len(used) + 2):
         ld.column_dimensions[openpyxl.utils.get_column_letter(i)].width = 16
+    ld.column_dimensions[openpyxl.utils.get_column_letter(len(used) + 2)].width = 90
+    # The terms the figures were worked out with (27.3).
+    if basis_rows:
+        import ceded_layout
+        ceded_layout._terms_sheet(wb.create_sheet("Terms used"), basis_rows)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

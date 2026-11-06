@@ -793,12 +793,14 @@ export async function uploadSignedTreaty(body: {
 
 // ── 27.1 / 27.2: the calculation basis, with the dates it applies from ──────
 export type BasisKind = "pct" | "money" | "int" | "profit" | "sliding";
+// A field is null while its box is still empty on a form; a saved term always
+// has every figure (the server refuses a blank one).
 export type SlidingScale = {
-  provisional_pct: number; method: "linear" | "step";
-  points: { loss_ratio: number; rate: number }[];
+  provisional_pct: number | null; method: "linear" | "step";
+  points: { loss_ratio: number | null; rate: number | null }[];
   min_pct?: number; max_pct?: number;
 };
-export type ProfitCommission = { rate_pct: number; expense_pct: number; deficit_years: number };
+export type ProfitCommission = { rate_pct: number | null; expense_pct: number | null; deficit_years: number | null };
 
 export type BasisVersion = {
   /** null for the structure's own value, which applies from inception. */

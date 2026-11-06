@@ -1990,7 +1990,7 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
             if existing:
                 raise HTTPException(409, {
                     "message": f"That contract has already been renewed — see "
-                               f"contract {existing.id}.",
+                               f"\"{existing.name or existing.filename or 'its renewal'}\".",
                     "errors": {"renews_contract_id": "already renewed"}})
             c.renews_contract_id = prior.id
         if body.wording_sections:

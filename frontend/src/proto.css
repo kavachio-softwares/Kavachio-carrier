@@ -178,7 +178,10 @@
 .proto .card-h .ci{width:18px;height:18px;color:var(--p-faint)}
 .proto .card-h .sub{color:var(--p-faint);font-size:12.5px;font-weight:500}
 .proto .card-h .right{margin-left:auto;display:flex;gap:10px;align-items:center}
-.proto .card-h .info-tip{margin-left:-4px}
+/* Only an icon that is itself a header item: the row's 11px gap already
+   spaces it. One inside the title (<h3>Title <InfoTip/></h3>) gets no gap,
+   so pulling it left ran it into the last letter. */
+.proto .card-h > .info-tip{margin-left:-4px}
 .proto .grid{display:grid;gap:18px}
 /* Grid items default to min-width:auto, so a wide child (e.g. a preview table)
    blows its column past the track and makes the whole page scroll sideways.
@@ -383,9 +386,13 @@
 /* Beside a heading in plain Tailwind screens (e.g. a clause with no column in
    Bordereau Setup) — outside .proto and .setup-tab, so it is sized here too;
    without this the icon has no size and simply does not show. */
-.tip-inline .info-tip{display:inline-flex;vertical-align:middle;outline:none}
+.tip-inline .info-tip{display:inline-flex;vertical-align:middle;outline:none;margin-left:6px}
 .tip-inline .info-tip .ic{width:14px;height:14px;cursor:help;color:#9aa3b2}
 .tip-inline .info-tip:hover .ic,.tip-inline .info-tip:focus .ic{color:#1f3a5f}
+/* Anywhere else (a Tailwind screen outside .proto): a gap from the text
+   before it, and a size, so it neither touches the word nor disappears. */
+.info-tip{display:inline-flex;vertical-align:middle;margin-left:6px;outline:none}
+.info-tip > .ic{width:14px;height:14px;cursor:help}
 .info-tip-bubble{
   position:fixed;
   width:230px;background:#0E1320;color:#fff;font-size:12px;font-weight:500;line-height:1.5;

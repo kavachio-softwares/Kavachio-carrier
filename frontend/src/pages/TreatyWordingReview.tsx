@@ -27,6 +27,7 @@ import {
 } from "../api/treaty";
 import { fmtDate, fmtStamp } from "../utils/date";
 import { OptionalCommission } from "../components/treaty/CommissionEditors";
+import { InfoTip } from "../components/InfoTip";
 import type { ProfitCommission, SlidingScale } from "../api/treaty";
 
 type Dates = { inception_dt: string; expiry_dt: string; year_of_account: string;
@@ -171,7 +172,7 @@ export default function TreatyWordingReview() {
         <td colSpan={2}>
           <b style={{ fontWeight: 600 }}>{f.label}</b>
           <span className="sub"> — optional</span>
-          {f.hint && <div className="sub" style={{ fontSize: 11.5 }}>{f.hint}</div>}
+          {f.hint && <InfoTip text={f.hint} />}
           <div style={{ marginTop: 8 }}>
             <OptionalCommission bare kind={f.kind} label={f.label}
               value={value as SlidingScale | ProfitCommission | null | undefined}
@@ -186,7 +187,7 @@ export default function TreatyWordingReview() {
         <td style={{ width: "42%" }}>
           <b style={{ fontWeight: 600 }}>{f.label}</b>
           {f.required && <span style={{ color: "var(--p-crit-ink)" }}> *</span>}
-          {f.hint && <div className="sub" style={{ fontSize: 11.5 }}>{f.hint}</div>}
+          {f.hint && <InfoTip text={f.hint} />}
         </td>
         <td style={missing ? { boxShadow: "inset 2px 0 0 var(--p-warn)" } : undefined}>
           {input(f, value, onChange)}

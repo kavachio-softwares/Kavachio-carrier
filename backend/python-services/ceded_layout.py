@@ -546,9 +546,38 @@ def fill_xlsx(*, blob: Optional[bytes], layout: dict, columns: list[dict],
         sm.append([k, v])
     sm.column_dimensions["A"].width = 28
     sm.column_dimensions["B"].width = 22
+    # The terms the figures were worked out with (27.3).
+    if summary.get("terms"):
+        _terms_sheet(wb.create_sheet(_free_name(wb, "Terms used")), summary["terms"])
+    # Each line's sum, on its own sheet: the carrier's layout is left as agreed.
+    if any(ln.get("how") for ln in lines):
+        from openpyxl.styles import Font
+        hw = wb.create_sheet(_free_name(wb, "How it was worked out"))
+        hw.append(["Policy", "Claim", "Layer", "How it was worked out"])
+        for c in hw[1]:
+            c.font = Font(bold=True)
+        for ln in lines:
+            hw.append([ln.get("policy"), ln.get("claim"), ln.get("layer"), ln.get("how")])
+        for col, wd in zip("ABCD", (18, 16, 14, 110)):
+            hw.column_dimensions[col].width = wd
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _terms_sheet(ws, rows: list) -> None:
+    """The "Terms used" sheet: what a statement was worked out with."""
+    from openpyxl.styles import Font
+    for r in rows:
+        ws.append(list(r))
+        if len(r) > 2:
+            for cell in ws[ws.max_row]:
+                if cell.value in ("Term", "Reinsurer"):
+                    for c in ws[ws.max_row]:
+                        c.font = Font(bold=True)
+                    break
+    for col, w in zip("ABCDE", (30, 16, 46, 14, 34)):
+        ws.column_dimensions[col].width = w
 
 
 def _free_name(wb, name: str) -> str:

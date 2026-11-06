@@ -1326,3 +1326,126 @@ def test_an_endorsement_moves_the_calculation_basis_from_its_date(w, mail):
                        json={"contract_id": cid, "period": "2027-10"}).json()
     assert {ln["ceded_pct"] for ln in apr["lines"]} == {40}
     assert {ln["ceded_pct"] for ln in oct_["lines"]} == {30}
+
+
+# ── 27.3 every figure traced back to the stored terms ───────────────────────
+def test_each_line_carries_its_own_sum():
+    """The line says how it was worked out, with the same figures it holds."""
+    st = {"treaty_type": "quota_share",
+          "terms": {"cession_pct": 40, "ceding_commission_pct": 30, "treaty_limit": 50_000},
+          "layers": [{"name": "QS", "shares": [{"reinsurer_party_id": 1, "share_pct": 60}]}]}
+    rows = [{"premium_transaction_gross_premium_amount": 1000,
+             "policy_sum_insured_amount": 100_000},
+            {"premium_transaction_gross_premium_amount": 1000,
+             "policy_sum_insured_amount": 200_000}]
+    plain, capped = ce.compute(st, rows)["lines"]
+    assert plain["how"] == ("Premium 1,000.00 × 40% ceded = 400.00; commission 30% × "
+                            "400.00 = 120.00; net 400.00 − 120.00 = 280.00")
+    assert plain["commission_pct"] == 30
+    # Over the limit per risk: the line says why less than the cession was ceded.
+    assert capped["ceded_pct"] == 25
+    assert capped["how"].startswith("Cession 40% of sum insured 200,000.00 would pass "
+                                    "the limit per risk 50,000.00")
+    mine = ce.by_reinsurer(st, [plain])[1]["lines"][0]
+    assert mine["net_premium"] == 168
+    assert mine["how"].endswith("your share 60% of each amount: net 280.00 × 60% = 168.00")
+
+    # The standard workbook: each line's sum beside it, and the terms used.
+    book = ce.statement_xlsx(carrier="C", reinsurer="R", treaty="T", type_label="QS",
+                             period="2027-01", version=1, currency="USD",
+                             shares={"QS": 60}, totals={}, lines=[mine], notes=[],
+                             basis_rows=[("Term", "Layer", "Value"), ("Cession", "", "40%")])
+    wb = openpyxl.load_workbook(io.BytesIO(book))
+    lines = list(wb["Lines"].iter_rows(values_only=True))
+    assert lines[0][-1] == "How it was worked out" and lines[1][-1] == mine["how"]
+    assert ("Cession", None, "40%") in list(wb["Terms used"].iter_rows(values_only=True))
+
+    xol = {"treaty_type": "xol", "terms": {},
+           "layers": [{"name": "L1", "terms": {"retention": 100, "limit": 400}}]}
+    ln = ce.compute(xol, [{"claim_total_incurred_amount": 700}])["lines"][0]
+    assert ln["recovery"] == 400
+    assert ln["how"] == ("Claim 700.00 − retention 100.00 = 600.00, capped at the "
+                         "limit 400.00: recovery 400.00")
+
+
+def test_a_statement_keeps_the_terms_it_was_worked_out_with(w, mail):
+    """The statement records every term it used — value, version, date, where
+    agreed — and each share. A later change does not alter that record: the
+    statement says what differs now. Each reinsurer sees its own share only."""
+    period = "2027-11"
+    _inward(w, [("TR1", 100_000, 1000, None, None)], period=period)
+    cid = _treaty(w, _qs(w, 40), "QS traced")
+    cb = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                     json={"contract_id": cid, "period": period}).json()
+    d = client.get(f"/reinsurance/bordereaux/{cb['id']}", headers=w["ch"]).json()
+    assert "_basis" not in d["totals"]
+    basis = d["basis"]
+    assert basis["as_of"] == "2027-11-01"
+    terms = {t["term"]: t for t in basis["terms"]}
+    assert terms["cession_pct"]["value_text"] == "40%"
+    assert terms["cession_pct"]["source_text"] == "As agreed on the treaty"
+    assert terms["cession_pct"]["effective_from"] == "2027-01-01"
+    assert terms["ceding_commission_pct"]["value_text"] == "30%"
+    shares = {sh["reinsurer"]: (sh["share_pct"], sh["is_lead"])
+              for sh in basis["layers"][0]["shares"]}
+    assert shares == {"Swiss Re": (60, True), "Munich Re": (40, False)}
+    line = d["lines"][0]
+    assert line["how"].startswith("Premium 1,000.00 × 40% ceded = 400.00")
+    assert d["basis_changes"] == []
+
+    # The Excel each reinsurer receives: a "Terms used" sheet, and each line's sum.
+    swiss = next(x for x in d["statements"] if x["reinsurer_party_id"] == w["swiss"])
+    f = client.get(f"/reinsurance/bordereaux/{cb['id']}/statements/{swiss['id']}/file",
+                   headers=w["ch"])
+    wb = openpyxl.load_workbook(io.BytesIO(f.content))
+    used = [[c for c in r if c is not None] for r in wb["Terms used"].iter_rows(values_only=True)]
+    assert ["Cession", "40%", "2027-01-01", "As agreed on the treaty"] in used
+    assert ["Swiss Re", "QS", "60%", "Lead"] in used
+    assert not any("Munich Re" in r for r in used)               # its own share only
+    # The carrier's own layout is left as agreed; the sums are a sheet of their own.
+    how = list(wb["How it was worked out"].iter_rows(values_only=True))
+    assert how[0] == ("Policy", "Claim", "Layer", "How it was worked out")
+    assert how[1][0] == "TR1"
+    assert how[1][3].endswith("your share 60% of each amount: net 280.00 × 60% = 168.00")
+
+    # Sent, then the cession changes from a date inside the period.
+    assert client.post(f"/reinsurance/bordereaux/{cb['id']}/send", headers=w["ch"],
+                       json={}).status_code == 200
+    r = client.post(f"/contracts/{cid}/basis", headers=w["ch"], json={
+        "term": "cession_pct", "value": 25, "effective_from": "2027-11-01"})
+    assert r.status_code == 200, r.text
+    _approve_basis(w, cid)
+    d = client.get(f"/reinsurance/bordereaux/{cb['id']}", headers=w["ch"]).json()
+    assert d["basis_changed"]
+    assert next(t for t in d["basis"]["terms"]
+                if t["term"] == "cession_pct")["value_text"] == "40%"   # what it used
+    assert [(c["label"], c["was"], c["now"], c["effective_from"])
+            for c in d["basis_changes"]] == [("Cession", "40%", "25%", "2027-11-01")]
+
+    # On Munich's private link: the same terms, and only its own share.
+    client.post(f"/contracts/{cid}/reinsurer-access", headers=w["ch"],
+                json={"contact_ids": [c["id"] for g in client.get(
+                    f"/contracts/{cid}/reinsurer-access", headers=w["ch"]).json()["contacts"]
+                    if g["party_id"] == w["munich"] for c in g["contacts"]]})
+    _lid, token, code = next(m["link"] for m in reversed(mail) if "link" in m)
+    sess = client.post(f"/treaty-view/{token}/verify", json={"code": code}).json()["session"]
+    view = client.get(f"/treaty-view/{token}", headers={"X-Treaty-Session": sess}).json()
+    st = next(x for x in view["statements"] if x["period"] == period)
+    assert {t["term"] for t in st["basis"]["terms"]} >= {"cession_pct", "ceding_commission_pct"}
+    assert [sh["reinsurer"] for lay in st["basis"]["layers"] for sh in lay["shares"]] \
+        == ["Munich Re"]
+
+
+def test_a_statement_made_before_the_terms_were_kept_says_so(w, mail):
+    period = "2027-12"
+    _inward(w, [("TR2", 100_000, 1000, None, None)], period=period)
+    cid = _treaty(w, _qs(w, 40), "QS older")
+    cb = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                     json={"contract_id": cid, "period": period}).json()
+    with SessionLocal() as s:          # as a statement made before 27.3 was stored
+        row = s.get(CededBordereau, cb["id"])
+        row.totals = {k: v for k, v in row.totals.items() if k != "_basis"}
+        s.commit()
+    d = client.get(f"/reinsurance/bordereaux/{cb['id']}", headers=w["ch"]).json()
+    assert d["basis"] is None and d["basis_changes"] == []
+    assert d["totals"]["ceded_premium"] == 400
