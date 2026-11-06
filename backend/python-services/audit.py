@@ -396,6 +396,11 @@ _SELF_LOGGED = [
     ("POST",   re.compile(r"^/fix-link/[^/]+(/.*)?$")),
     # The carrier's delivery rule and channel notify list log themselves.
     ("PUT",    re.compile(r"^/programs/\d+/delivery-rule$")),
+    # MOPR 41's fix target and MOPR 42.2's Monthly Report settings and sends
+    # write their own named rows, with the old and new value or the month.
+    ("PUT",    re.compile(r"^/reports/exception-resolution/target$")),
+    ("PUT",    re.compile(r"^/reports/monthly/delivery$")),
+    ("POST",   re.compile(r"^/reports/monthly/send$")),
     ("PUT",    re.compile(r"^/intake/routes/\d+/contacts$")),
     ("POST",   re.compile(r"^/extra-fields$")),
     ("POST",   re.compile(r"^/extra-fields/[^/]+/adopt$")),

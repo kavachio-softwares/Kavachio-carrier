@@ -206,6 +206,16 @@ def _sweep_all_tenants() -> dict:
         return {**result, "emailed_tenants": emailed}
 
 
+def _send_monthly_reports() -> int:
+    """MOPR 42.2 — every carrier's Monthly Report that is due today
+    (report_delivery.run_due). Once per carrier per month, however many runs or
+    app instances: the send row's unique key sees to that."""
+    from db import SessionLocal
+    import report_delivery
+    with SessionLocal() as s:
+        return report_delivery.run_due(s)
+
+
 async def _loop() -> None:
     hour = _run_hour()
     log.info("C-9 sweep scheduler on — daily at %02d:00 UTC", hour)
@@ -213,8 +223,8 @@ async def _loop() -> None:
         # One catch-up run shortly after boot so reminders are fresh on deploy.
         await asyncio.sleep(_startup_delay())
         while True:
+            loop = asyncio.get_running_loop()
             try:
-                loop = asyncio.get_running_loop()
                 r = await loop.run_in_executor(None, _sweep_all_tenants)
                 log.info("C-9 sweep: %s newly overdue, %s newly due-today, "
                          "%s newly due-soon, %s tenant(s) emailed",
@@ -222,6 +232,14 @@ async def _loop() -> None:
                          r.get("newly_due_soon"), r.get("emailed_tenants"))
             except Exception:  # noqa: BLE001 — a bad run must not kill the loop
                 log.exception("C-9 sweep run failed; will retry next cycle")
+            # Its own step: a report that fails to send must not cost the
+            # deadline reminders, nor they the report.
+            try:
+                n = await loop.run_in_executor(None, _send_monthly_reports)
+                if n:
+                    log.info("Monthly report: sent for %s carrier(s)", n)
+            except Exception:  # noqa: BLE001
+                log.exception("Monthly report run failed; will retry next cycle")
             # Sleep until the next scheduled hour, then run again.
             await asyncio.sleep(_seconds_until_next_run(datetime.now(timezone.utc), hour))
     except asyncio.CancelledError:

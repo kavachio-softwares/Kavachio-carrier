@@ -232,11 +232,42 @@ def _pct(n: int, d: int) -> Optional[float]:
     return round(100.0 * n / d, 1) if d else None
 
 
+_SEV_RANK = {"info": 1, "warning": 2, "critical": 3}
+
+
+def _groups(open_: list[dict]) -> list[dict]:
+    """The open problems as one row per file and check — 4,800 rows of the same
+    rule on one file read as one line to act on, not 480 pages."""
+    out: dict[tuple, dict] = {}
+    for p in open_:
+        k = (p["export_id"], p["check_key"] or p["check"])
+        g = out.get(k)
+        if g is None:
+            g = out[k] = {"check": p["check"], "severity": p["severity"], "problems": 0,
+                          "past_target": 0, "oldest_days": 0.0, "file": p["file"],
+                          "period": p["period"], "export_id": p["export_id"],
+                          "program_id": p["program_id"],
+                          "broker_party_id": p["broker_party_id"]}
+        g["problems"] += 1
+        g["past_target"] += 1 if p["past_target"] else 0
+        g["oldest_days"] = max(g["oldest_days"], p["age_days"])
+        if _SEV_RANK.get(p["severity"] or "", 0) > _SEV_RANK.get(g["severity"] or "", 0):
+            g["severity"] = p["severity"]
+    for g in out.values():
+        g["oldest_days"] = _round(g["oldest_days"])
+    return sorted(out.values(), key=lambda g: (-(g["oldest_days"] or 0), -g["problems"],
+                                               g["check"] or ""))
+
+
 def summary(s, tenant_id: int, start: datetime, end: datetime, *,
             program_id: Optional[int] = None, broker_party_id: Optional[int] = None,
-            now: Optional[datetime] = None, page: int = 1, page_size: int = 10) -> dict:
+            now: Optional[datetime] = None, page: int = 1, page_size: int = 10,
+            severity: Optional[str] = None) -> dict:
     """41.1 how fast the period's problems were fixed, 41.2 against the
-    target, 41.3 what is open NOW — how old, and who has to act."""
+    target, 41.3 what is open NOW — how old, and who has to act.
+
+    `severity` narrows only the open list (`items` and `groups`); the counts
+    above it stay the whole picture."""
     now = now or datetime.utcnow()
     target = target_days(s, tenant_id)
     probs = problems(s, tenant_id, program_id=program_id, broker_party_id=broker_party_id)
@@ -289,7 +320,9 @@ def summary(s, tenant_id: int, start: datetime, end: datetime, *,
         by_bp.append(g)
     by_bp.sort(key=lambda g: (-g["past_target"], -g["open"], -g["fixed"]))
 
-    open_sorted = sorted(open_, key=lambda p: (-p["age_days"], p["check"] or ""))
+    listed = [p for p in open_ if not severity or p["severity"] == _sev(severity)]
+    open_sorted = sorted(listed, key=lambda p: (-p["age_days"], p["check"] or ""))
+    groups = _groups(listed)
     page = max(1, int(page or 1))
     page_size = max(1, min(int(page_size or 10), 100))
     shown = open_sorted[(page - 1) * page_size: page * page_size]
@@ -324,6 +357,10 @@ def summary(s, tenant_id: int, start: datetime, end: datetime, *,
                 "broker_party_id": p["broker_party_id"], "found_at": _iso(p["found_at"]),
                 "age_days": _round(p["age_days"]), "past_target": p["past_target"],
             } for p in shown],
+            # The same list, one row per file and check; paged by the same
+            # `page` / `page_size`.
+            "groups": groups[(page - 1) * page_size: page * page_size],
+            "groups_total": len(groups),
         },
         "by_broker_programme": by_bp,
     }

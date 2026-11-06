@@ -5541,13 +5541,15 @@ def report_exception_resolution(mga: str, month: Optional[str] = None,
                                 broker_party_id: Optional[int] = None,
                                 page: int = Query(1, ge=1),
                                 page_size: int = Query(10, ge=1, le=100),
+                                severity: Optional[str] = None,
                                 principal: Principal = Depends(current_principal)):
     """MOPR 41 — how fast the problems the checks found were fixed in a month
     (41.1), against the carrier's target (41.2), and the age and owner of every
     problem still open now (41.3). See fix_performance.py.
 
     `month` is YYYY-MM (default: this month), by the day a problem was fixed;
-    the open list is always as of now. `page` / `page_size` page that list."""
+    the open list is always as of now. `page` / `page_size` page that list,
+    `severity` narrows it."""
     import check_record
     import fix_performance as fp
     month = month or datetime.utcnow().strftime("%Y-%m")
@@ -5558,18 +5560,18 @@ def report_exception_resolution(mga: str, month: Optional[str] = None,
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
         out = fp.summary(s, tid, start, end, program_id=program_id,
-                         broker_party_id=broker_party_id, page=page, page_size=page_size)
-        broker_ids = ({r["broker_party_id"] for r in out["by_broker_programme"]}
-                      | {i["broker_party_id"] for i in out["open"]["items"]}) - {None}
-        prog_ids = ({r["program_id"] for r in out["by_broker_programme"]}
-                    | {i["program_id"] for i in out["open"]["items"]}) - {None}
+                         broker_party_id=broker_party_id, page=page, page_size=page_size,
+                         severity=severity)
+        listed = [*out["by_broker_programme"], *out["open"]["items"], *out["open"]["groups"]]
+        broker_ids = {r["broker_party_id"] for r in listed} - {None}
+        prog_ids = {r["program_id"] for r in listed} - {None}
         brokers = dict(s.query(Party.id, Party.legal_name)
                        .filter(Party.id.in_(broker_ids)).all()) if broker_ids else {}
         progs = dict(s.query(Program.id, Program.name)
                      .filter(Program.id.in_(prog_ids)).all()) if prog_ids else {}
         # The owner is who has to act: the broker whose file it is, or the
         # carrier itself for a file no broker sent.
-        for r in [*out["by_broker_programme"], *out["open"]["items"]]:
+        for r in listed:
             b, p = r["broker_party_id"], r["program_id"]
             r["broker_name"] = brokers.get(b) or ("No broker" if not b else f"Broker {b}")
             r["programme_name"] = progs.get(p) or ("No programme" if not p else f"Programme {p}")
@@ -5577,6 +5579,169 @@ def report_exception_resolution(mga: str, month: Optional[str] = None,
         out.update(_report_filter_lists(s, tid))
         out["month"] = month
         return out
+
+
+@router.get("/reports/monthly")
+def report_monthly(mga: str, month: Optional[str] = None,
+                   program_id: Optional[int] = None,
+                   broker_party_id: Optional[int] = None,
+                   principal: Principal = Depends(current_principal)):
+    """MOPR 42 — the monthly pack: timeliness, volumes, data quality and fixes
+    for one month, beside last month and the same month last year, the last six
+    months, and one line per broker and programme. See monthly_report.py.
+
+    `month` is YYYY-MM (default: this month)."""
+    import check_record
+    import monthly_report
+    month = month or datetime.utcnow().strftime("%Y-%m")
+    try:
+        check_record.month_bounds(month)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "month must be YYYY-MM")
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        out = monthly_report.name_rows(s, monthly_report.pack(
+            s, tid, month, program_id=program_id, broker_party_id=broker_party_id))
+        out.update(_report_filter_lists(s, tid))
+        return out
+
+
+def _monthly_delivery_view(s, tid: int) -> dict:
+    """MOPR 42.2 — the Send & Schedule screen: the settings, who receives the
+    report (the carrier's own logins), when it next goes, and what has been sent."""
+    import report_delivery as rd
+    cfg = rd.settings(s, tid)
+    nxt = (rd.next_send(cfg["send_day"], datetime.utcnow().date(), rd.sent_months(s, tid))
+           if cfg["auto_send"] else None)
+    return {"settings": cfg, "recipients": rd.people(s, tid), "next": nxt,
+            "sends": rd.history(s, tid), "send_days": list(rd.SEND_DAYS)}
+
+
+@router.get("/reports/monthly/delivery")
+def report_monthly_delivery(mga: str, principal: Principal = Depends(current_principal)):
+    """MOPR 42.2 — how the Monthly Report is sent, and what has been sent."""
+    with SessionLocal() as s:
+        return _monthly_delivery_view(s, resolve_tenant_id(s, principal, mga))
+
+
+class MonthlyDeliveryBody(BaseModel):
+    auto_send: Optional[bool] = None
+    send_day: Optional[int] = None
+    file_format: Optional[str] = None
+    delivery: Optional[str] = None
+
+
+@router.put("/reports/monthly/delivery")
+def save_monthly_delivery(body: MonthlyDeliveryBody, mga: str,
+                          principal: Principal = Depends(require_carrier_admin("change how the monthly report is sent"))):
+    """MOPR 42.2 — save Send & Schedule. Each change is kept in the Audit Logs
+    with the old and new value."""
+    import report_delivery as rd
+    from audit import actor_columns
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        try:
+            before, after = rd.save_settings(s, tid, body.model_dump(exclude_none=True),
+                                             principal.user_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        changes = {k: {"old": before.get(k), "new": v} for k, v in after.items()
+                   if k != "saved" and before.get(k) != v}
+        if changes:
+            s.add(ActivityEvent(tenant_id=tid, actor=_actor(principal),
+                                action="monthly_report_settings_updated",
+                                target="monthly_report:settings", details={"changes": changes},
+                                **actor_columns(principal)))
+        s.commit()
+        return _monthly_delivery_view(s, tid)
+
+
+class MonthlySendBody(BaseModel):
+    month: Optional[str] = None
+
+
+@router.post("/reports/monthly/send")
+def send_monthly_report(body: MonthlySendBody, mga: str,
+                        principal: Principal = Depends(require_carrier_admin("send the monthly report"))):
+    """MOPR 42.2 — send a month's report now (default: last month) to the
+    carrier's own logins."""
+    import check_record
+    import monthly_report
+    import report_delivery as rd
+    from audit import actor_columns
+    month = body.month or monthly_report.shift(datetime.utcnow().strftime("%Y-%m"), -1)
+    try:
+        check_record.month_bounds(month)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "month must be YYYY-MM")
+    kind = "now"
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        try:
+            r = rd.send(s, tid, month, kind=kind, user_id=principal.user_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        s.add(ActivityEvent(tenant_id=tid, actor=_actor(principal), action="monthly_report_sent",
+                            target=f"monthly_report:{month}",
+                            details={"month": month, "kind": kind, "delivered": r["delivered"],
+                                     "failed": r["failed"]},
+                            **actor_columns(principal)))
+        s.commit()
+        return r
+
+
+def _report_file_response(name: str, data: bytes, mime: str):
+    from fastapi.responses import Response
+    return Response(content=data, media_type=mime,
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@router.get("/reports/monthly/file")
+def monthly_report_file(mga: str, month: Optional[str] = None, format: str = "pdf",
+                        program_id: Optional[int] = None,
+                        broker_party_id: Optional[int] = None,
+                        principal: Principal = Depends(current_principal)):
+    """MOPR 42.2 — the month as on screen, as a PDF or Excel file."""
+    import check_record
+    import monthly_report
+    import report_delivery as rd
+    month = month or datetime.utcnow().strftime("%Y-%m")
+    try:
+        check_record.month_bounds(month)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "month must be YYYY-MM")
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        pack = monthly_report.name_rows(s, monthly_report.pack(
+            s, tid, month, program_id=program_id, broker_party_id=broker_party_id))
+        scope = []
+        if program_id:
+            p = s.query(Program).filter(Program.id == program_id, Program.tenant_id == tid).first()
+            scope.append(p.name if p else f"Programme {program_id}")
+        if broker_party_id:
+            b = s.query(Party).filter(Party.id == broker_party_id).first()
+            scope.append(b.legal_name if b else f"Broker {broker_party_id}")
+        fmt = "excel" if format in ("excel", "xlsx") else "pdf"
+        name, data, mime = rd.files(pack, fmt, rd.carrier_name(s, tid), " · ".join(scope))[0]
+        return _report_file_response(name, data, mime)
+
+
+@router.get("/reports/monthly/sends/{send_id}/file")
+def monthly_report_sent_file(send_id: int, mga: str, format: str = "pdf",
+                             principal: Principal = Depends(current_principal)):
+    """MOPR 42.2 — a report as it was sent: the numbers kept with it, so the
+    file is the one people received."""
+    import report_delivery as rd
+    from db import MonthlyReportSend
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        row = (s.query(MonthlyReportSend)
+               .filter(MonthlyReportSend.id == send_id, MonthlyReportSend.tenant_id == tid).first())
+        if row is None or row.pack is None:
+            raise HTTPException(404, "That report was not sent, so there is no file to download.")
+        fmt = "excel" if format in ("excel", "xlsx") else "pdf"
+        name, data, mime = rd.files(row.pack, fmt, (row.options or {}).get("carrier", ""))[0]
+        return _report_file_response(name, data, mime)
 
 
 class FixTargetBody(BaseModel):

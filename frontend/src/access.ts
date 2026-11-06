@@ -233,9 +233,15 @@ export const ROUTE_ACCESS: {
   { pattern: "/runs", requires: "carrier_admin" },
   { pattern: "/calendar", requires: "carrier_admin" },
   { pattern: "/bordereau-calendar", requires: "carrier_admin" },
-  // MOPR 40 — the carrier's month of files, checks and volumes.
+  // MOPR 42 — the Monthly Report and its tabs: Data Quality (MOPR 40, the
+  // month's files, checks and volumes) and Exception Resolution (MOPR 41, how
+  // fast problems get fixed, and what is still waiting). The two old paths
+  // redirect to their tab.
+  { pattern: "/monthly-report", requires: "carrier_admin" },
+  // MOPR 42.2 — Send & Schedule: who receives the report, when, and how.
+  { pattern: "/monthly-report/send-schedule", requires: "carrier_admin" },
+  { pattern: "/monthly-report/:tab", requires: "carrier_admin" },
   { pattern: "/data-quality", requires: "carrier_admin" },
-  // MOPR 41 — how fast problems get fixed, and what is still open.
   { pattern: "/exception-resolution", requires: "carrier_admin" },
   // Policy Search (43.1) — the policies inside the processed bordereaux. The
   // carrier sees its whole book, a broker only what it sent; Kavachio is not

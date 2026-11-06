@@ -465,6 +465,9 @@ ACTION_WORDS = {
     "bdx_delivery_rule_updated":  "Changed a programme's delivery rule",
     # MOPR 41 — the carrier's target for fixing problems (fix_performance.py)
     "fix_target_updated":         "Changed the target time to fix problems",
+    # MOPR 42.2 — sending the Monthly Report (report_delivery.py)
+    "monthly_report_settings_updated": "Changed how the monthly report is sent",
+    "monthly_report_sent":        "Sent the monthly report",
     # The status messages about a file — to the broker, or the carrier when a
     # deadline needs a decision. Which message, and to whom, is the detail.
     "bdx_notice_sent":            "Emailed a file status update",
@@ -1281,7 +1284,8 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "submission_dispute_accepted", "submission_dispute_rejected",
       "submission_waived", "submission_extended", "submission_case_reopened",
       "submission_case_reopened_by_carrier", "submission_case_resolved",
-      "bdx_delivery_rule_updated", "fix_target_updated"), CARRIER_SEATS),
+      "bdx_delivery_rule_updated", "fix_target_updated",
+      "monthly_report_settings_updated", "monthly_report_sent"), CARRIER_SEATS),
     # How files reach the CARRIER — mailboxes, routes and keys. The broker
     # sends; it is the carrier that sets up the ways in.
     ("intake", "Ingestion channels",

@@ -65,9 +65,9 @@ import RuleForm from "./pages/RuleForm";
 import RecentRuns from "./pages/RecentRuns";
 import Calendar from "./pages/Calendar";
 import BordereauCalendar from "./pages/BordereauCalendar";
-import DataQuality from "./pages/DataQuality";
+import MonthlyReport from "./pages/MonthlyReport";
+import MonthlySendSchedule from "./pages/MonthlySendSchedule";
 import PolicySearch from "./pages/PolicySearch";
-import ExceptionResolution from "./pages/ExceptionResolution";
 // Feature 10 — file intake channels.
 import Files from "./pages/Files";
 import AddUser from "./pages/AddUser";
@@ -262,11 +262,18 @@ export default function App() {
             due month, rather than one programme's deadlines. /calendar stays as
             the place a single programme's schedule is SET. */}
         <Route path="/bordereau-calendar" element={<BordereauCalendar />} />
-        <Route path="/data-quality" element={<DataQuality />} />
+        {/* MOPR 42 — the Monthly Report: Overview, Data Quality (MOPR 40) and
+            Exception Resolution (MOPR 41) as three tabs of one screen. The old
+            paths of the two detail screens open their tab. */}
+        <Route path="/monthly-report" element={<MonthlyReport />} />
+        {/* 42.2 — how the report is sent; opened from the Overview, not a tab. */}
+        <Route path="/monthly-report/send-schedule" element={<MonthlySendSchedule />} />
+        <Route path="/monthly-report/:tab" element={<MonthlyReport />} />
+        <Route path="/data-quality" element={<Navigate to="/monthly-report/data-quality" replace />} />
+        <Route path="/exception-resolution" element={<Navigate to="/monthly-report/exception-resolution" replace />} />
         {/* Policy Search (43.1) — carrier and broker seats; no sidebar entry,
             opened from the Dashboard and File Submissions. */}
         <Route path="/policies" element={<PolicySearch />} />
-        <Route path="/exception-resolution" element={<ExceptionResolution />} />
         {/* How a broker's file reaches you, and everything that has landed —
             one screen with two tabs. The old paths are kept as redirects: they
             are in emails to brokers and in bookmarks, and a link that 404s is a

@@ -2745,6 +2745,62 @@ class QualitySetting(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
+class MonthlyReportSetting(Base):
+    """MOPR 42.2 — how a carrier's Monthly Report is sent: whether it goes out
+    by itself, on which working day, and as which file. It always goes to the
+    carrier's own logins (report_delivery.people), and always in full.
+
+    One row per carrier, written only when the carrier saves Send & Schedule;
+    none means the defaults (report_delivery.DEFAULTS) with automatic sending
+    OFF — nothing is emailed until the carrier turns it on. Its own table, not
+    columns on quality_setting: create_all can add a missing table but never a
+    column, so new columns would need an ALTER on every database at start-up.
+    Each change is also in the Audit Logs ("monthly_report_settings_updated")."""
+    __tablename__ = "monthly_report_setting"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, unique=True, index=True, nullable=False)
+    auto_send = Column(Boolean, nullable=False, default=False)
+    send_day = Column(Integer, nullable=False, default=3)          # Nth working day of the next month
+    file_format = Column(String, nullable=False, default="pdf")    # pdf | excel | both
+    delivery = Column(String, nullable=False, default="attach")    # attach | link
+    # Not used since 5 Nov 2026 (the report goes to the carrier's logins, in
+    # full). Kept because create_all had already made the table on some
+    # databases, where the two NOT NULL columns would refuse a row without
+    # them; drop all four together in a later migration.
+    recipient_user_ids = Column(JSON, nullable=True)
+    sections = Column(JSON, nullable=True)
+    compare_last_month = Column(Boolean, nullable=False, default=True)
+    compare_last_year = Column(Boolean, nullable=False, default=True)
+    updated_by_user_id = Column(Integer, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class MonthlyReportSend(Base):
+    """MOPR 42.2 — one Monthly Report sent: scheduled or sent by hand.
+
+    Keeps the numbers EXACTLY as they went out (`pack`) and the settings they
+    went out with, so the file can be downloaded again later and still says
+    what the recipients read — a sent report never changes. `scheduled_key`
+    ("<tenant>:<month>") is set only on the automatic send and is unique, so
+    two app instances running the daily job can never both send it."""
+    __tablename__ = "monthly_report_send"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, index=True, nullable=False)
+    month = Column(String, nullable=False)                         # YYYY-MM reported on
+    kind = Column(String, nullable=False)                          # scheduled | now (test: early sends only)
+    scheduled_key = Column(String, unique=True, nullable=True)
+    file_format = Column(String, nullable=False)
+    delivery = Column(String, nullable=False)
+    # [{"user_id", "email", "name", "delivered", "error"}]
+    recipients = Column(JSON, nullable=True)
+    delivered = Column(Integer, nullable=False, default=0)
+    failed = Column(Integer, nullable=False, default=0)
+    pack = Column(JSON, nullable=True)                             # the numbers as sent
+    options = Column(JSON, nullable=True)                          # sections + comparisons as sent
+    sent_by_user_id = Column(Integer, nullable=True)               # None = the daily job
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 def _ensure_column(conn, inspector, table: str, column: str, ddl_type: str) -> None:
     """Add `column` to `table` if it isn't already there. Dialect-agnostic
     column inspection so this works on both SQLite and PostgreSQL."""

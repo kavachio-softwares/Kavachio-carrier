@@ -115,7 +115,7 @@ change. Ordinary features and fixes go in `PROJECT_CONTEXT.md`'s change log, not
 ## Needs confirmation (not verified — ask before relying on it)
 
 1. `PROJECT_CONTEXT.md` exists on `development-phase-2` but **not on `development`** yet. Confirm it will be merged, or this file's references to it point nowhere on `development`.
-2. **Next migration number.** `development` has up to `39`, then `42_mid_term_change.sql` (36, 40, 41 unused). `development-phase-2` goes up to `45` with duplicate numbers (three `42_*`, two `43_*`, two `44_*`, as of 4 Nov). The team needs to agree on a numbering scheme before the next migration.
+2. **Next migration number.** `development` has up to `39`, then `42_mid_term_change.sql` (36, 40, 41 unused). `development-phase-2` goes up to `46` with duplicate numbers (three `42_*`, two `43_*`, two `44_*`; `46_monthly_report_delivery.sql` added 5 Nov). The team needs to agree on a numbering scheme before the next migration.
 3. Who applies migrations to QA/UAT, and whether a migration runner or record of applied migrations exists (none found in the repo).
 4. Deployment target and process (the Dockerfile mentions a VM with `/opt/kavachio/.env` and an App Gateway; no CI workflow exists in `.github/`).
 5. Production SFTP approach (built-in server vs Azure Blob SFTP) and production storage (`STORAGE_BACKEND=db` vs `azure`).

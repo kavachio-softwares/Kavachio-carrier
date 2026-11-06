@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, CalendarDays, ScrollText, History, FileSpreadsheet, BarChart3, Timer,
+  FileCheck, CalendarDays, ScrollText, History, FileSpreadsheet, BarChart3,
 } from "lucide-react";
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
@@ -108,12 +108,6 @@ const GROUPS: {
       // belong inside one setup. It sits next to Process Bordereau because
       // "what is owed to me" and "run one" are the same job on two days.
       { to: "/bordereau-calendar", label: "Bordereau Calendar", icon: CalendarDays },
-      // MOPR 40: what the month's files were — how many, which transaction
-      // types, what the checks found and how many needed nobody.
-      { to: "/data-quality", label: "Data Quality", icon: BarChart3 },
-      // MOPR 41: how fast the problems found get fixed, against the
-      // carrier's target, and every one still open with its age and owner.
-      { to: "/exception-resolution", label: "Exception Resolution", icon: Timer },
       // My Calendar is deliberately NOT listed. Deadlines belong to a specific
       // carrier + program, so the calendar now lives inside that setup's own
       // screen where both are already fixed. The /calendar route still exists
@@ -139,6 +133,18 @@ const GROUPS: {
       // "Incoming Files" card instead. The /files route and its access rule
       // are unchanged — only the nav entry is commented out.
       // { to: "/files", label: "Files", icon: Inbox },
+    ],
+  },
+  {
+    // MOPR 42: the Monthly Report — ONE item, three tabs inside: the Overview
+    // pack, Data Quality (MOPR 40) and Exception Resolution (MOPR 41). They
+    // are views of the same month, so one entry rather than three. It has its
+    // own heading, as agreed in the Monthly Report proposal: reading a month
+    // back is a different job from the day's work under Operations.
+    title: "Reports",
+    requires: "carrier_admin",
+    items: [
+      { to: "/monthly-report", label: "Monthly Report", icon: BarChart3 },
     ],
   },
   {
@@ -282,6 +288,9 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // Policies has no sidebar entry either — both seats open it from their
   // Dashboard, so that stays lit.
   if (under("/policies")) return isBrokerSeat() ? "/broker" : "/home";
+
+  // The Monthly Report's Data Quality and Exception Resolution tabs.
+  if (under("/monthly-report")) return "/monthly-report";
 
   if (under("/parties")) return "/parties";
   if (under("/tenants")) return "/tenants";
