@@ -16,6 +16,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Link2, Plus, ShieldCheck, Unlink, Upload } from "lucide-react";
 import { fieldErrors } from "../../api/contractRecord";
+import { showDone, showError } from "../ResultPopup";
 import {
   attachTreaty, detachTreaty, getProgrammeTreaties, type ProgrammeTreaties,
 } from "../../api/treaty";
@@ -43,7 +44,6 @@ export default function ProgrammeTreatiesStep({ programId, part, onChange, onAdd
   const [setups, setSetups] = useState<Record<number, SetupListItem>>({});
   const [pick, setPick] = useState("");
   const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
 
@@ -59,12 +59,12 @@ export default function ProgrammeTreatiesStep({ programId, part, onChange, onAdd
     [data, live.length, inUse]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function run(fn: () => Promise<ProgrammeTreaties>, ok: string) {
-    setBusy(true); setErr(""); setNote("");
+    setBusy(true);
     try {
       setData(await fn());
-      setNote(ok);
+      showDone(ok);
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
@@ -84,7 +84,6 @@ export default function ProgrammeTreatiesStep({ programId, part, onChange, onAdd
           : "The treaties that protect this programme and each one's reinsurance bordereau — one statement per reinsurer every period. "
             + "Irrespective of the brokers: set them up at any time. Optional: a programme takes files without one."}
       </p>
-      {note && <div className="mb-3 rounded border border-ok/40 bg-ok/10 px-3 py-2 text-sm text-ok">{note}</div>}
       {err && <div className="mb-3 rounded border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn">{err}</div>}
 
       {!data ? (

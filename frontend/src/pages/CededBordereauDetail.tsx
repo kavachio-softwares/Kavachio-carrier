@@ -12,6 +12,7 @@ import {
   AlertTriangle, ArrowLeft, Download, FileSpreadsheet, Loader2, RefreshCw, Send,
 } from "lucide-react";
 import { InfoTip } from "../components/InfoTip";
+import { showDone, showError } from "../components/ResultPopup";
 import { TermsUsed, changeText } from "../components/treaty/TermsUsed";
 import { TreatyChecks } from "../components/treaty/TreatyRules";
 import { fieldErrors } from "../api/contractRecord";
@@ -44,7 +45,6 @@ export default function CededBordereauDetail() {
   const cbId = Number(id);
   const [d, setD] = useState<CededDetail | null>(null);
   const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   const [busy, setBusy] = useState("");
   const [sendNote, setSendNote] = useState("");
   const [confirm, setConfirm] = useState(false);
@@ -64,34 +64,34 @@ export default function CededBordereauDetail() {
   /** Prepare it again — and, with `resolve`, open its exceptions. */
   async function rebuild(resolve = false) {
     if (!d) return;
-    setBusy("prepare"); setErr(""); setNote("");
+    setBusy("prepare");
     try {
       const nd = await prepareCeded(d.contract_id, d.period);
       if (resolve) nav(`/reinsurance/bordereaux/${nd.id}/exceptions`);
       else if (nd.id !== d.id) nav(`/reinsurance/bordereaux/${nd.id}`);
-      else { setD(nd); setNote("Prepared again from the latest bordereaux."); }
+      else { setD(nd); showDone("Prepared again from the latest bordereaux."); }
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy("");
     }
   }
 
   async function send() {
-    setBusy("send"); setErr(""); setNote("");
+    setBusy("send");
     try {
       const nd = await sendCeded(cbId, sendNote.trim());
       setD(nd);
       setConfirm(false);
       const s = nd.sent;
-      setNote(`Sent. ${s?.emails ?? 0} of ${s?.of ?? 0} emails went out, each with `
+      showDone(`Sent. ${s?.emails ?? 0} of ${s?.of ?? 0} emails went out, each with `
         + "that reinsurer's BDX file attached."
         + (s?.no_contact?.length
           ? ` ${s.no_contact.join(", ")} has no contact with an email — add one on `
             + "the reinsurer's page; their statement is still on their private link."
           : ""));
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy("");
     }
@@ -145,8 +145,6 @@ export default function CededBordereauDetail() {
           </div>
         </div>
 
-        {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
-        {note && <div className="note ok" style={{ marginBottom: 14 }}>{note}</div>}
 
         {d.stale && d.status !== "superseded" && (
           <div className="note warn" style={{ marginBottom: 14 }}>

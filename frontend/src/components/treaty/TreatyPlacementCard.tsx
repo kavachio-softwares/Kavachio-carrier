@@ -13,6 +13,7 @@
 import { useEffect, useState } from "react";
 import { FileText, Loader2, PenLine, Send, Undo2, Upload, Users } from "lucide-react";
 import { InfoTip } from "../InfoTip";
+import { showDone, showError } from "../ResultPopup";
 import { downloadDocument, fieldErrors, uploadDocument } from "../../api/contractRecord";
 import {
   getPlacement, getReinsurerAccess, recordPartySignature, shareWithReinsurers,
@@ -33,8 +34,8 @@ export default function TreatyPlacementCard({ contractId, canAct, onChanged }: {
 }) {
   const [pl, setPl] = useState<Placement | null>(null);
   const [contacts, setContacts] = useState<ShareableParty[]>([]);
+  // Only a failed load: an action's result is a popup (showDone / showError).
   const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   const [busy, setBusy] = useState("");
   const [open, setOpen] = useState<{ pid: number; what: "ask" | "record" } | null>(null);
   const [form, setForm] = useState({ contact: "", name: "", title: "", email: "", doc: "" });
@@ -46,15 +47,15 @@ export default function TreatyPlacementCard({ contractId, canAct, onChanged }: {
   }, [contractId, canAct]);
 
   async function act(label: string, fn: () => Promise<unknown>, done: string) {
-    setBusy(label); setErr(""); setNote("");
+    setBusy(label);
     try {
       await fn();
       await load();
       setOpen(null);
-      setNote(done);
+      showDone(done);
       onChanged?.();
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy("");
     }
@@ -100,9 +101,6 @@ export default function TreatyPlacementCard({ contractId, canAct, onChanged }: {
                 {pl.wording.version ? ` (${pl.wording.version})` : ""}.</>
             : <>No signed treaty wording yet — every reinsurer signs the same wording, so attach it first.</>}
         </div>
-        {err && <div className="note warn" style={{ marginBottom: 10 }}>{err}</div>}
-        {note && <div className="note ok" style={{ marginBottom: 10 }}>{note}</div>}
-
         {/* ── each layer: written, signed, retained ── */}
         <div className="tbl-wrap" style={{ marginBottom: 14 }}>
           <table className="panel-tbl">
@@ -232,13 +230,13 @@ export default function TreatyPlacementCard({ contractId, canAct, onChanged }: {
                               <input type="file" hidden onChange={async e => {
                                 const f = e.target.files?.[0]; e.target.value = "";
                                 if (!f) return;
-                                setBusy("upload"); setErr("");
+                                setBusy("upload");
                                 try {
                                   const r = await uploadDocument(contractId, f, { kind: "signed_line", partyId: p.party_id });
                                   await load();
                                   setForm(x => ({ ...x, doc: String(r.document.id) }));
                                 } catch (er) {
-                                  setErr(fieldErrors(er).message);
+                                  showError(er);
                                 } finally { setBusy(""); }
                               }} />
                             </label>

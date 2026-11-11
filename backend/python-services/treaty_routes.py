@@ -168,6 +168,10 @@ def save_structure(s, c: Contract, clean: dict, user_id: Optional[int]) -> None:
                 share_pct=sh["share_pct"], is_lead=sh["is_lead"],
                 slip_reference=sh["slip_reference"]))
     s.flush()
+    # The data model's copy of the treaty (ceded_canonical) — never what
+    # stops the save.
+    import ceded_canonical
+    ceded_canonical.sync_arrangement(s, c)
 
 
 def copy_structure(s, old: Contract, new: Contract) -> None:

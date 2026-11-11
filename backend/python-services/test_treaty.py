@@ -1120,3 +1120,33 @@ def test_a_treaty_is_in_force_only_once_every_reinsurer_signed(w, sent):
     assert r.status_code == 200, r.text
     assert r.json()["in_force"] is True
     assert client.get(f"/contracts/{cid}", headers=w["ch"]).json()["lifecycle"] == "active"
+
+
+def test_an_uploaded_treaty_is_signed_on_the_document_like_a_new_one(w):
+    """An uploaded treaty's PDF carries no signing boxes of its own. The round
+    adds an execution page after its pages, with a box for the carrier and one
+    for the lead reinsurer, and it is signed on the document like a new one."""
+    import fitz
+    from db import EsignEnvelope, EsignField
+    cid = _create(w).json()["id"]
+    _set_state(cid, "agreed")
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "Quota share treaty, as signed on paper.")
+    pdf = doc.tobytes()
+    doc.close()
+    with SessionLocal() as s:                       # as the upload leaves it
+        c = s.get(Contract, cid)
+        c.wording_sections, c.commercial_terms = None, None
+        c.filename, c.blob = "Signed treaty.pdf", pdf
+        s.commit()
+    r = client.get(f"/esign/contracts/{cid}/round", headers=w["ch"]).json()
+    assert r["can_sign"] is True
+    r = client.post(f"/esign/contracts/{cid}/signing-session", headers=w["ch"])
+    assert r.status_code == 200, r.text
+    with SessionLocal() as s:
+        env = s.get(EsignEnvelope, r.json()["envelope_id"])
+        sides = {x.party_key: x.side for x in env.recipients}
+        boxes = s.query(EsignField).filter(EsignField.envelope_id == env.id).all()
+    signed_by = {sides[b.party_key] for b in boxes if b.type == "signature"}
+    assert signed_by == {"insurer", "broker"}
+    assert {b.page for b in boxes} == {2}           # after the uploaded page

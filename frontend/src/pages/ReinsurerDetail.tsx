@@ -17,7 +17,7 @@ import { api } from "../api/client";
 import { isTenantAdmin } from "../auth";
 import { InfoTip } from "../components/InfoTip";
 import CountryOptions from "../components/CountryOptions";
-import { fieldErrors } from "../api/contractRecord";
+import { showDone, showError } from "../components/ResultPopup";
 import {
   addPartyContact, getReinsurerTreaties, listPartyContacts, removePartyContact,
   type ReinsurerContact, type ReinsurerTreaty,
@@ -48,8 +48,6 @@ export default function ReinsurerDetail({ party }: { party: ReinsurerParty }) {
   const [cName, setCName] = useState("");
   const [cTitle, setCTitle] = useState("");
   const [cEmail, setCEmail] = useState("");
-  const [msg, setMsg] = useState("");
-  const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -58,7 +56,7 @@ export default function ReinsurerDetail({ party }: { party: ReinsurerParty }) {
   }, [party.id]);
 
   async function save() {
-    setBusy(true); setErr(""); setMsg("");
+    setBusy(true);
     try {
       const { data } = await api.put(`/parties/${p.id}`, {
         party_type: "reinsurer", legal_name: p.legal_name,
@@ -66,36 +64,36 @@ export default function ReinsurerDetail({ party }: { party: ReinsurerParty }) {
         domicile_country: p.domicile_country || null,
         is_active: p.is_active, notes: p.notes, scope: p.scope,
       });
-      setP(data); setMsg("Saved.");
+      setP(data); showDone("Saved.");
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
   }
 
   async function addContact() {
-    setBusy(true); setErr(""); setMsg("");
+    setBusy(true);
     try {
       const c = await addPartyContact(p.id, { full_name: cName.trim(),
         email: cEmail.trim(), title: cTitle.trim() || null });
       setContacts(list => [...(list ?? []), c]);
       setCName(""); setCTitle(""); setCEmail("");
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
   }
 
   async function removeContact(c: ReinsurerContact) {
-    setBusy(true); setErr(""); setMsg("");
+    setBusy(true);
     try {
       await removePartyContact(p.id, c.id);
       setContacts(list => (list ?? []).filter(x => x.id !== c.id));
-      setMsg(`${c.full_name} was removed. Any treaty link sent to them has stopped working.`);
+      showDone(`${c.full_name} was removed. Any treaty link sent to them has stopped working.`);
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
@@ -123,9 +121,6 @@ export default function ReinsurerDetail({ party }: { party: ReinsurerParty }) {
             )}
           </div>
         </div>
-
-        {msg && <div className="note ok" style={{ marginBottom: 14 }}>{msg}</div>}
-        {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
 
         <div className="grid g-2" style={{ alignItems: "start" }}>
           <div className="card pad">

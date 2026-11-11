@@ -10,12 +10,12 @@
  */
 import { useState } from "react";
 import { CheckCircle2, Loader2, PenLine, Send } from "lucide-react";
-import { fieldErrors } from "../../api/contractRecord";
 import {
   sendEndorsementForApproval, signEndorsement, type EndorsementApproval,
   type EndorsementRecord,
 } from "../../api/treaty";
 import { InfoTip } from "../InfoTip";
+import { showDone, showError } from "../ResultPopup";
 import { fmtStamp } from "../../utils/date";
 
 const STAGES = ["Draft", "Waiting for approval", "Approved", "Signed by you", "In force"];
@@ -39,8 +39,6 @@ export function EndorsementApprovalCard({ contractId, rec, onChange }: {
 }) {
   const a = rec.approval;
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   const [signing, setSigning] = useState(false);
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
@@ -58,14 +56,14 @@ export function EndorsementApprovalCard({ contractId, rec, onChange }: {
 
   async function run(fn: () => Promise<EndorsementRecord & {
     sent: { emailed: boolean }[]; missing: string[] }>, what: string) {
-    setBusy(true); setErr(""); setNote("");
+    setBusy(true);
     try {
       const r = await fn();
       onChange(r);
       setSigning(false);
-      setNote(sentNote(r, what));
+      showDone(sentNote(r, what));
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
@@ -112,8 +110,6 @@ export function EndorsementApprovalCard({ contractId, rec, onChange }: {
             </span>
           ))}
         </div>
-        {err && <div className="note warn">{err}</div>}
-        {note && <div className="note ok">{note}</div>}
         {a.status === "draft" && (
           <div className="sub">
             {ready ? "Not used yet. Send it to the reinsurers to approve."

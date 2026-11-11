@@ -3601,6 +3601,7 @@ def program_contract_detail(program_id: int, contract_id: int,
                        source_page_number, generation_confidence, rule_status
                 FROM validation_rule
                 WHERE contract_id = :cid AND rule_status <> 'disabled'
+                  AND COALESCE(rule_spec->>'source', '') <> 'reinsurance'
                 ORDER BY rule_id
             """),
             {"cid": contract_id},
@@ -4841,7 +4842,10 @@ def contract_generate_rules(program_id: int, contract_id: int,
         with SessionLocal() as s:
             s.query(RuleSql).filter(RuleSql.contract_id == contract_id).delete(
                 synchronize_session=False)
-            s.execute(text("DELETE FROM validation_rule WHERE contract_id = :cid"),
+            # A treaty's reinsurance rules (ceded_canonical) are kept: they
+            # follow the treaty's bordereau setup, not this regeneration.
+            s.execute(text("DELETE FROM validation_rule WHERE contract_id = :cid "
+                           "AND COALESCE(rule_spec->>'source', '') <> 'reinsurance'"),
                       {"cid": contract_id})
             s.execute(text("""UPDATE clauses_extracted
                                  SET rule_generation_status = 'in_review',

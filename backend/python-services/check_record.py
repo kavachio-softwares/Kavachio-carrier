@@ -37,6 +37,10 @@ from typing import Any, Iterable, Optional
 log = logging.getLogger(__name__)
 
 INTAKE, DIRECT, CANONICAL = "intake", "direct", "canonical"
+# A treaty's reinsurance bordereau, checked against the treaty's rules
+# (ceded_canonical). Not a file a broker sent: the broker reports (40.2, 40.3,
+# MOPR 41) count DIRECT and CANONICAL only, so it never enters them.
+REINSURANCE = "reinsurance"
 # What a run was. Only RUN is a file handled; the others are looks at one —
 # a re-generate of a file already counted, a broker's self-check before
 # sending, a setup preview, a dry run before downloading.
@@ -311,6 +315,8 @@ def record_run(*, lane: str, kind: str, tenant_id: Optional[int],
                broker_party_id: Optional[int] = None, contract_id: Optional[int] = None,
                filename: Optional[str] = None, period: Optional[str] = None,
                run_by: Optional[str] = None, run_by_user_id: Optional[int] = None,
+               chain_key: Optional[str] = None, submission_ref: Optional[str] = None,
+               version_no: Optional[int] = None,
                session=None) -> Optional[int]:
     """Write one run to the shared record. Returns its id, or None if it could
     not be written — a run is never refused or undone for its record.
@@ -318,7 +324,9 @@ def record_run(*, lane: str, kind: str, tenant_id: Optional[int],
     A validation run passes `rules`, `column_types`, `dv` (run_validation's
     result, None if it never returned) and `exceptions`; the arrival checks
     pass their own `results` instead. `structure` + `blocks` are the rows
-    checked, for the volumes."""
+    checked, for the volumes. `chain_key`, `submission_ref` and `version_no`
+    name what was checked when it is not a file that arrived (a reinsurance
+    statement); a file's own arrival says them otherwise."""
     args = {k: v for k, v in locals().items() if k != "session"}
     try:
         if session is not None:
@@ -337,17 +345,20 @@ def record_run(*, lane: str, kind: str, tenant_id: Optional[int],
 def _write(s, *, lane, kind, tenant_id, status, status_reason, rules, column_types, dv,
            exceptions, results, structure, blocks, rows_in, export_id, landing_id,
            arrival_id, upload_id, pipeline_id, program_id, broker_party_id, contract_id,
-           filename, period, run_by, run_by_user_id) -> int:
+           filename, period, run_by, run_by_user_id, chain_key=None,
+           submission_ref=None, version_no=None) -> int:
     from db import CheckError, CheckResult, CheckRun
 
     now = datetime.utcnow()
     errors = _errors(exceptions)
     if results is None:
         results = check_results(rules, column_types, dv, errors)
-    facts = _arrival_facts(s, arrival_id, export_id) if lane != INTAKE else {}
+    facts = (_arrival_facts(s, arrival_id, export_id)
+             if lane not in (INTAKE, REINSURANCE) else {})
     arrival_id = arrival_id or facts.get("arrival_id")
-    submission_ref = facts.get("submission_ref")
-    chain = _chain_key(submission_ref, landing_id, export_id, upload_id, arrival_id)
+    submission_ref = submission_ref or facts.get("submission_ref")
+    chain = chain_key or _chain_key(submission_ref, landing_id, export_id, upload_id,
+                                    arrival_id)
     vol = volumes(structure, blocks) if blocks is not None else {}
     stats = (dv or {}).get("stats") or {}
     sev = Counter(str(e.get("severity") or "warning").lower() for e in errors)
@@ -360,7 +371,7 @@ def _write(s, *, lane, kind, tenant_id, status, status_reason, rules, column_typ
         upload_id=upload_id, pipeline_id=pipeline_id, program_id=program_id,
         broker_party_id=broker_party_id, contract_id=contract_id,
         filename=_text(filename, 250), period=period or facts.get("period"),
-        submission_ref=submission_ref, version_no=facts.get("version_no"),
+        submission_ref=submission_ref, version_no=version_no or facts.get("version_no"),
         chain_key=chain, human_touch=facts.get("human_touch") or [],
         checks_total=len(results), checks_passed=outcomes.get(PASSED, 0),
         checks_failed=outcomes.get(FAILED, 0), checks_not_run=outcomes.get(NOT_RUN, 0),

@@ -15,6 +15,7 @@ import { Link, useParams } from "react-router-dom";
 import { ArrowLeft, Link2, Plus, ShieldCheck, Unlink, Upload } from "lucide-react";
 import { InfoTip } from "../components/InfoTip";
 import { fieldErrors } from "../api/contractRecord";
+import { showDone, showError } from "../components/ResultPopup";
 import {
   attachTreaty, detachTreaty, getProgrammeTreaties, type ProgrammeTreaties,
 } from "../api/treaty";
@@ -33,7 +34,6 @@ export default function ProgrammeReinsurance() {
   const [data, setData] = useState<ProgrammeTreaties | null>(null);
   const [pick, setPick] = useState("");
   const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
 
@@ -42,26 +42,26 @@ export default function ProgrammeReinsurance() {
   }, [pid]);
 
   async function attach() {
-    setBusy(true); setErr(""); setNote("");
+    setBusy(true);
     try {
       const name = data?.attachable.find(a => String(a.contract_id) === pick)?.name;
       setData(await attachTreaty(pid, Number(pick)));
       setPick("");
-      setNote(`${name ?? "The treaty"} now protects this programme.`);
+      showDone(`${name ?? "The treaty"} now protects this programme.`);
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
   }
 
   async function detach(contractId: number, name: string) {
-    setBusy(true); setErr(""); setNote("");
+    setBusy(true);
     try {
       setData(await detachTreaty(pid, contractId));
-      setNote(`${name} no longer protects this programme.`);
+      showDone(`${name} no longer protects this programme.`);
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
@@ -100,7 +100,6 @@ export default function ProgrammeReinsurance() {
           </div>
         </div>
 
-        {note && <div className="note ok" style={{ marginBottom: 14 }}>{note}</div>}
         {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
 
         {data && data.attachable.length > 0 && (

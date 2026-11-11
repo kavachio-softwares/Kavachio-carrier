@@ -27,6 +27,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { fieldErrors } from "../../api/contractRecord";
+import { showDone, showError } from "../ResultPopup";
 import {
   getReinsurerAccess, resendReinsurerLink, revokeReinsurerLink,
   sendTreatyForApproval, shareWithReinsurers, type AccessEvent, type AccessLink, type ReinsurerAccess,
@@ -79,16 +80,17 @@ function flowAt(lifecycle: string, data: ReinsurerAccess): number {
 
 /** Where the treaty stands with its reinsurers, and the one thing to do next
  *  while it is a draft: send it to every reinsurer to approve. */
-export function TreatyFlowCard({ contractId, lifecycle, data, onData }: {
+export function TreatyFlowCard({ contractId, lifecycle, data, onData, canSign }: {
   contractId: number; lifecycle: string;
+  /** The carrier may sign it now (the record's `actions.sign`): every
+   *  reinsurer approved, the carrier has not signed, and this seat signs. */
+  canSign?: boolean;
   /** Pass when the caller already holds it; otherwise it is fetched. */
   data?: ReinsurerAccess | null;
   onData?: (d: ReinsurerAccess) => void;
 }) {
   const [own, setOwn] = useState<ReinsurerAccess | null>(null);
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   useEffect(() => {
     if (data === undefined) getReinsurerAccess(contractId).then(setOwn).catch(() => setOwn(null));
   }, [contractId, data]);
@@ -102,16 +104,16 @@ export function TreatyFlowCard({ contractId, lifecycle, data, onData }: {
   const stale = d.approvals.parties.filter(p => p.status === "stale");
 
   async function send() {
-    setBusy(true); setErr(""); setNote("");
+    setBusy(true);
     try {
       const r = await sendTreatyForApproval(contractId);
       setOwn(r); onData?.(r);
       const failed = r.sent.filter(x => !x.emailed).length;
-      setNote(`Sent to ${r.sent.length} ${r.sent.length === 1 ? "person" : "people"} at the reinsurers.`
+      showDone(`Sent to ${r.sent.length} ${r.sent.length === 1 ? "person" : "people"} at the reinsurers.`
         + (failed ? ` ${failed} email${failed === 1 ? "" : "s"} could not be sent — try again.` : "")
         + (r.missing.length ? ` No contact with an email at ${r.missing.join(", ")}.` : ""));
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
@@ -134,6 +136,13 @@ export function TreatyFlowCard({ contractId, lifecycle, data, onData }: {
             </button>
           </div>
         )}
+        {at === 2 && canSign && (
+          <div className="right">
+            <Link className="btn pri sm" to={`/contracts/${contractId}/signature`}>
+              <PenLine size={13} /> Sign the treaty
+            </Link>
+          </div>
+        )}
       </div>
       <div style={{ padding: "12px 20px", display: "grid", gap: 10 }}>
         <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
@@ -145,8 +154,6 @@ export function TreatyFlowCard({ contractId, lifecycle, data, onData }: {
             </span>
           ))}
         </div>
-        {err && <div className="note warn">{err}</div>}
-        {note && <div className="note ok">{note}</div>}
         {draft && stale.length > 0 && (
           <div className="note warn">
             <b>Changed since approved.</b> You changed the treaty or its wording after{" "}
@@ -162,8 +169,9 @@ export function TreatyFlowCard({ contractId, lifecycle, data, onData }: {
               changes — update the treaty and send it again.</>}
           </div>
         )}
-        {at === 2 && <div className="sub">Every reinsurer approved. Sign the treaty — each
-          reinsurer is then asked to sign.</div>}
+        {at === 2 && <div className="sub">Every reinsurer approved.{" "}
+          {canSign ? "Sign the treaty — each reinsurer is then asked to sign."
+                   : "The carrier signs it next — then each reinsurer is asked to sign."}</div>}
         {at === 3 && <div className="sub">You signed. Each reinsurer has been sent its link to
           sign — it is in force once every one has signed.</div>}
       </div>
@@ -189,13 +197,13 @@ export function isLoopback(ip: string): boolean {
   return /^(127\.|::1$|::ffff:127\.|0\.0\.0\.0$)/.test(ip.trim());
 }
 
-export function ReinsurerSharing({ contractId, lifecycle }: {
-  contractId: number; lifecycle?: string;
+export function ReinsurerSharing({ contractId, lifecycle, canSign }: {
+  contractId: number; lifecycle?: string; canSign?: boolean;
 }) {
   const [data, setData] = useState<ReinsurerAccess | null>(null);
   const [picked, setPicked] = useState<number[]>([]);
+  // Only a failed load: an action's result is a popup (showDone / showError).
   const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   const [busy, setBusy] = useState("");
 
   const load = useCallback(() => {
@@ -208,13 +216,13 @@ export function ReinsurerSharing({ contractId, lifecycle }: {
     sent?: { name: string; emailed: boolean }[]; emailed?: boolean }>,
                      ok: (r: { sent?: { name: string; emailed: boolean }[];
                                emailed?: boolean }) => string) {
-    setBusy(label); setErr(""); setNote("");
+    setBusy(label);
     try {
       const r = await fn();
       setData(r);
-      setNote(ok(r));
+      showDone(ok(r));
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy("");
     }
@@ -230,10 +238,8 @@ export function ReinsurerSharing({ contractId, lifecycle }: {
 
   return (
     <div>
-      {note && <div className="note ok" style={{ marginBottom: 12 }}>{note}</div>}
-      {err && <div className="note warn" style={{ marginBottom: 12 }}>{err}</div>}
-
       {lifecycle && <TreatyFlowCard contractId={contractId} lifecycle={lifecycle}
+                                    canSign={canSign}
                                     data={data} onData={setData} />}
 
       {/* ── approvals ── */}

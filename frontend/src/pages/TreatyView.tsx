@@ -23,6 +23,7 @@ import {
 import KavachioLogo from "../components/KavachioLogo";
 import { TreatyTower } from "../components/treaty/TreatyTower";
 import { TermsUsed } from "../components/treaty/TermsUsed";
+import { showDone, showError } from "../components/ResultPopup";
 import {
   approveBasisOnLink, requestBasisChanges, type TreatyViewBasisChange,
   approveEndorsementOnLink, approveTreaty, clearViewSession, downloadTreatyDocument,
@@ -45,6 +46,13 @@ const LIFE: Record<string, string> = {
 function errText(e: unknown, fallback: string): string {
   const d = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
   return typeof d === "string" ? d : fallback;
+}
+
+/** An action's failure in the result popup — unless the app-wide popup has
+ *  already shown it (a 5xx, or no answer at all). */
+function popError(e: unknown, fallback: string) {
+  if ((e as { _friendlyHandled?: boolean })?._friendlyHandled) return;
+  showError(errText(e, fallback));
 }
 
 export default function TreatyView() {
@@ -127,8 +135,9 @@ function CodeGate({ token, gate, onUnlocked }: {
   const LEN = 6;
   const [digits, setDigits] = useState<string[]>(Array(LEN).fill(""));
   const [busy, setBusy] = useState(false);
+  // The code's own error stays beside the boxes it marks; a resend's result
+  // is a popup.
   const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   const [left, setLeft] = useState(gate.lockout_seconds);
   const boxes = useRef<(HTMLInputElement | null)[]>([]);
 
@@ -156,7 +165,7 @@ function CodeGate({ token, gate, onUnlocked }: {
   async function submit(e?: React.FormEvent) {
     e?.preventDefault();
     if (code.length !== LEN || busy || lockedOut) return;
-    setBusy(true); setErr(""); setNote("");
+    setBusy(true); setErr("");
     try {
       await verifyTreatyCode(token, code);
       onUnlocked();
@@ -179,13 +188,13 @@ function CodeGate({ token, gate, onUnlocked }: {
   }, [code]);
 
   async function resend() {
-    setBusy(true); setErr(""); setNote("");
+    setBusy(true); setErr("");
     try {
       const r = await resendTreatyCode(token);
-      setNote(r.ok ? `A new code is on its way to ${r.sent_to}.`
-                   : "We could not send a new code just now.");
+      if (r.ok) showDone(`A new code is on its way to ${r.sent_to}.`);
+      else showError("We could not send a new code just now.");
     } catch (ex) {
-      setErr(errText(ex, "Could not send a new code."));
+      popError(ex, "Could not send a new code.");
     } finally { setBusy(false); }
   }
 
@@ -227,8 +236,6 @@ function CodeGate({ token, gate, onUnlocked }: {
           </div>
           {err && <p style={{ textAlign: "center", color: "var(--p-crit-ink)",
                               fontSize: 13, marginTop: 14 }}>{err}</p>}
-          {note && <p style={{ textAlign: "center", color: "var(--p-primary)",
-                               fontSize: 13, marginTop: 14 }}>{note}</p>}
           {lockedOut && (
             <div className="note warn" style={{ marginTop: 14, textAlign: "center" }}>
               Too many wrong codes. Try again in{" "}
@@ -270,19 +277,18 @@ function Treaty({ token, v, onLock, onView }: {
   onView: (v: TreatyViewOpen) => void;
 }) {
   const [busy, setBusy] = useState("");
-  const [err, setErr] = useState("");
   const mine = useMemo(
     () => new Set(v.layers.filter(l => l.your_share).map(l => l.index)), [v.layers]);
   const myLayers = v.layers.filter(l => l.your_share);
   const leads = myLayers.filter(l => l.your_share?.is_lead).length;
 
   async function dl(key: string, fn: () => Promise<void>) {
-    setBusy(key); setErr("");
+    setBusy(key);
     try { await fn(); }
     catch (e) {
       const status = (e as { response?: { status?: number } })?.response?.status;
       if (status === 401) { onLock(); return; }
-      setErr("That download did not work. Try again, or ask the sender for a copy.");
+      showError("That download did not work. Try again, or ask the sender for a copy.");
     } finally { setBusy(""); }
   }
 
@@ -309,8 +315,6 @@ function Treaty({ token, v, onLock, onView }: {
       </div>
 
       <div className="tv-wrap">
-        {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
-
         {/* Their position, first — it is what they came for. */}
         <div className="card" style={{ marginBottom: 16 }}>
           <div className="card-h">
@@ -526,16 +530,14 @@ function SignCard({ token, v, onView, onLock }: {
   const [title, setTitle] = useState("");
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [done, setDone] = useState("");
   const org = v.viewer.organisation ?? "your organisation";
 
   async function sign() {
-    setBusy(true); setErr("");
+    setBusy(true);
     try {
       const r = await signTreatyOnLink(token, name.trim(), title.trim(), consent);
       onView(r.view);
-      setDone(r.in_force
+      showDone(r.in_force
         ? `Signed. Both sides have now signed, so the treaty is in force — ${v.carrier} sees your signature on their side.`
         : r.blocked_by
           ? `Signed. ${v.carrier} still has to sort out one thing before it is in force: ${r.blocked_by}.`
@@ -543,7 +545,7 @@ function SignCard({ token, v, onView, onLock }: {
     } catch (e) {
       const status = (e as { response?: { status?: number } })?.response?.status;
       if (status === 401) { onLock(); return; }
-      setErr(errText(e, "That did not go through. Try again."));
+      popError(e, "That did not go through. Try again.");
     } finally {
       setBusy(false);
     }
@@ -559,9 +561,6 @@ function SignCard({ token, v, onView, onLock }: {
         </span>
       </div>
       <div style={{ padding: "14px 20px 16px" }}>
-        {done && <div className="note ok" style={{ marginBottom: 12 }}>{done}</div>}
-        {err && <div className="note warn" style={{ marginBottom: 12 }}>{err}</div>}
-
         {sg.signed ? (
           <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
             Signed for {org} by <b>{sg.signed.name}</b>
@@ -635,21 +634,19 @@ function ApprovalCard({ token, v, onView, onLock }: {
   const [confirm, setConfirm] = useState(false);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [done, setDone] = useState("");
 
   async function go(fn: () => Promise<{ view: TreatyViewOpen; terms_agreed?: boolean }>,
                     ok: (agreed: boolean) => string) {
-    setBusy(true); setErr("");
+    setBusy(true);
     try {
       const r = await fn();
       onView(r.view);
       setMode("");
-      setDone(ok(!!r.terms_agreed));
+      showDone(ok(!!r.terms_agreed));
     } catch (e) {
       const status = (e as { response?: { status?: number } })?.response?.status;
       if (status === 401) { onLock(); return; }
-      setErr(errText(e, "That did not go through. Try again."));
+      popError(e, "That did not go through. Try again.");
     } finally {
       setBusy(false);
     }
@@ -671,9 +668,6 @@ function ApprovalCard({ token, v, onView, onLock }: {
         </span>
       </div>
       <div style={{ padding: "14px 20px 16px" }}>
-        {done && <div className="note ok" style={{ marginBottom: 12 }}>{done}</div>}
-        {err && <div className="note warn" style={{ marginBottom: 12 }}>{err}</div>}
-
         {a.status === "approved" && (
           <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
             Approved for {org} by <b>{a.signer_name}</b>
@@ -807,13 +801,11 @@ function EndorsementsCard({ token, v, onView, onLock }: {
   const [confirm, setConfirm] = useState(false);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [done, setDone] = useState("");
   const org = v.viewer.organisation ?? "your organisation";
 
   async function answer(e: TreatyViewEndorsement) {
     if (!open) return;
-    setBusy(true); setErr("");
+    setBusy(true);
     try {
       const r = open.mode === "approve"
         ? await approveEndorsementOnLink(token, e.id, name.trim())
@@ -821,7 +813,7 @@ function EndorsementsCard({ token, v, onView, onLock }: {
           ? await signEndorsementOnLink(token, e.id, name.trim(), title.trim(), confirm)
           : await requestEndorsementChanges(token, e.id, note.trim());
       onView(r.view);
-      setDone(open.mode === "approve"
+      showDone(open.mode === "approve"
         ? `Approved. ${v.carrier} has been told. Once every reinsurer has approved, `
           + `${v.carrier} signs it and you are asked to sign.`
         : open.mode === "sign"
@@ -832,7 +824,7 @@ function EndorsementsCard({ token, v, onView, onLock }: {
     } catch (x) {
       const status = (x as { response?: { status?: number } })?.response?.status;
       if (status === 401) { onLock(); return; }
-      setErr(errText(x, "That did not go through. Try again."));
+      popError(x, "That did not go through. Try again.");
     } finally {
       setBusy(false);
     }
@@ -845,8 +837,6 @@ function EndorsementsCard({ token, v, onView, onLock }: {
         <h3>Endorsements</h3>
       </div>
       <div style={{ padding: "14px 20px 16px", display: "grid", gap: 14 }}>
-        {done && <div className="note ok">{done}</div>}
-        {err && <div className="note warn">{err}</div>}
         {(v.endorsements ?? []).map(e => {
           const mine = e.my_answer;
           const badge = e.status === "in_force" ? ["b-ok", "In force"]
@@ -865,7 +855,7 @@ function EndorsementsCard({ token, v, onView, onLock }: {
                 {e.has_file && (
                   <button className="btn sm" type="button" style={{ marginLeft: "auto" }}
                           onClick={() => downloadTreatyDocument(token, e.id, `${e.label}.pdf`)
-                            .catch(() => setErr("The document could not be downloaded."))}>
+                            .catch(() => showError("The document could not be downloaded."))}>
                     <Download size={13} /> Document
                   </button>
                 )}
@@ -899,11 +889,11 @@ function EndorsementsCard({ token, v, onView, onLock }: {
               {e.can_answer && mine?.status !== "approved" && open?.id !== e.id && (
                 <div className="rowacts" style={{ marginTop: 10 }}>
                   <button className="btn pri" type="button"
-                          onClick={() => { setOpen({ id: e.id, mode: "approve" }); setDone(""); }}>
+                          onClick={() => { setOpen({ id: e.id, mode: "approve" }); }}>
                     <CheckCircle2 size={14} /> Approve
                   </button>
                   <button className="btn" type="button"
-                          onClick={() => { setOpen({ id: e.id, mode: "change" }); setDone(""); }}>
+                          onClick={() => { setOpen({ id: e.id, mode: "change" }); }}>
                     <MessageSquare size={14} /> Ask for a change
                   </button>
                 </div>
@@ -916,7 +906,7 @@ function EndorsementsCard({ token, v, onView, onLock }: {
               {e.can_sign && open?.id !== e.id && (
                 <div className="rowacts" style={{ marginTop: 10 }}>
                   <button className="btn pri" type="button"
-                          onClick={() => { setOpen({ id: e.id, mode: "sign" }); setDone(""); setConfirm(false); }}>
+                          onClick={() => { setOpen({ id: e.id, mode: "sign" }); setConfirm(false); }}>
                     <PenLine size={14} /> Sign
                   </button>
                 </div>
@@ -998,19 +988,17 @@ function BasisChangesCard({ token, v, onView, onLock }: {
   const [confirm, setConfirm] = useState(false);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [done, setDone] = useState("");
   const org = v.viewer.organisation ?? "your organisation";
 
   async function answer(r: TreatyViewBasisChange) {
     if (!open) return;
-    setBusy(true); setErr("");
+    setBusy(true);
     try {
       const res = open.mode === "approve"
         ? await approveBasisOnLink(token, r.id, name.trim())
         : await requestBasisChanges(token, r.id, note.trim());
       onView(res.view);
-      setDone(open.mode === "approve"
+      showDone(open.mode === "approve"
         ? (res.in_force ? "Approved. Every reinsurer has now approved, so the changes apply from their dates."
                         : `Approved. ${v.carrier} has been told. The changes apply once every reinsurer has approved.`)
         : `Sent to ${v.carrier}. You will be asked again once the changes are updated.`);
@@ -1018,7 +1006,7 @@ function BasisChangesCard({ token, v, onView, onLock }: {
     } catch (x) {
       const status = (x as { response?: { status?: number } })?.response?.status;
       if (status === 401) { onLock(); return; }
-      setErr(errText(x, "That did not go through. Try again."));
+      popError(x, "That did not go through. Try again.");
     } finally {
       setBusy(false);
     }
@@ -1031,8 +1019,6 @@ function BasisChangesCard({ token, v, onView, onLock }: {
         <h3>Changes to the treaty&rsquo;s terms</h3>
       </div>
       <div style={{ padding: "14px 20px 16px", display: "grid", gap: 14 }}>
-        {done && <div className="note ok">{done}</div>}
-        {err && <div className="note warn">{err}</div>}
         {(v.basis_changes ?? []).map(r => {
           const mine = r.my_answer;
           const badge = r.status === "approved" ? ["b-ok", "Approved — in use"]
@@ -1067,11 +1053,11 @@ function BasisChangesCard({ token, v, onView, onLock }: {
               {r.can_answer && mine?.status !== "approved" && open?.id !== r.id && (
                 <div className="rowacts" style={{ marginTop: 10 }}>
                   <button className="btn pri" type="button"
-                          onClick={() => { setOpen({ id: r.id, mode: "approve" }); setDone(""); }}>
+                          onClick={() => { setOpen({ id: r.id, mode: "approve" }); }}>
                     <CheckCircle2 size={14} /> Approve
                   </button>
                   <button className="btn" type="button"
-                          onClick={() => { setOpen({ id: r.id, mode: "change" }); setDone(""); }}>
+                          onClick={() => { setOpen({ id: r.id, mode: "change" }); }}>
                     <MessageSquare size={14} /> Ask for a change
                   </button>
                 </div>
@@ -1131,14 +1117,13 @@ function StatementsCard({ token, v, onLock, onStatements }: {
   const [name, setName] = useState(v.viewer.name ?? "");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
   const m = (x: number | null | undefined, cur: string | null) =>
     x == null ? "—" : `${cur ? cur + " " : ""}${x.toLocaleString(undefined,
       { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   async function answer() {
     if (!open) return;
-    setBusy(true); setErr("");
+    setBusy(true);
     try {
       const r = await answerLinkStatement(token, open.id, open.mode, name.trim(), note.trim());
       onStatements(r.statements);
@@ -1146,7 +1131,7 @@ function StatementsCard({ token, v, onLock, onStatements }: {
     } catch (e) {
       const status = (e as { response?: { status?: number } })?.response?.status;
       if (status === 401) { onLock(); return; }
-      setErr(errText(e, "That did not go through."));
+      popError(e, "That did not go through.");
     } finally {
       setBusy(false);
     }
@@ -1159,7 +1144,6 @@ function StatementsCard({ token, v, onLock, onStatements }: {
         <h3>Your bordereaux</h3>
         <span className="sub">your share of every line, period by period</span>
       </div>
-      {err && <div className="note warn" style={{ margin: "12px 20px 0" }}>{err}</div>}
       <div className="tbl-wrap">
         <table>
           <thead>
@@ -1190,7 +1174,7 @@ function StatementsCard({ token, v, onLock, onStatements }: {
                   <button className="btn sm" type="button"
                           onClick={() => downloadLinkStatement(token, st).catch(e => {
                             const s = (e as { response?: { status?: number } })?.response?.status;
-                            if (s === 401) onLock(); else setErr("That download did not work.");
+                            if (s === 401) onLock(); else showError("That download did not work.");
                           })}>
                     <Download size={12} /> Excel
                   </button>{" "}

@@ -1538,7 +1538,9 @@ def _decision_query(s, sc: Scope, f: Filters, q_ids):
     if f.actor_system:
         # Nobody signed in never decides an exception — a person always does.
         return None
-    q = s.query(E)
+    # A reinsurance decision is already in the feed as its request
+    # ("reinsurance_exception_decided"); its log row is for the data model.
+    q = s.query(E).filter(E.lane != "reinsurance")
     if clause is not None:
         q = q.filter(clause)
     if f.since is not None:

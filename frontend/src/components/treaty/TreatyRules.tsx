@@ -16,7 +16,7 @@ import { useState } from "react";
 import {
   AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Loader2, ScrollText, Search, Sparkles,
 } from "lucide-react";
-import { fieldErrors } from "../../api/contractRecord";
+import { showDone, showError } from "../ResultPopup";
 import {
   ruleSource,
   extractTreatyRules, type SetupRecord, type SetupValues, type TreatyCheck, type TreatyRule,
@@ -30,8 +30,6 @@ export function TreatyRulesStep({ cid, rec, v, change, readOnly = false }: {
 }) {
   const rules = v.rules ?? [];
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   // The broker setup's Contract Rules list, for a treaty: filter chips, a
   // search, and one row per rule that opens to its clause and settings.
   const [filter, setFilter] = useState<"terms" | "wording" | "endorsement" | "all">("all");
@@ -42,16 +40,16 @@ export function TreatyRulesStep({ cid, rec, v, change, readOnly = false }: {
     change({ rules: rules.map(r => r.id === id ? { ...r, ...patch } : r) });
 
   async function read() {
-    setBusy(true); setErr(""); setNote("");
+    setBusy(true);
     try {
       const r = await extractTreatyRules(cid);
       change({ rules: r.rules });
-      setNote(r.found
+      showDone(r.found
         ? `${r.found} rule${r.found === 1 ? "" : "s"} read from ${r.read_from}. Check them, then save.`
         : `Nothing in ${r.read_from} limits the business ceded — only the treaty's terms apply.`);
       if (r.found) setFilter("wording");
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
@@ -102,8 +100,6 @@ export function TreatyRulesStep({ cid, rec, v, change, readOnly = false }: {
         </button>
       </div>
       )}
-      {err && <div className="note warn" style={{ marginBottom: 10 }}>{err}</div>}
-      {note && <div className="note ok" style={{ marginBottom: 10 }}>{note}</div>}
 
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         {chip("terms", "Treaty Terms", terms.length)}

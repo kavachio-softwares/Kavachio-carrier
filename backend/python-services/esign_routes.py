@@ -793,6 +793,20 @@ def _build_document(s, body: EnvelopeIn, env: EsignEnvelope, insurer: SignerIn,
             data = esign_pdf.ensure_pdf(data, name)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        if (not esign_pdf.discover_fields(data)
+                and (contract.contract_type or "") == "insurer_reinsurer"):
+            # An uploaded treaty is signed like one written here: on the
+            # document. Its own pages carry no signing boxes, so an execution
+            # page with one for the carrier and one for the lead reinsurer is
+            # added after them; the uploaded pages are left as they are.
+            data = esign_pdf.append_execution_page(
+                data, title=f"Execution of {contract.name or env.title or 'the treaty'}",
+                parties=[
+                    {"title": "Signed for the reinsured", "org": insurer.org,
+                     "key": insurer_key, "name": insurer.name, "role": insurer.title},
+                    {"title": "Signed for the reinsurer", "org": broker.org,
+                     "key": broker_key, "name": broker.name, "role": broker.title},
+                ])
         if not esign_pdf.discover_fields(data):
             raise HTTPException(
                 400, "That wording has no signature blocks in it. Its execution "

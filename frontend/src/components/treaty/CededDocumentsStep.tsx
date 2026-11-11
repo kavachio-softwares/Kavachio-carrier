@@ -21,7 +21,7 @@ import { Link } from "react-router-dom";
 import { FileSpreadsheet, FileUp, Loader2, ShieldCheck } from "lucide-react";
 import { FileDrop } from "../ui/FileDrop";
 import CreateCededTemplate from "./CreateCededTemplate";
-import { fieldErrors } from "../../api/contractRecord";
+import { showError } from "../ResultPopup";
 import {
   uploadInputSample, uploadLayout, type SetupRecord, type SetupValues,
 } from "../../api/ceded";
@@ -38,7 +38,6 @@ export default function CededDocumentsStep({ cid, rec, v, change, onOutputStep }
   const [busy, setBusy] = useState<"" | "input" | "output">("");
   // "Create BDX Template": the two ways to create one, as the broker's.
   const [creating, setCreating] = useState(false);
-  const [err, setErr] = useState("");
   const own = v.input_layout?.source === "own" ? v.input_layout : null;
   const outSrc = v.layout?.source ?? "kavachio";
   // Required, as a broker's are. The input is met by an upload, or by the
@@ -50,20 +49,18 @@ export default function CededDocumentsStep({ cid, rec, v, change, onOutputStep }
   const outputMet = v.columns.length > 0;
 
   async function pickInput(f: File | null) {
-    setErr("");
     if (!f) { change({ input_layout: { source: "brokers" } }); return; }
     setBusy("input");
     try {
       change({ input_layout: await uploadInputSample(cid, f) });
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy("");
     }
   }
 
   async function pickOutput(f: File | null) {
-    setErr("");
     if (!f) {
       // Removed — upload another, or create one.
       change({ layout: { source: "contract" }, columns: [], layout_file: null, file_format: "xlsx" });
@@ -75,7 +72,7 @@ export default function CededDocumentsStep({ cid, rec, v, change, onOutputStep }
       change({ layout: p.layout, columns: p.columns, layout_file: p.layout_file,
                file_format: p.file_format });
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy("");
     }
@@ -93,14 +90,13 @@ export default function CededDocumentsStep({ cid, rec, v, change, onOutputStep }
     <div>
       <CreateCededTemplate open={creating} onClose={() => setCreating(false)}
         cid={cid} rec={rec} v={v}
-        onCreated={t => { setCreating(false); setErr(""); change(t); onOutputStep?.(); }} />
+        onCreated={t => { setCreating(false); change(t); onOutputStep?.(); }} />
       <p className="sub" style={{ marginTop: 0, marginBottom: 12 }}>
         The files this treaty&rsquo;s reinsurance bordereau is built from. Both
         templates are required. Upload your own input file, or leave it empty to
         use the broker bordereau templates already set up on the programmes this
         treaty protects. Upload the output you send your reinsurers, or create one.
       </p>
-      {err && <div className="note warn" style={{ marginBottom: 12 }}>{err}</div>}
 
       {/* The upload boxes are the broker setup's, which are styled for the
           app shell rather than .proto — so they sit outside it. */}

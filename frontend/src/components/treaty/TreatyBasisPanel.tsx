@@ -19,6 +19,7 @@ import {
   DEFAULT_PROFIT, DEFAULT_SCALE, ProfitCommissionEditor, SlidingScaleEditor, profitText, scaleText,
 } from "./CommissionEditors";
 import { fieldErrors } from "../../api/contractRecord";
+import { showDone, showError } from "../ResultPopup";
 import {
   addBasis, evaluateBasis, getBasis, removeBasis, sendBasisForApproval, type Basis,
   type BasisChangeStatus, type BasisTerm, type BasisVersion, type ProfitCommission,
@@ -65,7 +66,6 @@ function current(t: BasisTerm): BasisVersion | undefined {
 export default function TreatyBasisPanel({ contractId }: { contractId: number }) {
   const [b, setB] = useState<Basis | null>(null);
   const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   const [open, setOpen] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
 
@@ -81,23 +81,22 @@ export default function TreatyBasisPanel({ contractId }: { contractId: number })
   const commission = b.terms.filter(t => !BASIS_TERMS.has(t.term));
 
   async function send() {
-    setErr(""); setNote(""); setSending(true);
+    setSending(true);
     try {
       const r = await sendBasisForApproval(contractId);
       setB(r);
       const failed = r.sent.filter(x => !x.emailed).length;
-      setNote(`Sent for approval to ${r.sent.length} ${r.sent.length === 1 ? "person" : "people"} `
+      showDone(`Sent for approval to ${r.sent.length} ${r.sent.length === 1 ? "person" : "people"} `
         + `at the reinsurers.`
         + (failed ? ` ${failed} email${failed === 1 ? "" : "s"} could not be sent — send again.` : "")
         + (r.missing.length ? ` No contact with an email at ${r.missing.join(", ")}.` : ""));
-    } catch (e) { setErr(fieldErrors(e).message); }
+    } catch (e) { showError(e); }
     finally { setSending(false); }
   }
 
   async function remove(id: number) {
-    setErr(""); setNote("");
-    try { setB(await removeBasis(contractId, id)); setNote("Change removed."); }
-    catch (e) { setErr(fieldErrors(e).message); }
+    try { setB(await removeBasis(contractId, id)); showDone("Change removed."); }
+    catch (e) { showError(e); }
   }
 
   const section = (title: string, tip: string, terms: BasisTerm[]) => (
@@ -152,7 +151,7 @@ export default function TreatyBasisPanel({ contractId }: { contractId: number })
                     ))}
                     {open === key(t) && (
                       <ChangeForm contractId={contractId} t={t} base={cur?.value}
-                        b={b} onDone={(nb, msg) => { setB(nb); setOpen(null); setNote(msg); setErr(""); }}
+                        b={b} onDone={(nb, msg) => { setB(nb); setOpen(null); showDone(msg); }}
                         onCancel={() => setOpen(null)} />
                     )}
                   </td>
@@ -181,8 +180,6 @@ export default function TreatyBasisPanel({ contractId }: { contractId: number })
         value from inception and every change from its own date — a statement uses the terms in force
         on its period&rsquo;s first day, so earlier periods keep the terms they were worked out with.
       </div>
-      {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
-      {note && <div className="note ok" style={{ marginBottom: 14 }}>{note}</div>}
       <ApprovalCard b={b} sending={sending} onSend={send} />
       {basis.length > 0 && section("Calculation basis",
         "The cession, the lines and each layer's attachment and limit — what every ceded figure is worked from.",

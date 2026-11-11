@@ -7,7 +7,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Loader2, RefreshCw, ShieldCheck } from "lucide-react";
-import { fieldErrors } from "../../api/contractRecord";
+import { showDone, showError } from "../ResultPopup";
 import { getSetup, type TreatyRule } from "../../api/ceded";
 import { readTreatyClauses } from "../../api/treaty";
 
@@ -24,8 +24,6 @@ export function TreatyWordingRules({ contractId, clauseCount, onRead }: {
 }) {
   const [rules, setRules] = useState<TreatyRule[] | null>(null);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
-  const [err, setErr] = useState("");
 
   const load = () => getSetup(contractId)
     .then(r => setRules(r.setup?.rules ?? r.defaults.rules ?? []))
@@ -33,15 +31,15 @@ export function TreatyWordingRules({ contractId, clauseCount, onRead }: {
   useEffect(() => { load(); }, [contractId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function read() {
-    setBusy(true); setErr(""); setNote("");
+    setBusy(true);
     try {
       const r = await readTreatyClauses(contractId);
-      setNote(`Read ${r.clauses} clause${r.clauses === 1 ? "" : "s"} and `
+      showDone(`Read ${r.clauses} clause${r.clauses === 1 ? "" : "s"} and `
         + `${r.rules} rule${r.rules === 1 ? "" : "s"} from the signed wording.`);
       onRead();
       load();
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
@@ -63,8 +61,6 @@ export function TreatyWordingRules({ contractId, clauseCount, onRead }: {
           </button>
         </span>
       </div>
-      {note && <div className="note ok" style={{ margin: "0 18px 12px" }}>{note}</div>}
-      {err && <div className="note warn" style={{ margin: "0 18px 12px" }}>{err}</div>}
       {rules != null && rules.length === 0 ? (
         <div className="empty">
           No rules yet — read the signed wording, or set out the treaty's structure.

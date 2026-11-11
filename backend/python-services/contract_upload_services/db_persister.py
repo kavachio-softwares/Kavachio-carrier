@@ -840,7 +840,10 @@ def persist_pipeline_output(
             for _sql in (
                 "DELETE FROM rule_sql WHERE contract_id = :cid",
                 "DELETE FROM contract_clause_routing WHERE contract_id = :cid",
-                "DELETE FROM validation_rule WHERE contract_id = :cid",
+                # A treaty's reinsurance rules (ceded_canonical) are not this
+                # reading's to discard: they follow the treaty's setup.
+                "DELETE FROM validation_rule WHERE contract_id = :cid "
+                "AND COALESCE(rule_spec->>'source', '') <> 'reinsurance'",
                 "DELETE FROM clauses_extracted WHERE contract_id = :cid",
                 "DELETE FROM contract_term WHERE term_contract_id = :cid",
             ):

@@ -19,7 +19,7 @@
  */
 import { useRef, useState } from "react";
 import { Calculator, FileSpreadsheet, Loader2, Upload } from "lucide-react";
-import { fieldErrors } from "../../api/contractRecord";
+import { showError } from "../ResultPopup";
 import { Combo } from "../DirectMappingWidgets";
 import {
   ruleSource,
@@ -123,7 +123,6 @@ export function InputTemplateStep({ cid, rec, v, change, bad, listOnly = false, 
   const own = v.input_layout?.source === "own" ? v.input_layout : null;
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
   // Kept while switching to the brokers and back, so an upload is not lost.
   const held = useRef<InputLayout | null>(own);
   const used = usedFields(rec, v);
@@ -142,13 +141,13 @@ export function InputTemplateStep({ cid, rec, v, change, bad, listOnly = false, 
   }
 
   async function upload(f: File) {
-    setBusy(true); setErr("");
+    setBusy(true);
     try {
       const lay = await uploadInputSample(cid, f);
       held.current = lay;
       change({ input_layout: lay });
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
@@ -209,7 +208,6 @@ export function InputTemplateStep({ cid, rec, v, change, bad, listOnly = false, 
         </button>
       </div>
       {bad("input_layout")}
-      {err && <div className="note warn">{err}</div>}
 
       {own ? (
         <>

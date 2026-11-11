@@ -14,6 +14,7 @@ import { Link } from "react-router-dom";
 import { Layers, PenLine, Star } from "lucide-react";
 import { InfoTip } from "../InfoTip";
 import { getCounterparties, fieldErrors } from "../../api/contractRecord";
+import { showDone, showError } from "../ResultPopup";
 import { getHierarchy } from "../../api/hierarchy";
 import {
   getTreaty, getTreatyTypes, saveTreaty, saveTreatyProgrammes,
@@ -35,7 +36,6 @@ export function TreatyRecordPanel({ contractId, onSaved }: {
   const [progs, setProgs] = useState<number[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [editingProgs, setEditingProgs] = useState(false);
 
@@ -55,38 +55,37 @@ export function TreatyRecordPanel({ contractId, onSaved }: {
           layers: rec.structure.layers }
       : EMPTY_TREATY);
     setProgs(rec.programmes.filter(p => !p.is_home).map(p => p.id));
-    setErrors({}); setErr(""); setNote("");
+    setErrors({});
     setEditing(true);
   }
 
   async function save() {
-    setBusy(true); setErr(""); setErrors({});
+    setBusy(true); setErrors({});
     try {
       const r = await saveTreaty(contractId, { ...treatyForSave(draft),
                                                program_ids: progs });
       setRec(r);
       setEditing(false);
-      setNote("Saved. The treaty clauses in the wording were rewritten to match.");
+      showDone("Saved. The treaty clauses in the wording were rewritten to match.");
       onSaved?.();
     } catch (e) {
-      const fe = fieldErrors(e);
-      setErr(fe.message);
-      setErrors(fe.errors as Record<string, string>);
+      showError(e);
+      setErrors(fieldErrors(e).errors as Record<string, string>);
     } finally {
       setBusy(false);
     }
   }
 
   async function saveProgs() {
-    setBusy(true); setErr("");
+    setBusy(true);
     try {
       const r = await saveTreatyProgrammes(contractId, progs);
       setRec(r);
       setEditingProgs(false);
-      setNote("The programmes it protects were updated.");
+      showDone("The programmes it protects were updated.");
       onSaved?.();
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
@@ -106,7 +105,6 @@ export function TreatyRecordPanel({ contractId, onSaved }: {
           <PenLine size={16} className="ci" />
           <h3>Edit the treaty structure</h3>
         </div>
-        {err && <div className="note warn" style={{ marginBottom: 12 }}>{err}</div>}
         <TreatyEditor
           value={draft} onChange={v => { setDraft(v); setErrors({}); }}
           types={types} reinsurers={reinsurers} leadId={rec.lead_reinsurer_id}
@@ -132,9 +130,6 @@ export function TreatyRecordPanel({ contractId, onSaved }: {
 
   return (
     <div>
-      {note && <div className="note ok" style={{ marginBottom: 12 }}>{note}</div>}
-      {err && <div className="note warn" style={{ marginBottom: 12 }}>{err}</div>}
-
       <div className="card" style={{ marginBottom: 14 }}>
         <div className="card-h">
           <Layers size={16} className="ci" />

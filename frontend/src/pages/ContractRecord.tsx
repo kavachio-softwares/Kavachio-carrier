@@ -33,6 +33,7 @@ import { currentMga, getTenantBrand, isBrokerSeat } from "../auth";
 import { SignaturePlacer, signerTargets }
   from "../components/SignaturePlacer";
 import { InfoTip } from "../components/InfoTip";
+import { showDone, showError } from "../components/ResultPopup";
 import { ClauseText } from "../components/ClauseText";
 import { WordingEditor } from "../components/WordingEditor";
 import { TreatyRecordPanel } from "../components/treaty/TreatyRecordPanel";
@@ -258,6 +259,16 @@ function ContractRecordView() {
   const acceptError = navState?.acceptError;
 
   const [rec, setRec] = useState<Rec | null>(null);
+  // A treaty's create / upload result is shown as a popup, once, when it opens.
+  const handoffShown = useRef(false);
+  useEffect(() => {
+    if (!handoff || !rec || handoffShown.current
+        || rec.contract_type !== "insurer_reinsurer") return;
+    handoffShown.current = true;
+    // Saved either way; a warning means not every reinsurer was reached.
+    if (navState?.noticeOk) showDone(handoff, "Treaty saved");
+    else showError(handoff, "Treaty saved — not everyone was reached");
+  }, [handoff, rec]); // eslint-disable-line react-hooks/exhaustive-deps
   const [history, setHistory] = useState<ApprovalEvent[]>([]);
   // A treaty's reinsurers' link activity, shown in the same History.
   const [accessEvents, setAccessEvents] = useState<AccessEvent[]>([]);
@@ -1412,7 +1423,7 @@ function ContractRecordView() {
         )}
         {/* A refused automatic accept (acceptError) is shown in the
             "Make it active" card on the Summary tab, not here. */}
-        {handoff && !note && (
+        {handoff && !note && !isTreaty && (
           <div className={`note ${navState?.noticeOk ? "ok" : "warn"}`}
                style={{ marginBottom: 14, maxWidth: 700 }}>{handoff}</div>
         )}
@@ -1554,13 +1565,15 @@ function ContractRecordView() {
           <TreatyBasisPanel contractId={id} />
         )}
         {curTab === "access" && isTreaty && (
-          <ReinsurerSharing contractId={id} lifecycle={rec.lifecycle} />
+          <ReinsurerSharing contractId={id} lifecycle={rec.lifecycle}
+                            canSign={!!rec.actions.sign && canSignHere} />
         )}
 
         {curTab === "summary" && (<>
         {/* ── where the treaty stands with its reinsurers ── */}
         {isTreaty && rec.treaty?.has_structure && !isBrokerSeat() && (
-          <TreatyFlowCard contractId={id} lifecycle={rec.lifecycle} />
+          <TreatyFlowCard contractId={id} lifecycle={rec.lifecycle}
+                          canSign={!!rec.actions.sign && canSignHere} />
         )}
         {/* ── the treaty, at a glance ── */}
         {isTreaty && rec.treaty && (
@@ -2306,7 +2319,11 @@ function ContractRecordView() {
                   turn", which is not the same question as "may THIS SEAT
                   sign". A carrier user was shown a live Sign button on an
                   agreed contract and the endpoint behind it 403'd. */}
-              {!isUploaded && canSignHere && (round?.can_sign ? (
+              {/* A treaty is signed from its Treaty approval card ("Sign the
+                  treaty") — one button, not two. Recording a reinsurer's
+                  signature made elsewhere still lives here. */}
+              {(isTreaty ? (a.record_signature && !a.sign) : !isUploaded)
+                && canSignHere && (round?.can_sign && !isTreaty ? (
                 <a className="btn pri" href={inAppSigningUrl(id)}
                    target="_blank" rel="noreferrer">
                   <PenLine size={13} /> Sign the contract

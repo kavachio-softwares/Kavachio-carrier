@@ -20,6 +20,7 @@ import {
   ArrowLeft, CheckCircle2, ChevronLeft, ChevronRight, FileText, Loader2, Sparkles,
 } from "lucide-react";
 import { fieldErrors } from "../api/contractRecord";
+import { showDone, showError } from "../components/ResultPopup";
 import {
   confirmWording, getTreatyTypes, getWording, readWording, wordingPageUrl,
   type TermSources, type TreatyField, type TreatyInput, type TreatyTypeSpec,
@@ -39,7 +40,6 @@ export default function TreatyWordingReview() {
   const [rec, setRec] = useState<WordingRecord | null>(null);
   const [types, setTypes] = useState<TreatyTypeSpec[]>([]);
   const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   const [busy, setBusy] = useState<"" | "read" | "confirm">("");
   // What is on screen: the latest reading not yet confirmed, else the treaty
   // as it stands — edited here before it is confirmed.
@@ -88,15 +88,15 @@ export default function TreatyWordingReview() {
   const unconfirmed = !!rec?.reading && (!rec.review || rec.reading.read_at > rec.review.confirmed_at);
 
   async function doRead() {
-    setBusy("read"); setErr(""); setNote("");
+    setBusy("read");
     try {
       const r = await readWording(id);
       seed(r);
       const n = Object.keys(r.reading?.sources ?? {}).length;
-      setNote(`The wording was read — ${n} term${n === 1 ? "" : "s"} traced to their page. `
+      showDone(`The wording was read — ${n} term${n === 1 ? "" : "s"} traced to their page. `
         + "Check each one against the document, correct anything, then confirm.");
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy("");
     }
@@ -104,7 +104,7 @@ export default function TreatyWordingReview() {
 
   async function doConfirm() {
     if (!draft) return;
-    setBusy("confirm"); setErr(""); setNote("");
+    setBusy("confirm");
     try {
       const r = await confirmWording(id, {
         treaty: draft, sources, effective_date: dates.effective_date || null,
@@ -113,11 +113,11 @@ export default function TreatyWordingReview() {
         notice_period_days: dates.notice_period_days ? Number(dates.notice_period_days) : null,
       });
       seed(r);
-      setNote("Terms confirmed from the signed wording — the treaty is configured from them."
+      showDone("Terms confirmed from the signed wording — the treaty is configured from them."
         + (r.notes?.length ? ` ${r.notes.join(" ")}` : ""));
     } catch (e) {
       const fe = fieldErrors(e);
-      setErr(fe.message + (Object.keys(fe.errors).length
+      showError(fe.message + (Object.keys(fe.errors).length
         ? ` ${Object.entries(fe.errors).map(([k, v]) => `${k}: ${v}`).join("; ")}` : ""));
     } finally {
       setBusy("");
@@ -235,8 +235,6 @@ export default function TreatyWordingReview() {
           </div>
         </div>
 
-        {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
-        {note && <div className="note ok" style={{ marginBottom: 14 }}>{note}</div>}
         {!w && (
           <div className="note warn" style={{ marginBottom: 14 }}>
             <b>Signed treaty wording required</b>

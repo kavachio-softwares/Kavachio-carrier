@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_
 
 import ceded_engine as ce
+import ceded_canonical
 import ceded_layout as cl
 import ceded_trace
 import treaty_rules as trr
@@ -397,6 +398,7 @@ def gather(s, c: Contract, period: str, st: dict) -> dict:
         for o, _v in ytd:
             ytd_rows.extend(_rows_of(s, o, names)[0])
 
+    rows_checked = len(rows)
     checks, rows, left_out = _checked(s, c, period, st, rows)
     notes.extend(left_out)
     result = ce.compute(st, rows, ytd_rows=ytd_rows)
@@ -412,7 +414,7 @@ def gather(s, c: Contract, period: str, st: dict) -> dict:
                if p["id"] in feeds and p["id"] not in have]
     return {"sources": sources, "result": result, "notes": notes,
             "src_meta": src_meta, "missing": missing, "checks": checks,
-            "structure": st}
+            "structure": st, "rows_checked": rows_checked}
 
 
 def _own_rows(s, ci: CededInput, layout: dict) -> list[dict]:
@@ -447,6 +449,7 @@ def _gather_own(s, c: Contract, period: str, st: dict, layout: Optional[dict]) -
         ytd_rows = []
         for ci in _own_inputs(s, c, period, up_to=True):
             ytd_rows.extend(_own_rows(s, ci, ci.layout or layout or {}))
+    rows_checked = len(rows)
     checks, rows, left_out = _checked(s, c, period, st, rows)
     result = ce.compute(st, rows, ytd_rows=ytd_rows)
     su = setup_of(s, c)
@@ -458,7 +461,7 @@ def _gather_own(s, c: Contract, period: str, st: dict, layout: Optional[dict]) -
         notes.insert(0, f"No file of yours has been uploaded for {period} yet.")
     return {"sources": [], "result": result, "notes": notes,
             "src_meta": src_meta, "missing": [], "checks": checks,
-            "structure": st}
+            "structure": st, "rows_checked": rows_checked}
 
 
 def build(s, c: Contract, period: str, user_id: Optional[int], *,
@@ -527,6 +530,11 @@ def build(s, c: Contract, period: str, user_id: Optional[int], *,
     cb.built_by_user_id = user_id
     s.flush()
     _write_statements(s, c, cb, st)
+    # The same, where the rest of Kavachio's data lives: the treaty's rules,
+    # this check, and each reinsurer's amounts (ceded_canonical).
+    ceded_canonical.sync_statement(
+        s, c, cb, rules=rules_for(s, c, g["structure"]), checks=cb.checks or [],
+        rows_checked=g.get("rows_checked"), refresh=refresh, user_id=user_id)
     return cb
 
 
@@ -693,6 +701,19 @@ def _basis_changes(s, c: Contract, cb: CededBordereau, st: dict) -> list[dict]:
     now = ceded_trace.snapshot(s, treaty_basis.structure_at(s, c, st, cb.period),
                                cb.currency)
     return ceded_trace.changes(snap, now)
+
+
+def _sync_setup_rules(s, c: Contract) -> None:
+    """The treaty's rules, as just saved, into validation_rule
+    (ceded_canonical) — never what stops the save."""
+    try:
+        st = _tr().load_structure(s, c.id, names=False)
+        rules = rules_for(s, c, st) if st else None
+    except Exception:  # noqa: BLE001
+        log.warning("treaty %s: rules not read for the data model", c.id, exc_info=True)
+        return
+    if rules is not None:
+        ceded_canonical.sync_rules(s, c, rules)
 
 
 def _statement_json(x: CededStatement, names: dict) -> dict:
@@ -964,10 +985,13 @@ def deliver(cb_id: int, user_id: Optional[int], note: Optional[str],
         cb.status = "sent"
         cb.sent_at = now
         cb.sent_by_user_id = user_id
-        if cb.previous_id:
-            prev = s.get(CededBordereau, cb.previous_id)
-            if prev is not None:
-                prev.status = "superseded"
+        prev = s.get(CededBordereau, cb.previous_id) if cb.previous_id else None
+        if prev is not None:
+            prev.status = "superseded"
+        s.flush()
+        ceded_canonical.sync_cessions(s, c, cb)
+        if prev is not None:
+            ceded_canonical.sync_cessions(s, c, prev)
         s.commit()
         treaty, period, version, cur = c.name or f"Treaty {c.id}", cb.period, \
             cb.version_no, cb.currency
@@ -1045,6 +1069,9 @@ def decide(cb_id: int, body: DecideIn, p: Principal = Depends(current_principal)
                                      f"that replaces it.")
         items = {it["key"]: (chk, it) for chk in cb.checks or []
                  for it in chk.get("items") or [] if it.get("key")}
+        import decision_log
+        decider = decision_log.decider(s, p)
+        ids = ceded_canonical.rule_ids(s, c)
         for d in body.decisions:
             if d.kind not in (*trr.DECISIONS, "reopen"):
                 raise HTTPException(400, f"unknown decision {d.kind!r}")
@@ -1084,6 +1111,10 @@ def decide(cb_id: int, body: DecideIn, p: Principal = Depends(current_principal)
                 row.new_value = value if d.kind in ("approve", "fix") else None
                 row.reason = (d.reason or "").strip() or None
                 row.decided_by_user_id, row.decided_at = p.user_id, _now()
+            ceded_canonical.log_decision(
+                s, decider, c, chk, it, kind=d.kind,
+                new_value=value if d.kind in ("approve", "fix") else None,
+                reason=(d.reason or "").strip() or None, ids=ids)
             done += 1
         s.commit()
     out = detail(cb_id, p)
@@ -1191,6 +1222,7 @@ def _answer(token: str, sid: int, body: AnswerIn, request: Request,
         s.flush()
         cb.status = _rollup(cb, s.query(CededStatement)
                             .filter(CededStatement.cb_id == cb.id).all())
+        ceded_canonical.sync_cessions(s, c, cb)
         s.commit()
         try:
             from audit import log_activity
@@ -2062,6 +2094,8 @@ def save_setup(contract_id: int, body: SetupIn,
         su.note = None
         su.updated_by_user_id = p.user_id
         su.updated_at = _now()
+        s.flush()
+        _sync_setup_rules(s, c)
         s.commit()
         return _setup_json(s, c, su, p)
 
@@ -2117,6 +2151,8 @@ def activate_setup(contract_id: int, p: Principal = Depends(current_principal)):
             su.submitted_at = now
             action = "reinsurance_setup_submitted"
         su.note = None
+        s.flush()
+        _sync_setup_rules(s, c)
         s.commit()
         try:
             from audit import log_activity

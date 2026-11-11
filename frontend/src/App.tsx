@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import Layout from "./components/Layout";
+import ResultPopup from "./components/ResultPopup";
 import GlobalErrorPopup from "./components/GlobalErrorPopup";
 import Login from "./pages/Login";
 import ResetPassword from "./pages/ResetPassword";
@@ -138,6 +139,9 @@ export default function App() {
     {/* Friendly popup for unexpected failures (5xx / server unreachable) on ANY
         screen, login included — see api/client.ts + GlobalErrorPopup. */}
     <GlobalErrorPopup />
+    {/* What an action came to — done, or why not — on any screen that
+        reports it this way (showDone / showError). */}
+    <ResultPopup />
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/reset" element={<ResetPassword />} />

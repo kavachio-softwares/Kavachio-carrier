@@ -14,7 +14,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Check, Clock, Eye, Link2, RefreshCw, Send } from "lucide-react";
-import { fieldErrors } from "../../api/contractRecord";
+import { showDone, showError } from "../ResultPopup";
 import {
   getReinsurerAccess, resendReinsurerLink, shareWithReinsurers,
   type ReinsurerAccess,
@@ -29,8 +29,6 @@ export default function TreatySignLink({ contractId, onSigned }: {
   const [acc, setAcc] = useState<ReinsurerAccess | null>(null);
   const [pick, setPick] = useState("");
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [ok, setOk] = useState("");
 
   useEffect(() => {
     getReinsurerAccess(contractId).then(setAcc).catch(() => setAcc(null));
@@ -46,31 +44,31 @@ export default function TreatySignLink({ contractId, onSigned }: {
   if (!asked.length && !sg.can_request) return null;
 
   async function send() {
-    setBusy(true); setErr(""); setOk("");
+    setBusy(true);
     try {
       const r = await shareWithReinsurers(contractId, [Number(pick)], true);
       setAcc(r);
       const s = r.sent[0];
-      setOk(s?.emailed
+      showDone(s?.emailed
         ? `Sent to ${s.name} (${s.email}). They open it with the code in the email and sign there.`
         : `The link was made, but the email to ${s?.email} did not go. Use Resend to try again.`);
       setPick("");
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
   }
 
   async function resend(id: number) {
-    setBusy(true); setErr(""); setOk("");
+    setBusy(true);
     try {
       const r = await resendReinsurerLink(contractId, id);
       setAcc(r);
-      setOk(r.emailed ? "Sent again — the earlier link no longer works."
-                      : "The email did not go. Try again in a moment.");
+      if (r.emailed) showDone("Sent again — the earlier link no longer works.");
+      else showError("The email did not go. Try again in a moment.");
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy(false);
     }
@@ -89,9 +87,6 @@ export default function TreatySignLink({ contractId, onSigned }: {
         their email and the time — not one you entered for them, and it puts
         the treaty in force.
       </div>
-
-      {err && <div className="note warn" style={{ marginBottom: 10 }}>{err}</div>}
-      {ok && <div className="note ok" style={{ marginBottom: 10 }}>{ok}</div>}
 
       {asked.map(l => (
         <div className="kv" key={l.id}>

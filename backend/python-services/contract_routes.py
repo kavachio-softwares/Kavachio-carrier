@@ -1035,6 +1035,8 @@ def _rule_tallies(s, contract_ids: list[int]) -> dict[int, dict]:
         "  rule_spec->>'source' = 'contract_terms') AS term_keys "
         "FROM validation_rule WHERE contract_id = ANY(:ids) "
         "AND rule_status IS DISTINCT FROM 'disabled' "
+        # A treaty's reinsurance rules have their own screen (Treaty Rules).
+        "AND COALESCE(rule_spec->>'source', '') <> 'reinsurance' "
         "GROUP BY contract_id"), {"ids": list(contract_ids)}).mappings().all()
     return {int(r["contract_id"]): {
                 "total": int(r["total"]),

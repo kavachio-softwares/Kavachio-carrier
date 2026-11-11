@@ -19,6 +19,7 @@ import {
   ArrowLeft, CheckCircle2, ChevronLeft, ChevronRight, FileText, Loader2, Plus, Sparkles, Trash2,
 } from "lucide-react";
 import { fieldErrors } from "../api/contractRecord";
+import { showDone, showError } from "../components/ResultPopup";
 import {
   confirmEndorsement, documentPageUrl, getEndorsement, readEndorsement,
   type EndorsementChangeRow, type EndorsementClauseRow, type EndorsementRecord,
@@ -46,7 +47,6 @@ export default function TreatyEndorsementReview() {
   const cid = Number(contractId), did = Number(docId);
   const [rec, setRec] = useState<EndorsementRecord | null>(null);
   const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   const [busy, setBusy] = useState<"" | "read" | "confirm">("");
   const [date, setDate] = useState("");
   const [number, setNumber] = useState("");
@@ -68,16 +68,16 @@ export default function TreatyEndorsementReview() {
   }
 
   async function doRead() {
-    setBusy("read"); setErr(""); setNote("");
+    setBusy("read");
     try {
       const r = await readEndorsement(cid, did);
       seed(r);
       const rd = r.reading!;
-      setNote(`Read — ${rd.changes.length} term change${rd.changes.length === 1 ? "" : "s"} and `
+      showDone(`Read — ${rd.changes.length} term change${rd.changes.length === 1 ? "" : "s"} and `
         + `${rd.clauses.length} clause${rd.clauses.length === 1 ? "" : "s"}, each with its page. `
         + "Check them against the document, correct anything, then apply.");
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy("");
     }
@@ -103,7 +103,7 @@ export default function TreatyEndorsementReview() {
   }, [cid, did, page, rec, pages]);
 
   async function doConfirm() {
-    setBusy("confirm"); setErr(""); setNote("");
+    setBusy("confirm");
     try {
       const r = await confirmEndorsement(cid, did, {
         effective_date: date || null, endorsement_number: number || null,
@@ -113,7 +113,7 @@ export default function TreatyEndorsementReview() {
       const n = r.applied.length, k = clauses.length;
       const others = r.reading?.other_changes.length ?? 0;
       const nr = r.rules.length;
-      setNote(`Applied from ${date ? fmtDate(date) : "its date"}: `
+      showDone(`Applied from ${date ? fmtDate(date) : "its date"}: `
         + (n ? `${n} calculation term${n === 1 ? "" : "s"} changed on the Calculation basis`
              : "it changes none of the treaty's calculation terms (cession, commission, limits)")
         + `; ${k} clause${k === 1 ? "" : "s"} added to the treaty's clauses`
@@ -124,7 +124,7 @@ export default function TreatyEndorsementReview() {
         + " Send it for approval: it is used once every reinsurer has approved and signed it.");
     } catch (e) {
       const fe = fieldErrors(e);
-      setErr(Object.values(fe.errors).join(" ") || fe.message);
+      showError(Object.values(fe.errors).join(" ") || fe.message);
     } finally {
       setBusy("");
     }
@@ -169,8 +169,6 @@ export default function TreatyEndorsementReview() {
           </div>
         </div>
 
-        {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
-        {note && <div className="note ok" style={{ marginBottom: 14 }}>{note}</div>}
         {busy === "read" && (
           <div className="note" style={{ marginBottom: 14 }}>
             <Loader2 size={13} className="animate-spin" /> Reading the endorsement for the terms it

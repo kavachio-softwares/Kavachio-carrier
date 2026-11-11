@@ -21,7 +21,7 @@ import {
   AlertTriangle, ArrowDown, ArrowUp, FileSpreadsheet, Loader2, Plus, Search, Sparkles, Upload, X,
 } from "lucide-react";
 import { InfoTip } from "../InfoTip";
-import { fieldErrors } from "../../api/contractRecord";
+import { showError } from "../ResultPopup";
 import {
   lloydsLayout, treatyLayout, uploadLayout, type LayoutProposal, type LayoutSource,
   type SetupColumn, type SetupRecord, type SetupValues,
@@ -57,7 +57,6 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
   const source: LayoutSource = v.layout?.source ?? "kavachio";
   const held = useRef<Partial<Record<LayoutSource, Held>>>({});
   const [busy, setBusy] = useState("");
-  const [err, setErr] = useState("");
   const [unfilled, setUnfilled] = useState<string[]>([]);
   const [standards, setStandards] = useState<Standard[]>([]);
   const [jurisdiction, setJurisdiction] = useState("");
@@ -94,7 +93,7 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
     held.current[source] = {
       columns: v.columns, layout: v.layout, layout_file: v.layout_file, file_format: v.file_format,
     };
-    setErr(""); setUnfilled([]);
+    setUnfilled([]);
     const back = held.current[next];
     if (back) { change(back); return; }
     if (next === "contract") {
@@ -106,7 +105,7 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
   }
 
   async function read(label: string, fn: () => Promise<LayoutProposal>) {
-    setBusy(label); setErr("");
+    setBusy(label);
     try {
       const p = await fn();
       // Building again from the treaty keeps the columns the carrier added.
@@ -117,7 +116,7 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
                file_format: p.file_format });
       setUnfilled(p.unfilled);
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy("");
     }
@@ -357,7 +356,6 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
             : "Reading the Lloyd's columns — this can take a minute the first time…"}
         </div>
       )}
-      {err && <div className="note warn" style={{ marginBottom: 12 }}>{err}</div>}
 
       {/* ── what fills each column ── */}
       {hasLayout && !busy && (

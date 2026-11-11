@@ -13,6 +13,7 @@ import { FileSpreadsheet, FileUp, Loader2, Search, Sparkles } from "lucide-react
 import { FileDrop } from "../components/ui/FileDrop";
 import { TreatyChecks } from "../components/treaty/TreatyRules";
 import { InfoTip } from "../components/InfoTip";
+import { showError } from "../components/ResultPopup";
 import { fieldErrors } from "../api/contractRecord";
 import {
   cededPeriods, checkCeded, listCeded, prepareCeded, uploadPeriodInput,
@@ -86,11 +87,11 @@ export default function ReinsuranceBordereaux() {
   const canRun = !!treaty && !!runPeriod && (!ownInput || !!ownFile);
 
   async function check() {
-    setBusy("check"); setErr("");
+    setBusy("check");
     try {
       setChecked(await checkCeded(Number(treaty), runPeriod, ownFile));
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy("");
     }
@@ -100,14 +101,14 @@ export default function ReinsuranceBordereaux() {
    *  `resolve`: then open its exceptions, to decide the rows the treaty's
    *  rules caught — as a broker resolves a processed bordereau's. */
   async function generate(resolve = false) {
-    setBusy("run"); setErr("");
+    setBusy("run");
     try {
       const d = ownFile
         ? await uploadPeriodInput(Number(treaty), runPeriod, ownFile)
         : await prepareCeded(Number(treaty), runPeriod);
       nav(`/reinsurance/bordereaux/${d.id}${resolve ? "/exceptions" : ""}`);
     } catch (e) {
-      setErr(fieldErrors(e).message);
+      showError(e);
     } finally {
       setBusy("");
     }

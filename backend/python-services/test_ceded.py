@@ -1449,3 +1449,118 @@ def test_a_statement_made_before_the_terms_were_kept_says_so(w, mail):
     d = client.get(f"/reinsurance/bordereaux/{cb['id']}", headers=w["ch"]).json()
     assert d["basis"] is None and d["basis_changes"] == []
     assert d["totals"]["ceded_premium"] == 400
+
+
+# ── validation and results in the canonical data model (ceded_canonical) ────
+def test_reinsurance_validation_and_results_are_in_the_data_model(w, mail):
+    """The treaty's rules land in validation_rule, each check in the shared
+    check record, each decision in the decision log, the treaty in
+    reinsurance_arrangement and each reinsurer's amounts in cession — and the
+    broker side neither counts nor deletes any of it."""
+    from sqlalchemy import text as T
+    import contract_rules
+    import contract_routes
+    from db import CheckError, CheckResult, CheckRun, ExceptionDecisionLog, engine
+    period = "2027-04"
+    _inward(w, [("CN1", 500_000, 1000, None, None), ("CN2", 100_000, 500, None, None)],
+            period=period)
+    cid = _treaty(w, _qs(w, 40), "QS canonical")
+    d = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()
+    rule = {"id": "wording_cn_si_max", "label": "Sum insured at most 200,000",
+            "kind": "max", "subject": "sum_insured", "params": {"value": 200_000},
+            "severity": "critical", "enabled": True, "source": "wording", "clause": "Cl. 4"}
+    base = {k: v for k, v in d["setup"].items()
+            if k in ("frequency", "due_days", "program_ids", "columns", "layout",
+                     "input_layout", "file_format", "recipients", "cc", "send_mode")}
+    _setup(w, cid, **{**base, "rules": d["setup"]["rules"] + [rule]})
+
+    def rules():
+        with SessionLocal() as s:
+            return {r["tid"]: r for r in s.execute(T(
+                "SELECT rule_id, rule_spec->>'treaty_rule_id' AS tid, severity, rule_status, "
+                "rule_spec->>'source' AS src, source_verbatim_text FROM validation_rule "
+                "WHERE contract_id = :c"), {"c": cid}).mappings()}
+
+    # Saving the setup wrote the treaty's rules, marked as reinsurance.
+    got = rules()
+    assert rule["id"] in got and {r["src"] for r in got.values()} == {"reinsurance"}
+    mine = got[rule["id"]]
+    assert (mine["severity"], mine["rule_status"], mine["source_verbatim_text"]) == \
+        ("critical", "active", "Cl. 4")
+
+    cb = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                     json={"contract_id": cid, "period": period}).json()
+    assert rules()[rule["id"]]["rule_id"] == mine["rule_id"]      # updated in place
+    with SessionLocal() as s:
+        run = (s.query(CheckRun).filter(CheckRun.lane == "reinsurance",
+                                        CheckRun.contract_id == cid)
+               .order_by(CheckRun.id.desc()).first())
+        assert (run.kind, run.status, run.period, run.version_no) == \
+            ("run", "has_exceptions", period, 1)
+        assert run.chain_key == f"ceded:{cid}:{period}"
+        assert run.submission_ref == f"ceded_bordereau:{cb['id']}"
+        assert run.rows_checked == 2 and run.critical_count == 1
+        res = {r.check_key: r for r in s.query(CheckResult).filter(CheckResult.run_id == run.id)}
+        assert (res[f"treaty_rule:{rule['id']}"].outcome,
+                res[f"treaty_rule:{rule['id']}"].error_count) == ("failed", 1)
+        assert res[f"treaty_rule:{rule['id']}"].rule_id == mine["rule_id"]
+        errs = s.query(CheckError).filter(CheckError.run_id == run.id).all()
+        assert [(e.policy_number, e.actual_value, e.rule_id, e.lane) for e in errs] == \
+            [("CN1", "500000", mine["rule_id"], "reinsurance")]
+
+        arr = s.execute(T("SELECT * FROM reinsurance_arrangement WHERE row_key = :k"),
+                        {"k": f"treaty:{cid}"}).mappings().one()
+        assert arr["arrangement_type"] == "treaty_quota_share"
+        assert arr["contract_id"] == cid and arr["tenant_id"] == w["t"]
+        ces = {r["cession_reinsurer_party_id"]: r for r in s.execute(
+            T("SELECT * FROM cession WHERE row_key LIKE :k"), {"k": f"ceded:{cb['id']}:%"})
+            .mappings()}
+    assert set(ces) == {w["swiss"], w["munich"]}
+    swiss = next(x for x in cb["statements"] if x["reinsurer_party_id"] == w["swiss"])
+    sw = ces[w["swiss"]]
+    assert float(sw["cession_ceded_premium_amount"]) == swiss["totals"]["ceded_premium"]
+    assert float(sw["cession_share_percent"]) == 60
+    assert (sw["cession_status"], sw["is_current_version"], sw["cession_period_start"]) == \
+        ("pending", True, "2027-04-01")
+    if "cession_net_premium_amount" in sw:          # migration 46 applied
+        assert float(sw["cession_net_premium_amount"]) == swiss["totals"]["net_premium"]
+        assert float(sw["cession_ceding_commission_amount"]) == \
+            swiss["totals"]["ceding_commission"]
+
+    # A decision is logged in the reinsurance lane; the audit feed keeps it out.
+    item = next(it for c in cb["checks"] if c["id"] == rule["id"] for it in c["items"])
+    r = client.post(f"/reinsurance/bordereaux/{cb['id']}/decide", headers=w["ch"],
+                    json={"decisions": [{"key": item["key"], "kind": "dismiss",
+                                         "reason": "Agreed with the lead"}]})
+    assert r.status_code == 200, r.text
+    with SessionLocal() as s:
+        logged = (s.query(ExceptionDecisionLog)
+                  .filter(ExceptionDecisionLog.lane == "reinsurance",
+                          ExceptionDecisionLog.tenant_id == w["t"],
+                          ExceptionDecisionLog.policy_number == "CN1").all())
+    assert [(x.kind, x.rule_id, x.old_value, x.reason) for x in logged] == \
+        [("dismiss", mine["rule_id"], "500000", "Agreed with the lead")]
+
+    # Fix & Validate, then Send: the cession rows follow the statement.
+    cb = client.post(f"/reinsurance/bordereaux/{cb['id']}/validate", headers=w["ch"]).json()
+    assert client.post(f"/reinsurance/bordereaux/{cb['id']}/send", headers=w["ch"],
+                       json={}).status_code == 200
+    with SessionLocal() as s:
+        st = {r[0] for r in s.execute(T("SELECT cession_status FROM cession WHERE row_key LIKE :k"),
+                                      {"k": f"ceded:{cb['id']}:%"})}
+        runs = s.query(CheckRun).filter(CheckRun.lane == "reinsurance",
+                                        CheckRun.contract_id == cid).count()
+    assert st == {"sent"} and runs == 2                # prepared, then validated again
+
+    # The broker side: the treaty's rules are not its count, and replacing a
+    # contract's rules leaves them alone.
+    with SessionLocal() as s:
+        assert (contract_routes._rule_tallies(s, [cid]).get(cid) or {}).get("total", 0) == 0
+    with engine.begin() as conn:
+        contract_rules.write_rules(conn, contract_id=cid, program_id=None,
+                                   tenant_id=w["t"], rules=[], template_id=None)
+    assert rule["id"] in rules()
+
+    # A rule taken off the setup is switched off, not deleted.
+    _setup(w, cid, **{**base, "rules": d["setup"]["rules"]})
+    assert rules()[rule["id"]]["rule_status"] == "disabled"

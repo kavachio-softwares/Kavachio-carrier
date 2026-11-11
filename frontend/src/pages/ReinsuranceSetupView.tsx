@@ -25,6 +25,7 @@ import Button from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
 import { SetupTabs, useSetupTab, type SetupTab } from "../components/SetupTabs";
 import { fieldErrors } from "../api/contractRecord";
+import { showError } from "../components/ResultPopup";
 import {
   activateSetup, getSetup, listCeded, previewSetup, sendBackSetup,
   type CededSummary, type SetupPreview, type SetupRecord, type SetupValues,
@@ -143,13 +144,13 @@ export default function ReinsuranceSetupView() {
   async function activate() {
     setBusy(true);
     try { setRec(await activateSetup(cid)); setConfirm(false); }
-    catch (e) { setErr(fieldErrors(e).message); }
+    catch (e) { showError(e); }
     finally { setBusy(false); }
   }
   async function sendBack() {
     setBusy(true);
     try { setRec(await sendBackSetup(cid, rejectNote.trim())); setRejecting(false); }
-    catch (e) { setErr(fieldErrors(e).message); }
+    catch (e) { showError(e); }
     finally { setBusy(false); }
   }
 

@@ -29,6 +29,7 @@ import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import { SetupTabs, useSetupTab, type SetupTab } from "../components/SetupTabs";
 import { InfoTip } from "../components/InfoTip";
+import { showDone, showError } from "../components/ResultPopup";
 import CededLayoutSection from "../components/treaty/CededLayoutSection";
 import {
   FieldMappingStep, InputTemplateStep, treatyRuleLine, unmatchedOutputs,
@@ -67,7 +68,6 @@ export default function ReinsuranceSetupEdit() {
   const [dirty, setDirty] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [err, setErr] = useState("");
-  const [note, setNote] = useState("");
   const [busy, setBusy] = useState("");
   const [pv, setPv] = useState<SetupPreview | null>(null);
   const [backNote, setBackNote] = useState("");
@@ -120,14 +120,13 @@ export default function ReinsuranceSetupEdit() {
   }
 
   async function act(label: string, fn: () => Promise<SetupRecord>, ok: string) {
-    setBusy(label); setErr(""); setNote(""); setErrors({});
+    setBusy(label); setErrors({});
     try {
       load(await fn());
-      setNote(ok);
+      showDone(ok);
     } catch (e) {
-      const fe = fieldErrors(e);
-      setErr(fe.message);
-      setErrors(fe.errors as Record<string, string>);
+      showError(e);
+      setErrors(fieldErrors(e).errors as Record<string, string>);
     } finally {
       setBusy("");
     }
@@ -297,7 +296,7 @@ export default function ReinsuranceSetupEdit() {
   const unmatched = unmatchedOutputs(rec, v);
 
   async function buildSetup() {
-    setBusy("build"); setErr(""); setNote(""); setErrors({});
+    setBusy("build"); setErrors({});
     try {
       const r = await saveSetup(cid, values!);
       const sv = r.setup ?? r.defaults;
@@ -307,9 +306,8 @@ export default function ReinsuranceSetupEdit() {
                  rules: (sv.rules ?? []).filter(x => x.enabled).length });
       load(r);
     } catch (e) {
-      const fe = fieldErrors(e);
-      setErr(fe.message);
-      setErrors(fe.errors as Record<string, string>);
+      showError(e);
+      setErrors(fieldErrors(e).errors as Record<string, string>);
     } finally {
       setBusy("");
     }
@@ -489,7 +487,7 @@ export default function ReinsuranceSetupEdit() {
         )} />
       <PageBody>
         {(!rec.has_structure || !rec.wording || (rec.setup?.note && status === "draft") || (status === "active" && dirty)
-          || (status === "pending_approval" && rec.carrier_admin) || err || note) && (
+          || (status === "pending_approval" && rec.carrier_admin)) && (
         <div className="proto" style={{ background: "transparent" }}>
         {!rec.has_structure && (
           <div className="note warn" style={{ marginBottom: 14 }}>
@@ -536,8 +534,6 @@ export default function ReinsuranceSetupEdit() {
             )}
           </div>
         )}
-        {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
-        {note && <div className="note ok" style={{ marginBottom: 14 }}>{note}</div>}
 
         </div>
         )}
@@ -710,7 +706,7 @@ export default function ReinsuranceSetupEdit() {
           <Button variant="danger" disabled={!!busy} onClick={async () => {
             setBusy("delete");
             try { await deleteSetup(cid); nav("/direct/setups?tab=reinsurance"); }
-            catch (e) { setErr(fieldErrors(e).message); setDeleting(false); }
+            catch (e) { showError(e); setDeleting(false); }
             finally { setBusy(""); }
           }}>Delete Draft</Button>
         </div>}>
