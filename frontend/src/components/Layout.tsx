@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, CalendarDays, ScrollText, History, FileSpreadsheet, BarChart3,
+  FileCheck, CalendarDays, ScrollText, History, FileSpreadsheet, BarChart3, Timer, AlertTriangle,
 } from "lucide-react";
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
@@ -108,6 +108,9 @@ const GROUPS: {
       // belong inside one setup. It sits next to Process Bordereau because
       // "what is owed to me" and "run one" are the same job on two days.
       { to: "/bordereau-calendar", label: "Bordereau Calendar", icon: CalendarDays },
+      // 44: everything still waiting on someone — failed checks, late files,
+      // disputes, files on hold, contracts to sign — with owner, due date, age.
+      { to: "/open-problems", label: "Open Problems", icon: AlertTriangle },
       // My Calendar is deliberately NOT listed. Deadlines belong to a specific
       // carrier + program, so the calendar now lives inside that setup's own
       // screen where both are already fixed. The /calendar route still exists
@@ -287,7 +290,7 @@ function subScreenOwner(pathname: string, search: string): string | null {
   if (under("/intake") || under("/files")) return "/home";
   // Policies has no sidebar entry either — both seats open it from their
   // Dashboard, so that stays lit.
-  if (under("/policies")) return isBrokerSeat() ? "/broker" : "/home";
+  if (under("/policies") || under("/financial-summary")) return isBrokerSeat() ? "/broker" : "/home";
 
   // The Monthly Report's Data Quality and Exception Resolution tabs.
   if (under("/monthly-report")) return "/monthly-report";

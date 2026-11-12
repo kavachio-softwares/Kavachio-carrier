@@ -5774,6 +5774,60 @@ def set_fix_target(body: FixTargetBody, mga: str,
         return {"target_days": new, "was": old}
 
 
+@router.get("/reports/open-problems")
+def report_open_problems(mga: str, program_id: Optional[int] = None,
+                         broker_party_id: Optional[int] = None,
+                         kind: Optional[str] = Query(None, alias="type"),
+                         owner: Optional[str] = None,
+                         overdue_only: bool = False,
+                         sort: str = "age",
+                         page: int = Query(1, ge=1),
+                         page_size: int = Query(25, ge=1, le=100),
+                         principal: Principal = Depends(require_carrier_admin("see open problems"))):
+    """Phase 2 · 44 — every open problem across the carrier's book: failed
+    checks, late or missing files, disputes, files on hold and contracts to
+    sign, each with its status, owner (a broker company, or the carrier), due
+    date and age, plus each owner's workload. See open_problems.py.
+
+    `program_id` / `broker_party_id` narrow everything; `type`, `owner`
+    ("carrier" or a broker party id) and `overdue_only` narrow the list only.
+    `sort` is age (oldest first) or due (soonest first)."""
+    import fix_performance as fp
+    import open_problems as op
+    if kind and kind not in op.TYPES:
+        raise HTTPException(400, f"type must be one of {', '.join(op.TYPES)}")
+    if sort not in op.SORTS:
+        raise HTTPException(400, f"sort must be one of {', '.join(op.SORTS)}")
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        target = fp.target_days(s, tid)
+        items = op.collect(s, tid, target=target, program_id=program_id,
+                           broker_party_id=broker_party_id)
+        out = op.build(items, today=datetime.utcnow().date(), owner=owner, kind=kind,
+                       overdue_only=overdue_only, sort=sort, page=page, page_size=page_size)
+        broker_ids = ({i["broker_party_id"] for i in out["items"]}
+                      | {int(w["owner"]) for w in out["workload"] if w["owner"] != op.CARRIER}) - {None}
+        prog_ids = {i["program_id"] for i in out["items"]} - {None}
+        brokers = dict(s.query(Party.id, Party.legal_name)
+                       .filter(Party.id.in_(broker_ids)).all()) if broker_ids else {}
+        progs = dict(s.query(Program.id, Program.name)
+                     .filter(Program.id.in_(prog_ids)).all()) if prog_ids else {}
+
+        def _owner_name(key: str) -> str:
+            return "Carrier" if key == op.CARRIER else (brokers.get(int(key)) or f"Broker {key}")
+
+        for w in out["workload"]:
+            w["owner_name"] = _owner_name(w["owner"])
+        for i in out["items"]:
+            b, p = i["broker_party_id"], i["program_id"]
+            i["owner_name"] = _owner_name(i["owner_key"])
+            i["broker_name"] = brokers.get(b) if b else None
+            i["programme_name"] = progs.get(p) or ("No programme" if not p else f"Programme {p}")
+        out.update(_report_filter_lists(s, tid))
+        out["target_days"] = target
+        out["types"] = [{"type": k, "label": v} for k, v in op.TYPE_WORDS.items()]
+        return out
+
 @router.get("/dashboard/broker-performance")
 def dashboard_broker_performance(mga: str,
                                  days: int = Query(30, ge=7, le=90),

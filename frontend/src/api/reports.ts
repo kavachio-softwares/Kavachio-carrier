@@ -421,3 +421,80 @@ export async function setFixTarget(days: number): Promise<{ target_days: number;
     { params: { mga: currentMga() } });
   return data;
 }
+
+// ── 44 — Exception Ownership & Workload (backend open_problems.py) ─────────
+
+export type ProblemType = "check" | "late_file" | "dispute" | "held_file" | "signature";
+
+export interface WorkloadProblem {
+  key: string;
+  type: ProblemType;
+  type_label: string;
+  status: string;
+  title: string;
+  detail: string | null;
+  started_on: string | null;
+  due_on: string | null;
+  age_days: number | null;
+  overdue: boolean;
+  /** "carrier", or the broker's party id as a string. */
+  owner_key: string;
+  owner_name: string;
+  program_id: number | null;
+  programme_name: string;
+  broker_party_id: number | null;
+  broker_name: string | null;
+  link: string | null;
+}
+
+export interface WorkloadRow {
+  owner: string;
+  owner_name: string;
+  open: number;
+  overdue: number;
+  oldest_days: number | null;
+  by_type: Record<ProblemType, number>;
+}
+
+export interface OpenProblemsReport {
+  as_of: string;
+  target_days: number;
+  total_open: number;
+  total_overdue: number;
+  by_type: { type: ProblemType; label: string; open: number; overdue: number }[];
+  workload: WorkloadRow[];
+  page: number;
+  page_size: number;
+  total: number;
+  items: WorkloadProblem[];
+  types: { type: ProblemType; label: string }[];
+  programmes: { id: number; name: string }[];
+  brokers: { id: number; name: string }[];
+}
+
+/** Carrier admin only. Programme and broker narrow everything; type, owner
+ *  and overdue-only narrow the list. */
+export async function getOpenProblems(params: {
+  program_id?: number | null;
+  broker_party_id?: number | null;
+  type?: ProblemType | null;
+  owner?: string | null;
+  overdue_only?: boolean;
+  sort?: "age" | "due";
+  page?: number;
+  page_size?: number;
+}): Promise<OpenProblemsReport> {
+  const { data } = await api.get<OpenProblemsReport>("/reports/open-problems", {
+    params: {
+      mga: currentMga(),
+      program_id: params.program_id ?? undefined,
+      broker_party_id: params.broker_party_id ?? undefined,
+      type: params.type ?? undefined,
+      owner: params.owner ?? undefined,
+      overdue_only: params.overdue_only || undefined,
+      sort: params.sort ?? "age",
+      page: params.page ?? 1, page_size: params.page_size ?? 25,
+    },
+  });
+  return data;
+}

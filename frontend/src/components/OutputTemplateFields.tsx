@@ -35,6 +35,14 @@ import {
   type FieldsDoc, type TemplateField, type ValidationReport,
 } from "../api/outputTemplate";
 import { errText } from "../utils/directSetup";
+import { getAddTogetherFields } from "../api/finance";
+import { InfoTip } from "./InfoTip";
+
+const ADD_TOGETHER_TIP =
+  "Several columns on this sheet feed the same figure. Tick all of them to add "
+  + "them up in the Financial Summary (for example, premium split by section). "
+  + "Leave them all unticked when they repeat the same value. If a ticked column "
+  + "is empty on a row, that row shows Needs review.";
 
 export default function OutputTemplateFields({
   templateId, onSaved, refreshKey, blockedReason = null,
@@ -78,6 +86,23 @@ export default function OutputTemplateFields({
   const shown = useMemo(
     () => fields.filter(f => !sheet || f.sheet === sheet),
     [fields, sheet]);
+
+  // "Add together" is offered only where it means something: a money figure
+  // that two or more fields of the same sheet feed.
+  const [moneyFields, setMoneyFields] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    getAddTogetherFields().then(f => setMoneyFields(new Set(f))).catch(() => {});
+  }, []);
+  const shared = useMemo(() => {
+    const n = new Map<string, number>();
+    for (const f of fields) {
+      if (f.active && f.source_field && moneyFields.has(f.source_field)) {
+        const k = `${f.sheet}||${f.source_field}`;
+        n.set(k, (n.get(k) ?? 0) + 1);
+      }
+    }
+    return n;
+  }, [fields, moneyFields]);
 
   function patch(key: string, sheetName: string, change: Partial<TemplateField>) {
     setFields(prev => prev.map(f =>
@@ -238,6 +263,8 @@ export default function OutputTemplateFields({
           <tbody>
             {shown.sort((a, b) => a.display_order - b.display_order).map((f, i) => (
               <Row key={`${f.sheet}||${f.field_key}`} f={f} index={i}
+                canAddTogether={f.active && !!f.source_field
+                  && (shared.get(`${f.sheet}||${f.source_field}`) ?? 0) > 1}
                 sourceTypes={doc.source_types} dataTypes={doc.data_types}
                 onPatch={c => patch(f.field_key, f.sheet, c)}
                 onMove={d => move(f.field_key, f.sheet, d)} />
@@ -260,8 +287,8 @@ export default function OutputTemplateFields({
   );
 }
 
-function Row({ f, index, sourceTypes, dataTypes, onPatch, onMove }: {
-  f: TemplateField; index: number;
+function Row({ f, index, canAddTogether, sourceTypes, dataTypes, onPatch, onMove }: {
+  f: TemplateField; index: number; canAddTogether: boolean;
   sourceTypes: string[]; dataTypes: string[];
   onPatch: (c: Partial<TemplateField>) => void;
   onMove: (d: -1 | 1) => void;
@@ -291,6 +318,14 @@ function Row({ f, index, sourceTypes, dataTypes, onPatch, onMove }: {
         <TextInput className="!py-1 !text-[12.5px] font-mono"
           value={f.source_field ?? ""} placeholder="not mapped"
           onChange={e => onPatch({ source_field: e.target.value || null })} />
+        {canAddTogether && (
+          <label className="flex items-center gap-1.5 text-[11.5px] mt-1">
+            <input type="checkbox" checked={!!f.add_together}
+              onChange={e => onPatch({ add_together: e.target.checked })} />
+            Add together
+            <InfoTip text={ADD_TOGETHER_TIP} />
+          </label>
+        )}
       </td>
       <td className="px-3 py-1.5">
         <Select className="!py-1 !text-[12px]" value={f.source_type ?? ""}

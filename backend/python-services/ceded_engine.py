@@ -188,7 +188,7 @@ def read_export_rows(template_structure: dict, data: bytes,
         text = data.decode("utf-8-sig", errors="replace")
         table = list(csv.reader(io.StringIO(text)))
         sh = sheets[0] if sheets else {}
-        rows.extend(_rows_from_table(table, sh))
+        rows.extend(_rows_from_table(table, at_file_positions(table, sh)))
         return rows, notes
     try:
         import openpyxl
@@ -205,9 +205,73 @@ def read_export_rows(template_structure: dict, data: bytes,
             notes.append(f"sheet '{sh.get('sheet_name')}' is not in the file")
             continue
         table = [list(r) for r in ws.iter_rows(values_only=True)]
-        rows.extend(_rows_from_table(table, sh))
+        rows.extend(_rows_from_table(table, at_file_positions(table, sh)))
     wb.close()
     return rows, notes
+
+
+def _heading(v: Any) -> str:
+    return re.sub(r"\s+", " ", str(v)).strip().lower()
+
+
+def at_file_positions(table: list[list], sh: dict) -> dict:
+    """This sheet as the FILE lays it out: each template column moved to the
+    position its heading holds in the file's header row.
+
+    The writer leaves empty columns out, so a 134-column template can give a
+    62-column file, and older files predate later template edits; the
+    template's `column_index` then points at another column's cells (15 of 601
+    current files, 5 Nov 2026). A column is found by the heading the file
+    shows for it (output_template_fields.header_of — a renamed column carries
+    its new name — then its own name); a heading the file repeats is matched
+    occurrence by occurrence, in template order. A named column whose heading
+    is not in the file was not written, i.e. it was empty, and is left out.
+
+    Unchanged on purpose: which rows are read and how (`_rows_from_table`), a
+    column with no name (kept at its position), and a sheet whose header row
+    matches none of the template's headings (read by position, as before).
+    For a file laid out exactly as its template, every column keeps its own
+    position, so nothing changes."""
+    from output_template_fields import header_of
+    cols = sh.get("columns") or []
+    if not cols:
+        return sh
+    found: dict[str, list[int]] = {}
+    for idx in dict.fromkeys([int(sh.get("header_row") or 0), 0]):
+        if idx < len(table):
+            for i, v in enumerate(table[idx] or []):
+                if v is not None and str(v).strip():
+                    found.setdefault(_heading(v), []).append(i)
+            if found:
+                break
+
+    def _names(c: dict) -> list[str]:
+        if not str(c.get("column_name") or c.get("display_name") or "").strip():
+            return []
+        return [n for n in dict.fromkeys(_heading(x) for x in (header_of(c), c.get("column_name")) if x) if n]
+
+    named = [(c, _names(c)) for c in cols]
+    if not found or not any(n in found for _c, ns in named for n in ns):
+        return sh
+    # Repeated headings are shared out in template position order …
+    used = {k: 0 for k in found}
+    where: dict[int, Optional[int]] = {}
+    for i, (c, ns) in sorted(enumerate(named), key=lambda t: int(t[1][0].get("column_index") or 0)):
+        if not ns:
+            continue
+        hit = next((n for n in ns if n in found and used[n] < len(found[n])), None)
+        where[i] = found[hit][used[hit]] if hit is not None else None
+        if hit is not None:
+            used[hit] += 1
+    # … but the columns keep the template's own order, which decides the
+    # column a field is taken from when several carry it.
+    moved: list[dict] = []
+    for i, (c, ns) in enumerate(named):
+        if not ns:
+            moved.append(c)
+        elif where.get(i) is not None:
+            moved.append({**c, "column_index": where[i]})
+    return {**sh, "columns": moved}
 
 
 def _rows_from_table(table: list[list], sh: dict) -> list[dict]:

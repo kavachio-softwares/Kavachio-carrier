@@ -29,6 +29,16 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
             onClick?: () => void }[];
 }) {
   const alert = tone === "alert";
+  const iconBox = (
+    <div style={{
+      width: 36, height: 36, borderRadius: 10, flexShrink: 0,
+      background: alert ? "#fef2f2" : "#f0fdfa",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      color: alert ? "#ef4444" : "#0d9488",
+    }}>
+      <Icon size={18} strokeWidth={2.5} />
+    </div>
+  );
   return (
     <div
       style={{
@@ -43,28 +53,32 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
       onMouseOver={onClick ? (e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgb(0 0 0 / 0.1)"; } : undefined}
       onMouseOut={onClick ? (e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05)"; } : undefined}
     >
-      <div style={{
-        width: 36, height: 36, borderRadius: 10,
-        background: alert ? "#fef2f2" : "#f0fdfa",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        color: alert ? "#ef4444" : "#0d9488",
-      }}>
-        <Icon size={18} strokeWidth={2.5} />
-      </div>
+      {!split && iconBox}
       {split ? (
-        <div>
-          <div style={{ display: "flex", alignItems: "stretch" }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+          <div style={{ flex: 1, display: "flex", alignItems: "stretch" }}>
           {split.map((sp, i) => (
             <div key={sp.label}
               onClick={sp.onClick ? (e) => { e.stopPropagation(); sp.onClick!(); } : undefined}
               style={{
-              flex: 1, minWidth: 0,
+              flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 10,
               // A rule rather than a gap: two numbers this close together read
               // as one figure and its footnote without something between them.
+              // The rule runs almost the card's full height (into the card's
+              // 16px padding, stopping 8px short of each edge), so the tile
+              // reads as two halves rather than a short line beside the numbers.
               paddingLeft: i === 0 ? 0 : 16,
               marginLeft: i === 0 ? 0 : 16,
               borderLeft: i === 0 ? undefined : "1px solid var(--p-border-2)",
+              ...(i === 0 ? {} : {
+                marginTop: -8, paddingTop: 8,
+                ...(subtitle || footer ? {} : { marginBottom: -8, paddingBottom: 8 }),
+              }),
             }}>
+              {/* The icon sits in the first half; later halves keep an empty
+                  slot of the same height so the numbers stay level. */}
+              {i === 0 ? iconBox : <div style={{ height: 36, flexShrink: 0 }} />}
+              <div>
               <div style={{ fontSize: 26, fontWeight: 700, color: "var(--p-text)",
                             lineHeight: 1, marginBottom: 6 }}>
                 {sp.value}
@@ -78,6 +92,7 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
                   {sp.hint}
                 </div>
               )}
+              </div>
             </div>
           ))}
           </div>
@@ -85,13 +100,18 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
         </div>
       ) : (
       <div>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-          <div style={{ fontSize: 26, fontWeight: 700, color: "var(--p-text)", lineHeight: 1 }}>
+        {/* Wraps rather than overflows: a long value ("2,703,000.00") and its
+            trend do not always fit one line of a narrow tile, and the trend
+            then drops below the value instead of spilling out of the card. */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                      flexWrap: "wrap", gap: "6px 10px", marginBottom: 4 }}>
+          <div style={{ fontSize: 26, fontWeight: 700, color: "var(--p-text)", lineHeight: 1,
+                        minWidth: 0, overflowWrap: "anywhere" }}>
             {value}
           </div>
           {trend && (
             <div style={{
-              fontSize: 13, fontWeight: 600,
+              fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
               color: trend.startsWith("-") || alert ? "#ef4444" : "#10b981",
               background: trend.startsWith("-") || alert ? "#fef2f2" : "#ecfdf5",
               padding: "4px 8px", borderRadius: 6,

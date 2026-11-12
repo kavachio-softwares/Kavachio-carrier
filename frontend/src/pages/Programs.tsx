@@ -18,7 +18,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { frequencyLabel } from "../constants/frequency";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Layers, ChevronRight, Plus, Search, Copy, Check } from "lucide-react";
 import { InfoTip } from "../components/ui/InfoTip";
 import { PageBody, PageHeader } from "../components/Layout";
@@ -294,6 +294,12 @@ export default function Programs() {
                             p.bdx_frequency ? frequencyLabel(p.bdx_frequency).toLowerCase() : ""]
                             .filter(Boolean).join(" · ")}
                         </div>
+                        {/* 44.2 — this programme's open problems: what is
+                            waiting, on whom, and what is overdue. */}
+                        <Link to={`/open-problems?program=${p.id}`} onClick={e => e.stopPropagation()}
+                          className="mt-0.5 inline-block text-xs font-semibold text-navy hover:underline">
+                          Open problems
+                        </Link>
                       </td>
                       <td className="align-middle">
                         {/* Each pill opens its own step for this programme. */}

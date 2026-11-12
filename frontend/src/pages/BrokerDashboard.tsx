@@ -135,6 +135,7 @@ export default function BrokerDashboard() {
           {/* Policies has no sidebar entry: this is its way in. */}
           <div className="actions">
             <Link className="btn" to="/policies">Search Policies</Link>
+            <Link className="btn" to="/financial-summary">Financial Summary</Link>
           </div>
         </div>
 

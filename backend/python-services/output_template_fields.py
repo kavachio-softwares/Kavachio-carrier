@@ -228,6 +228,10 @@ def flatten(structure: dict) -> list[dict]:
                 # that existed — which is why a screen must not read "no match"
                 # as "nothing will fill this".
                 "input_match": col.get("input_match"),
+                # The carrier's "Add together" tick: columns of one sheet that
+                # feed the same money figure are added up in the Financial
+                # Summary only when every one of them carries it.
+                "add_together": col.get("add_together") is True,
             })
     out.sort(key=lambda f: (str(f["sheet"] or ""), f["display_order"] or 0))
     return out
@@ -242,7 +246,7 @@ def flatten(structure: dict) -> list[dict]:
 # renaming goes through `display_name` (see the module docstring).
 EDITABLE = {"display_name", "source_field", "source_type", "data_type",
             "required", "conditional", "default_value", "transformation_rule",
-            "display_order", "active"}
+            "display_order", "active", "add_together"}
 
 _TO_COLUMN = {"source_field": "canonical_field", "default_value": "static_value",
               "transformation_rule": "transform"}
@@ -280,6 +284,12 @@ def apply_edits(structure: dict, edits: list[dict]) -> tuple[dict, list[str]]:
                 continue
             if k == "data_type" and v not in DATA_TYPES:
                 errors.append(f"'{e.get('field_key')}': unknown data type '{v}'")
+                continue
+            if k == "add_together":
+                # Only a tick the carrier set is stored; an untouched field
+                # gains no key.
+                if v is True or col.get("add_together") is not None:
+                    col["add_together"] = v is True
                 continue
             col[_TO_COLUMN.get(k, k)] = v
         # A mandatory field the standard demands cannot be switched to optional.

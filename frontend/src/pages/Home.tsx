@@ -641,6 +641,9 @@ export default function Home() {
               {canAccessPath("/policies") && (
                 <Link className="btn" to="/policies">Search Policies</Link>
               )}
+              {canAccessPath("/financial-summary") && (
+                <Link className="btn" to="/financial-summary">Financial Summary</Link>
+              )}
               {canProcess && <Link className="btn pri" to="/direct">＋ Process Bordereaux</Link>}
             </div>
           )}

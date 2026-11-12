@@ -6,7 +6,7 @@ If this file and the code disagree, the code wins — then fix this file.
 
 Written 2026-11-03 against `origin/development` @ `74fe1ff`; updated 2026-11-04 on `development-phase-2`.
 Everything here applies to both branches. Phase 2 (`development-phase-2`) adds areas this file does not describe yet:
-reinsurance (`ceded_*.py`, `treaty_*.py`, `/reinsurance/*` routes) and Policy Search (`policy_search.py`, `/policies`, 43.1).
+reinsurance (`ceded_*.py`, `treaty_*.py`, `/reinsurance/*` routes), Policy Search (`policy_search.py`, `/policies`, 43.1) and the Financial Summary (`financial_*.py`, `/financial-summary`, 35; see `PROJECT_CONTEXT.md` §9).
 `PROJECT_CONTEXT.md` does not describe them either — ask their authors before changing them.
 
 ## What this is
@@ -79,7 +79,7 @@ Docker: `backend/python-services/Dockerfile` (python 3.12, Tesseract OCR, `uvico
 - Safety checks (size, safe to open, malware) run before anything else opens a file.
 - Counts come from one place (`exception_tally.py`, `broker_tally.py`) so every screen agrees.
 - Output BDX mandatory fields are enforced when a template is activated, never when a file is produced.
-- **Read a processed file's columns by their heading, never by the template's `column_index`.** The writer drops empty columns (a 145-column template can give a 62-column file), and older files predate later template edits, so positions shift. The highlighter does it right (`exporter.highlight_exceptions`, using `output_template_fields.header_of`); `ceded_engine.read_export_rows` does not yet (15 of 601 current files misread, fix pending).
+- **Read a processed file's columns by their heading, never by the template's `column_index`.** The writer drops empty columns (a 145-column template can give a 62-column file), and older files predate later template edits, so positions shift. The highlighter does it (`exporter.highlight_exceptions`, using `output_template_fields.header_of`), and so does `ceded_engine.read_export_rows` since 5 Nov (`at_file_positions`; regression tests in `test_ceded_reader_positions.py`), which Policy Search and the reinsurance statements share; `financial_figures.read_file` too.
 - AI answers are cached by content (`ai_cache`) so the same input gives the same result. Don't bypass the cache.
 
 ## Coding conventions

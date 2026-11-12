@@ -70,6 +70,9 @@ from submission_routes import router as submission_router
 # Policy Search (Phase 2, 43.1): the policies inside the processed bordereaux,
 # for the carrier and broker seats (policy_search.py).
 from policy_routes import router as policy_router
+# Financial Summary (Phase 2, 35): premium, commission and the rest of the money
+# in the same processed bordereaux, against earlier periods (financial_summary.py).
+from financial_routes import router as financial_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
 from mapper import (
     apply_spec_multi,
@@ -168,6 +171,7 @@ app.include_router(submission_router)
 # running total (itd_routes.py).
 app.include_router(itd_router)
 app.include_router(policy_router)
+app.include_router(financial_router)
 
 
 def _mark_deprecated_aliases() -> None:
@@ -2257,11 +2261,14 @@ def export_template_refresh(template_id: int,
                 key = (sh["sheet_name"], col["column_index"])
                 prev = existing.get(key) or {}
 
-                # 1. Always preserve user-set transform / static_value.
+                # 1. Always preserve user-set transform / static_value, and the
+                #    Financial Summary's "Add together" tick.
                 if prev.get("transform") is not None:
                     col["transform"] = prev["transform"]
                 if prev.get("static_value") is not None:
                     col["static_value"] = prev["static_value"]
+                if prev.get("add_together") is not None:
+                    col["add_together"] = prev["add_together"]
 
                 # 2. If the LLM populated this column, use that.
                 #    Otherwise fall back to whatever was there before.
