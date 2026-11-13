@@ -7,12 +7,14 @@
 //
 // Every number says how sure it is: Reported (in the file), Calculated (worked
 // out from reported figures by an approved formula), Needs review (the file's
-// columns disagree or the template tag is unclear) or Not reported. Currencies
-// are never added together — each is its own tab.
+// columns disagree or the template tag is unclear) or Not reported. A total no
+// row has shows "—" (or "Needs review") with an ⓘ saying why: which file has no
+// column for it, which left it empty, and the first reason a row needs review.
+// Currencies are never added together — each is its own tab.
 //
 // Deliberately NOT a sidebar entry: opened from the Dashboard (both seats), as
 // Policies is.
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Ban, Banknote, Handshake, Landmark, Layers, Percent, Receipt, TrendingUp, Wallet,
@@ -20,8 +22,9 @@ import {
 } from "lucide-react";
 import {
   getFinancialRows, getFinancialSummary, type Basis, type CurrencyGroup, type Figure,
-  type FigureStatus, type FinancialRows, type FinancialSummary as Summary,
-  type MetricKey, type MetricTotals, type PartTotals,
+  type FigureStatus, type FileRef, type FinancialRows, type FinancialSummary as Summary,
+  type MetricKey, type MetricTotals, type MetricWhy, type MissingFile, type PartTotals,
+  type TransactionType,
 } from "../api/finance";
 import { useBrokerCarrierId } from "../brokerCarrier";
 import { isBrokerSeat } from "../auth";
@@ -74,14 +77,14 @@ const CLASS_LABEL: Record<string, string> = {
   installment: "Instalment", adjustment: "Adjustment", audit: "Audit", unclassified: "Not classified",
 };
 
-type TabKey = "overview" | "programmes" | "brokers" | "transactions" | "rows" | "coverage";
+// What the totals leave out sits on Overview (Notes) and the transaction types
+// on Bordereau rows (TypeButtons) — not tabs of their own (user, 13 Nov 2026).
+type TabKey = "overview" | "programmes" | "brokers" | "rows";
 const TABS: { key: TabKey; label: string }[] = [
   { key: "overview", label: "Overview" },
   { key: "programmes", label: "By programme" },
   { key: "brokers", label: "By broker" },
-  { key: "transactions", label: "Transaction types" },
   { key: "rows", label: "Bordereau rows" },
-  { key: "coverage", label: "What's included" },
 ];
 
 const idOrNull = (v: string) => (v && /^\d+$/.test(v) ? Number(v) : null);
@@ -111,8 +114,79 @@ function change(c: number | null, unit: "money" | "percent"): string | undefined
   return unit === "percent" ? `${sign}${Math.abs(c).toFixed(2)} pts` : `${sign}${Math.abs(c).toFixed(1)}%`;
 }
 
+/** What a total no row has shows: "Needs review" stays in words (someone has
+ *  to act on it); a figure the bordereaux do not carry is a dash. Either way
+ *  the reason sits behind the ⓘ beside it (missingWhy). */
 function emptyValue(m: MetricTotals): string {
-  return m.current.counts.needs_review > 0 ? "Needs review" : "Not reported";
+  return m.current.counts.needs_review > 0 ? "Needs review" : "—";
+}
+
+const TITLE = Object.fromEntries(METRICS.map(m => [m.key, m.title])) as Record<MetricKey, string>;
+// A rate card is total amount ÷ total gross premium, so its reason is its inputs'.
+const RATE_AMOUNT: Partial<Record<MetricKey, MetricKey>> = {
+  commission_pct: "commission_amount", brokerage_pct: "brokerage_amount",
+};
+const NEVER_FILLED = "Kavachio never fills in a missing figure or counts it as 0.";
+const ROWS_TAB = "The Bordereau rows tab gives every row's reason.";
+
+function fileName(f: FileRef): string {
+  const n = `“${f.filename ?? `file #${f.export_id}`}”`;
+  return f.programme ? `${n} (${f.programme})` : n;
+}
+
+function fileList(files: FileRef[]): string {
+  const shown = files.slice(0, 2).map(fileName);
+  const more = files.length - shown.length;
+  return more > 0 ? `${shown.join(", ")} and ${more} more` : shown.join(" and ");
+}
+
+function rowsLeft(f: MissingFile): string {
+  if (f.rows !== f.of_rows) return `${f.rows} of its ${f.of_rows} rows`;
+  return f.of_rows === 1 ? "its only row" : `all ${f.of_rows} rows`;
+}
+
+/** One figure's reasons, as the server found them (financial_summary._why). */
+function figureWhy(w: MetricWhy | undefined, title: string, reviewOnly = false): string[] {
+  if (!w) return [];
+  const out: string[] = [];
+  if (w.review_rows) {
+    const n = w.review_rows;
+    const ex = w.review[0];
+    out.push(`${title}: ${n} row${n === 1 ? " needs" : "s need"} review`
+      + (ex ? ` — e.g. ${fileName(ex)}, row ${ex.row}: ${ex.reason}.` : "."));
+  }
+  if (reviewOnly) return out;
+  if (w.no_column.length) {
+    out.push(`Not in the bordereau: ${fileList(w.no_column)} ${w.no_column.length === 1 ? "has" : "have"} no column for ${title}.`);
+  }
+  if (w.switched_off.length) {
+    out.push(`${fileList(w.switched_off)}: the ${title} column is switched off in the output template, so it is never written.`);
+  }
+  for (const f of w.empty.slice(0, 2)) {
+    out.push(`${fileName(f)} has a ${title} column, but it was left empty on ${rowsLeft(f)}.`);
+  }
+  if (w.empty.length > 2) out.push(`${w.empty.length - 2} more files left it empty too.`);
+  return out;
+}
+
+/** The ⓘ text beside a total no row has: why it is missing or needs review. */
+function missingWhy(group: CurrencyGroup, key: MetricKey): string {
+  const why = group.why ?? {};
+  const parts: string[] = [];
+  const amount = RATE_AMOUNT[key];
+  if (amount) {
+    parts.push(`Worked out as total ${TITLE[amount].toLowerCase()} ÷ total gross premium, over the rows that carry both; no row this period has both.`);
+    parts.push(...figureWhy(why[amount], TITLE[amount]));
+    parts.push(...figureWhy(why.gross_premium, TITLE.gross_premium));
+    parts.push(...figureWhy(why[key], TITLE[key], true));
+  } else {
+    parts.push(...figureWhy(why[key], TITLE[key]));
+  }
+  const used = [why[key], amount && why[amount], amount && why.gross_premium]
+    .filter((w): w is MetricWhy => !!w);
+  if (used.some(w => w.review_rows)) parts.push(ROWS_TAB);
+  if (used.some(w => w.no_column.length || w.switched_off.length || w.empty.length)) parts.push(NEVER_FILLED);
+  return parts.length ? parts.join(" ") : "No row this period carries this figure.";
 }
 
 /** "18 reported · 2 calculated · 1 needs review" — the facts behind a total. */
@@ -160,7 +234,6 @@ export default function FinancialSummary() {
     groups.find(g => g.currency === currency) ?? groups[0];
   const filtered = programId != null || brokerId != null || openProblems === "exclude";
   const w = data?.windows;
-  const notes = data ? coverageItems(data).length : 0;
 
   return (
     <div className="proto">
@@ -258,11 +331,15 @@ export default function FinancialSummary() {
           </div></div>
         ) : (
           <div style={loading ? { opacity: 0.6 } : undefined}>
-            <div className="sub" style={{ marginBottom: 12 }}>
-              {periodName(w?.current?.period)} ({w?.current?.files ?? 0} file{w?.current?.files === 1 ? "" : "s"})
-              {" "}compared with {periodName(w?.previous?.period)} ({w?.previous?.files ?? 0})
-              {basis !== "year" && <> and {periodName(w?.last_year?.period)} ({w?.last_year?.files ?? 0})</>}
+            <div className="sub" style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+              <span>
+                {periodName(w?.current?.period)}: {fileCount(w?.current?.files)}, {count(w?.current?.rows ?? 0, "policy row", "policy rows")}
+                {" "}· compared with {periodName(w?.previous?.period)} ({fileCount(w?.previous?.files)})
+                {basis !== "year" && <> and {periodName(w?.last_year?.period)} ({fileCount(w?.last_year?.files)})</>}
+              </span>
+              <InfoTip text="Only the latest version of each file counts: an earlier version for the same month is replaced, not added, and an identical copy is counted once. A missing figure is never counted as 0, and different currencies are never added together." />
             </div>
+            {tab === "overview" && <Notes data={data} />}
 
             <div className="tabs" role="tablist">
               {TABS.filter(t => !(broker && t.key === "brokers")).map(t => (
@@ -270,7 +347,6 @@ export default function FinancialSummary() {
                   className={tab === t.key ? "on" : ""} onClick={() => setTab(t.key)}>
                   {t.label}
                   {t.key === "rows" && group && <span className="sub"> · {group.rows}</span>}
-                  {t.key === "coverage" && notes > 0 && <span className="sub"> · {notes}</span>}
                 </button>
               ))}
             </div>
@@ -286,14 +362,11 @@ export default function FinancialSummary() {
               <Parts title="By programme" parts={group.by_programme} currency={group.currency} />
             ) : tab === "brokers" ? (
               <Parts title="By broker" parts={group.by_broker} currency={group.currency} />
-            ) : tab === "transactions" ? (
-              <Transactions data={data} />
-            ) : tab === "rows" ? (
+            ) : (
               <RowsCard basis={basis} period={data.period} programId={programId}
                 brokerId={broker ? null : brokerId} carrierId={broker ? carrierId : null}
-                openProblems={openProblems} currency={group.currency} showBroker={!broker} />
-            ) : (
-              <Coverage data={data} />
+                openProblems={openProblems} currency={group.currency} showBroker={!broker}
+                transactions={group.transactions ?? []} />
             )}
           </div>
         )}
@@ -314,6 +387,7 @@ function MetricCards({ group, basis, nwp }: {
         return (
           <StatCard key={m.key} title={m.title} icon={m.icon} info={m.info}
             value={v == null ? emptyValue(t) : t.unit === "percent" ? rate(v) : money(v, group.currency)}
+            valueInfo={v == null ? missingWhy(group, m.key) : undefined}
             trend={change(t.change.previous, t.unit)}
             subtitle={<>
               {basis !== "year" && ly && <div>Same period last year: {ly}</div>}
@@ -321,9 +395,9 @@ function MetricCards({ group, basis, nwp }: {
             </>} />
         );
       })}
-      <StatCard title="Net written premium" icon={Ban} value="Not available"
-        info={`${nwp.formula}. ${nwp.reason}`}
-        subtitle="Needs assumed reinsurance, not yet recorded" />
+      <StatCard title="Net written premium" icon={Ban} value="—"
+        info={`${nwp.formula}.`}
+        valueInfo={`Not available: ${nwp.reason} It never comes in a bordereau.`} />
     </div>
   );
 }
@@ -355,7 +429,11 @@ function CompareTable({ group, data }: { group: CurrencyGroup; data: Summary }) 
               return (
                 <tr key={m.key}>
                   <td className="l">{m.title}</td>
-                  <td>{t.current.value == null ? <span className="muted">{emptyValue(t)}</span> : fmt(m.key, t.current.value)}</td>
+                  <td>{t.current.value == null
+                    ? <span className="muted" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                        {emptyValue(t)}<InfoTip text={missingWhy(group, m.key)} />
+                      </span>
+                    : fmt(m.key, t.current.value)}</td>
                   <td>{fmt(m.key, t.previous.value)}</td>
                   <td><Change c={t.change.previous} unit={t.unit} /></td>
                   {showLy && <td>{fmt(m.key, t.last_year.value)}</td>}
@@ -414,69 +492,112 @@ function Parts({ title, parts, currency }: { title: string; parts: PartTotals[];
   );
 }
 
-function Transactions({ data }: { data: Summary }) {
+/** "1 file" / "4 files". */
+function count(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** "1 file", "4 files", or "no files". */
+function fileCount(n: number | undefined): string {
+  return n ? count(n, "file", "files") : "no files";
+}
+
+type NoteFile = FileRef & { open?: number };
+type Note = { text: string; files?: NoteFile[]; after?: string };
+
+/** What the totals leave out or cannot vouch for, in words — on Overview
+ *  under the period line, and only when there is something to say. */
+function notesOf(data: Summary): Note[] {
+  const c = data.coverage;
+  const op = c.open_problems;
+  const many = (n: number, one: string, more: string) => (n === 1 ? one : more.replace("{n}", String(n)));
+  const out: Note[] = [];
+  if (c.no_period.length) out.push({ files: c.no_period, text: many(c.no_period.length,
+    "1 file names no reporting period, so it is in no period",
+    "{n} files name no reporting period, so they are in no period") });
+  if (c.longer_period.length) out.push({ files: c.longer_period, text: many(c.longer_period.length,
+    `1 file reports a longer period than one ${data.basis}, so it counts only in a longer view`,
+    `{n} files report a longer period than one ${data.basis}, so they count only in a longer view`) });
+  if (c.copies.length) out.push({ files: c.copies, text: many(c.copies.length,
+    "1 file is an exact copy of a newer file and is counted once",
+    "{n} files are exact copies of a newer file and are counted once") });
+  if (c.unreadable.length) out.push({ files: c.unreadable, text: many(c.unreadable.length,
+    "1 file could not be read", "{n} files could not be read") });
+  if (op.files) out.push(op.excluded
+    ? { files: op.list, text: many(op.files, "1 file with open problems is left out",
+        "{n} files with open problems are left out") }
+    : { files: op.list, text: many(op.files, "1 file still has open problems and is counted",
+        "{n} files still have open problems and are counted"),
+        after: `Set “Files with open problems” to Excluded to leave ${op.files === 1 ? "it" : "them"} out.` });
+  if (c.percent_unverified_templates) out.push({ text: many(c.percent_unverified_templates,
+    "1 output template writes a rate whose form (25% or 0.25) could not be checked, so that rate needs review",
+    "{n} output templates write a rate whose form (25% or 0.25) could not be checked, so those rates need review") });
+  if (c.headings_not_in_file) out.push({ text: many(c.headings_not_in_file,
+    "1 marked column was not in its file (written empty), so it reports nothing",
+    "{n} marked columns were not in their files (written empty), so they report nothing") });
+  return out;
+}
+
+function noteFile(f: NoteFile): string {
+  const extra = [f.programme, f.open ? count(f.open, "open problem", "open problems") : null, f.problem]
+    .filter(Boolean).join(", ");
+  return `“${f.filename ?? `file #${f.export_id}`}”` + (extra ? ` (${extra})` : "");
+}
+
+function Notes({ data }: { data: Summary }) {
+  const notes = notesOf(data);
+  if (!notes.length) return null;
   return (
-    <ChartCard title="Transaction types this period"
-      info={<InfoTip text="As each bordereau wrote them. Cancellations and return premiums (CN, Cancellation, flat cancellations, Endorsement - Return Premium) count as negative; every other row keeps the sign it was sent with. Codes Kavachio does not know are shown as sent." />}>
-      {data.transactions.length === 0 ? <div className="empty">No rows this period.</div> : (
-        <div className="tbl-wrap">
-          <table>
-            <thead><tr><th className="l">As sent</th><th className="l">Read as</th><th>Counted as</th><th>Rows</th></tr></thead>
-            <tbody>
-              {data.transactions.map((t, i) => (
-                <tr key={i}>
-                  <td className="l">{t.sent ?? <span className="muted">Not reported</span>}</td>
-                  <td className="l">{t.class ? CLASS_LABEL[t.class] ?? t.class : "—"}</td>
-                  <td>{t.negative ? <span className="badge b-warn"><span className="d" />Negative</span> : "As sent"}</td>
-                  <td>{t.rows}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </ChartCard>
+    <div className="note warn" style={{ marginBottom: 14, display: "flex", flexDirection: "column", gap: 4 }}>
+      {notes.map((n, i) => {
+        const files = n.files ?? [];
+        return (
+          <div key={i}>
+            {n.text}
+            {files.length > 0 && <>: {files.slice(0, 4).map(noteFile).join(", ")}{files.length > 4 && ` and ${files.length - 4} more`}</>}.
+            {n.after && <> {n.after}</>}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
-type CoverageItem = { n: number; text: ReactNode; files?: { export_id: number; filename: string | null; problem?: string | null }[] };
-
-/** What the totals leave out or cannot vouch for — one list, so the tab's
- *  count and the panel agree. */
-function coverageItems(data: Summary): CoverageItem[] {
-  const c = data.coverage;
-  return [
-    { n: c.no_period.length, text: "files name no reporting period, so they are in no period", files: c.no_period },
-    { n: c.longer_period.length, text: `files report a longer period than one ${data.basis}, so they count only in a longer view`, files: c.longer_period },
-    { n: c.copies.length, text: "files are exact copies of a newer file and are counted once", files: c.copies },
-    { n: c.unreadable.length, text: "files could not be read", files: c.unreadable },
-    { n: c.open_problems.files, text: c.open_problems.excluded ? "files with open problems are left out" : "files this period still have open problems (included)" },
-    { n: c.percent_unverified_templates, text: "output templates write a rate whose form (25% or 0.25) could not be checked; those rates need review" },
-    { n: c.headings_not_in_file, text: "tagged columns were not in the file (written empty), so they report nothing" },
-  ].filter(i => i.n > 0);
+/** A transaction type as a button label: the code as sent, how Kavachio reads
+ *  it when that is not obvious from the code, and codes it does not know. */
+function typeLabel(t: TransactionType): string {
+  // No type on the row, or two type columns that disagree (financial_figures).
+  if (!t.sent) return "Not stated or unclear";
+  if (!t.class) return t.sent;
+  if (t.class === "unclassified") return `${t.sent} (not recognised)`;
+  const read = CLASS_LABEL[t.class] ?? t.class;
+  return read.toLowerCase().startsWith(t.sent.toLowerCase()) ? t.sent : `${t.sent} (${read})`;
 }
 
-function Coverage({ data }: { data: Summary }) {
-  const items = coverageItems(data);
+/** This period's transaction types; clicking one shows only those rows. */
+function TypeButtons({ types, value, onChange }: {
+  types: TransactionType[]; value: string | null; onChange: (v: string | null) => void;
+}) {
+  if (!types.length) return null;
   return (
-    <ChartCard title="What the totals do and do not include"
-      info={<InfoTip text="Only the current version of each file is counted, once. A missing figure is never counted as 0. Different currencies are never added together." />}>
-      {items.length === 0 ? <div className="empty">Every file this period was read and placed.</div> : (
-        <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 8 }}>
-          {items.map((i, k) => (
-            <li key={k}>
-              <b>{i.n}</b> {i.text}
-              {i.files && i.files.length > 0 && (
-                <div className="sub">
-                  {i.files.slice(0, 4).map(f => f.filename + (f.problem ? ` (${f.problem})` : "")).join(", ")}
-                  {i.files.length > 4 && ` and ${i.files.length - 4} more`}
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-    </ChartCard>
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+                  padding: "12px 20px", borderBottom: "1px solid var(--p-border)" }}>
+      <span className="sub" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+        Transaction types
+        <InfoTip text="As each bordereau wrote them; click one to show only those rows. Cancellations and return premiums (CN, Cancellation, flat cancellations, Endorsement - Return Premium) are counted as negative; every other row keeps the sign it was sent with. Codes Kavachio does not know are shown as sent, marked “not recognised”." />
+      </span>
+      <span className="seg sm">
+        {types.map(t => {
+          const key = t.sent ?? "none";
+          return (
+            <button key={key} type="button" className={value === key ? "on" : ""}
+              onClick={() => onChange(value === key ? null : key)}>
+              {typeLabel(t)} · {t.rows}{t.negative ? " · counted as negative" : ""}
+            </button>
+          );
+        })}
+      </span>
+    </div>
   );
 }
 
@@ -488,24 +609,30 @@ const ROW_METRICS: { key: MetricKey; label: string }[] = [
   { key: "earned_premium", label: "Earned" },
 ];
 
-function RowsCard({ basis, period, programId, brokerId, carrierId, openProblems, currency, showBroker }: {
+function RowsCard({ basis, period, programId, brokerId, carrierId, openProblems, currency, showBroker, transactions }: {
   basis: Basis; period: string; programId: number | null; brokerId: number | null;
   carrierId: number | null; openProblems: "include" | "exclude"; currency: string; showBroker: boolean;
+  transactions: TransactionType[];
 }) {
   const [status, setStatus] = useState<FigureStatus | null>(null);
+  // A transaction type as sent ("none" = not stated), from the type buttons.
+  const [txn, setTxn] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [rows, setRows] = useState<FinancialRows | null>(null);
   const [failed, setFailed] = useState(false);
-  const key = useMemo(() => JSON.stringify([basis, period, programId, brokerId, carrierId, openProblems, currency, status]),
-    [basis, period, programId, brokerId, carrierId, openProblems, currency, status]);
+  const key = useMemo(() => JSON.stringify([basis, period, programId, brokerId, carrierId, openProblems, currency, status, txn]),
+    [basis, period, programId, brokerId, carrierId, openProblems, currency, status, txn]);
 
+  // Another period or currency has its own types: start again from all of them.
+  useEffect(() => { setTxn(null); }, [basis, period, currency]);
   useEffect(() => { setPage(1); }, [key]);
   useEffect(() => {
     let live = true;
     setFailed(false);
     getFinancialRows({
       basis, period, program_id: programId, broker_party_id: brokerId, carrier_id: carrierId,
-      open_problems: openProblems, currency, status, window: "current", page, page_size: ROWS_PAGE,
+      open_problems: openProblems, currency, status, transaction: txn,
+      window: "current", page, page_size: ROWS_PAGE,
     })
       .then(r => { if (live) setRows(r); })
       .catch(() => { if (live) setFailed(true); });
@@ -528,6 +655,7 @@ function RowsCard({ basis, period, programId, brokerId, carrierId, openProblems,
           </span>
         </div>
       </div>
+      <TypeButtons types={transactions} value={txn} onChange={setTxn} />
       {failed ? <div className="empty">Could not load the rows.</div>
         : !rows ? <div className="empty">Loading…</div>
         : rows.total === 0 ? <div className="empty">No rows match.</div> : (

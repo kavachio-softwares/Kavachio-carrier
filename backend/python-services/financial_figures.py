@@ -388,6 +388,23 @@ def read_file(structure: dict, data: Optional[bytes], filename: str) -> FileRows
     return out
 
 
+def marked(structure: dict) -> dict[str, bool]:
+    """{figure (FIELDS key): True when a column for it is switched on, False
+    when its only columns are switched off} on the sheets read_file reads — so
+    a figure no row reports can be told apart as "no column for it", "a column
+    switched off in the template" (never written) or "a column left empty".
+    A figure with no column at all is absent."""
+    out: dict[str, bool] = {}
+    for sh in (structure or {}).get("sheets") or []:
+        if _is_reference(sh):
+            continue
+        for c in sh.get("columns") or []:
+            key = _KEY_OF.get(field_of(c))
+            if key is not None:
+                out[key] = out.get(key, False) or c.get("active") is not False
+    return out
+
+
 # ── percentage convention ───────────────────────────────────────────────────
 def _evidence(rows: list[dict]) -> dict:
     """How each rate is written in this file, from rows that carry the amount,

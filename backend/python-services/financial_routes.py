@@ -70,6 +70,7 @@ def financial_summary_rows(
     open_problems: str = "include",
     currency: Optional[str] = None,
     status: Optional[str] = None,
+    transaction: Optional[str] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     principal: Principal = Depends(current_principal),
@@ -77,10 +78,12 @@ def financial_summary_rows(
     """The rows behind one window's totals. `currency` is a currency code, or
     "none" / "review" for the rows whose currency is not stated / unclear;
     `status` keeps the rows where any figure is reported, calculated,
-    needs_review or not_reported."""
+    needs_review or not_reported; `transaction` the rows of one transaction
+    type as sent, or "none" for the rows that state none."""
     with SessionLocal() as s:
         return financial_summary.rows(
             s, principal, basis=basis, period=period, window=window,
             program_id=program_id, broker_party_id=broker_party_id,
             carrier_id=carrier_id, open_problems=open_problems,
-            currency=currency, status=status, page=page, page_size=page_size)
+            currency=currency, status=status, transaction=transaction,
+            page=page, page_size=page_size)

@@ -3,9 +3,12 @@ import { ChevronRight, type LucideIcon } from "lucide-react";
 import { InfoTip } from "./InfoTip";
 
 /** The dashboard KPI tile — one look across the carrier and broker dashboards. */
-export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onClick, footer, info, split }: {
+export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onClick, footer, info, valueInfo, split }: {
   title: string;
   value: string | number;
+  /** Why the value is what it is — e.g. why a figure shows "—" — behind an
+   *  "i" beside the value. `info` explains the tile; this explains the value. */
+  valueInfo?: string;
   icon: LucideIcon;
   trend?: string;
   /** Plain text, or a node when part of it has to stand out (a warning). */
@@ -108,6 +111,12 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
           <div style={{ fontSize: 26, fontWeight: 700, color: "var(--p-text)", lineHeight: 1,
                         minWidth: 0, overflowWrap: "anywhere" }}>
             {value}
+            {valueInfo && (
+              <span style={{ fontSize: 15, fontWeight: 500, marginLeft: 8,
+                             display: "inline-flex", verticalAlign: "middle" }}>
+                <InfoTip text={valueInfo} />
+              </span>
+            )}
           </div>
           {trend && (
             <div style={{

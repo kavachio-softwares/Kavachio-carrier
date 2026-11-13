@@ -43,7 +43,15 @@ export interface CurrencyGroup {
   by_programme: PartTotals[];
   /** Empty for a broker seat. */
   by_broker: PartTotals[];
+  /** Why a figure has no total this period — only the figures some row did
+   *  not report or needs review on (backend financial_summary._why). */
+  why: Partial<Record<MetricKey, MetricWhy>>;
+  /** This period's transaction types in this currency (the rows tab's buttons). */
+  transactions: TransactionType[];
 }
+
+/** A transaction type as the bordereaux sent it; `sent` null = none stated. */
+export interface TransactionType { sent: string | null; class: string | null; negative: boolean; rows: number }
 
 export interface FileRef {
   export_id: number;
@@ -52,6 +60,24 @@ export interface FileRef {
   programme: string | null;
   same_as?: number | null;
   problem?: string | null;
+}
+
+/** A file whose rows lack a figure: `rows` of its `of_rows` rows this period. */
+export interface MissingFile extends FileRef { rows: number; of_rows: number }
+
+/** A row that needs review, with the reason it gave. */
+export interface ReviewExample extends FileRef { row: number; reason: string }
+
+export interface MetricWhy {
+  /** Files whose bordereau has no column for the figure. */
+  no_column: MissingFile[];
+  /** Files whose output template has the column switched off (never written). */
+  switched_off: MissingFile[];
+  /** Files with a column for it, left empty. */
+  empty: MissingFile[];
+  review_rows: number;
+  /** The first few different reasons, as the rows give them. */
+  review: ReviewExample[];
 }
 
 export interface Choice { id: number; name: string }
@@ -67,14 +93,16 @@ export interface FinancialSummary {
   filters: { programmes: Choice[]; brokers: Choice[]; insurers: Choice[] };
   groups: CurrencyGroup[];
   net_written_premium: { status: "not_available"; formula: string; reason: string };
-  transactions: { sent: string | null; class: string | null; negative: boolean; rows: number }[];
+  transactions: TransactionType[];
   coverage: {
     files: number;
     no_period: FileRef[];
     longer_period: FileRef[];
     copies: FileRef[];
     unreadable: FileRef[];
-    open_problems: { files: number; excluded: boolean };
+    /** This period's files with open problems — counted, or left out when
+     *  `excluded` — each with how many problems are open. */
+    open_problems: { files: number; excluded: boolean; list: (FileRef & { open: number })[] };
     headings_not_in_file: number;
     percent_unverified_templates: number;
   };
@@ -141,6 +169,8 @@ export interface FinancialRows {
 
 export async function getFinancialRows(p: SummaryParams & {
   window?: Window; currency?: string | null; status?: FigureStatus | null;
+  /** A transaction type as sent, or "none" for rows that state none. */
+  transaction?: string | null;
   page?: number; page_size?: number;
 }): Promise<FinancialRows> {
   return (await api.get<FinancialRows>("/reports/financial-summary/rows", { params: clean(p) })).data;

@@ -55,7 +55,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import threading
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from typing import Optional
 
 from fastapi import HTTPException
@@ -310,6 +310,70 @@ def _currency_label(key: str) -> str:
     return {NOT_STATED: "Currency not stated", IN_REVIEW: "Currency needs review"}.get(key, key)
 
 
+def _transactions(figs) -> list[dict]:
+    """The transaction types behind these rows, as sent, most rows first:
+    {"sent", "class", "negative", "rows"}. `sent` is None where the row states
+    none (or its type columns disagree)."""
+    txns: dict[tuple, dict] = {}
+    for fig in figs:
+        t = fig["transaction"]
+        k = (t["sent"], t["class"], t["negative"])
+        e = txns.setdefault(k, {"sent": t["sent"], "class": t["class"],
+                                "negative": t["negative"], "rows": 0})
+        e["rows"] += 1
+    return sorted(txns.values(), key=lambda e: -e["rows"])
+
+
+# How many different reasons a figure's "needs review" carries to the screen.
+REVIEW_EXAMPLES = 3
+
+
+def _why(b: dict, file_ref) -> dict[str, dict]:
+    """Why a figure has no total this period — the ⓘ beside a "—" or a
+    "Needs review" on the screen. Per currency group:
+
+      {metric: {"no_column": [file…], "switched_off": [file…], "empty": [file…],
+                "review_rows": n, "review": [{file…, "row", "reason"}]}}
+
+    for the metrics some row of this period did not report or needs review on.
+    In the template a file is read with: no column for the figure at all is
+    "no_column"; a column the carrier switched off (never written) is
+    "switched_off"; a switched-on column left empty (or dropped by the writer
+    as empty) is "empty". `rows` on a file is how many of its rows lack the
+    figure, `of_rows` how many of its rows count this period. The review
+    reasons are the rows' own (financial_figures), first few kept."""
+    marks: dict[int, dict] = {}
+    per_file = Counter((_currency_key(fig), o.id) for o, _c, fig in b["rows"]["current"])
+    out: dict[str, dict] = {}
+    for o, cells, fig in b["rows"]["current"]:
+        tid = b["reading"](o)
+        if tid not in marks:
+            marks[tid] = ff.marked(b["structures"].get(tid) or {})
+        cur = _currency_key(fig)
+        group = out.setdefault(cur, {})
+        for k in METRICS:
+            f = fig[k]
+            if f["status"] not in (ff.MISSING, ff.REVIEW):
+                continue
+            w = group.setdefault(k, {"no_column": {}, "switched_off": {}, "empty": {},
+                                     "review_rows": 0, "review": []})
+            if f["status"] == ff.MISSING:
+                on = marks[tid].get(k)
+                side = "no_column" if on is None else "empty" if on else "switched_off"
+                e = w[side].setdefault(o.id, file_ref(o, rows=0, of_rows=per_file[(cur, o.id)]))
+                e["rows"] += 1
+            else:
+                w["review_rows"] += 1
+                if (len(w["review"]) < REVIEW_EXAMPLES and f.get("how")
+                        and all(r["reason"] != f["how"] for r in w["review"])):
+                    w["review"].append(file_ref(o, row=cells["_row"], reason=f["how"]))
+    for group in out.values():
+        for w in group.values():
+            for side in ("no_column", "switched_off", "empty"):
+                w[side] = list(w[side].values())
+    return out
+
+
 # ── the shared pass ─────────────────────────────────────────────────────────
 def _build(s, p, *, basis: str, period: Optional[str], program_id: Optional[int],
            broker_party_id: Optional[int], carrier_id: Optional[int],
@@ -385,6 +449,9 @@ def _build(s, p, *, basis: str, period: Optional[str], program_id: Optional[int]
 
     window_ids = {o.id for w in WINDOWS for o in placed[w]}
     open_n = _open_counts(s, sorted(window_ids)) if window_ids else {}
+    # This period's files before any are left out, so the screen can name the
+    # ones with open problems whether they are counted or left out.
+    current_all = list(placed["current"])
     if open_problems == "exclude":
         placed = {w: [o for o in ex if not open_n.get(o.id)] for w, ex in placed.items()}
 
@@ -419,7 +486,8 @@ def _build(s, p, *, basis: str, period: Optional[str], program_id: Optional[int]
             "scoped": scoped, "placed": placed, "reads": reads, "rows": rows,
             "no_period": no_period, "longer": longer, "copies": copies,
             "copy_of": copy_of, "open_n": open_n, "open_problems": open_problems,
-            "conventions": conventions, "reading": reading}
+            "conventions": conventions, "reading": reading, "structures": structures,
+            "current_all": current_all}
 
 
 # ── the summary ─────────────────────────────────────────────────────────────
@@ -465,24 +533,26 @@ def summary(s, p, *, basis: str = "month", period: Optional[str] = None,
             "by_broker": _parts(g, "broker") if b["seat"].kind == "carrier" else [],
         })
 
-    # The transaction types behind this period's rows, as sent.
-    txns: dict[tuple, dict] = {}
-    for _o, _cells, fig in rows["current"]:
-        t = fig["transaction"]
-        k = (t["sent"], t["class"], t["negative"])
-        e = txns.setdefault(k, {"sent": t["sent"], "class": t["class"],
-                                "negative": t["negative"], "rows": 0})
-        e["rows"] += 1
+    # The transaction types behind this period's rows, as sent — for every
+    # row, and per currency group (the rows tab's type buttons).
+    for g in out_groups:
+        g["transactions"] = _transactions(fig for _o, _c, fig in rows["current"]
+                                          if _currency_key(fig) == g["currency"])
     unknown_pct = sorted({tid for tid, conv in b["conventions"].items()
                           if any(c[0] == "unknown" for c in conv.values())}, key=str)
 
     reads = b["reads"]
     current = b["placed"]["current"]
+    open_files = [o for o in b["current_all"] if b["open_n"].get(o.id)]
 
     def _file(o, **extra) -> dict:
         return {"export_id": o.id, "filename": o.filename,
                 "period": ps._period(o, b["versions"]),
                 "programme": names["programme"].get(o.program_id), **extra}
+
+    why = _why(b, _file)
+    for g in out_groups:
+        g["why"] = why.get(g["currency"], {})
 
     return {
         "seat": b["seat"].kind,
@@ -494,7 +564,7 @@ def summary(s, p, *, basis: str = "month", period: Optional[str] = None,
         "filters": b["filters"],
         "groups": out_groups,
         "net_written_premium": NET_WRITTEN_PREMIUM,
-        "transactions": sorted(txns.values(), key=lambda e: -e["rows"]),
+        "transactions": _transactions(fig for _o, _c, fig in rows["current"]),
         "coverage": {
             "files": len(b["scoped"]),
             "no_period": [_file(o) for o in b["no_period"]],
@@ -502,8 +572,11 @@ def summary(s, p, *, basis: str = "month", period: Optional[str] = None,
             "copies": [_file(o, same_as=b["copy_of"].get(o.id)) for o in b["copies"]],
             "unreadable": [_file(o, problem=reads[o.id].problem) for o in current
                            if reads[o.id].problem],
-            "open_problems": {"files": sum(1 for o in current if b["open_n"].get(o.id)),
-                              "excluded": open_problems == "exclude"},
+            # Named whether they are counted or left out (`current` no longer
+            # holds the left-out ones, so this reads the period's files before).
+            "open_problems": {"files": len(open_files),
+                              "excluded": open_problems == "exclude",
+                              "list": [_file(o, open=b["open_n"][o.id]) for o in open_files]},
             "headings_not_in_file": sum(reads[o.id].absent for o in current),
             # Files read with a newer version of their template than they were
             # made from — the carrier has corrected the mapping since.
@@ -518,10 +591,13 @@ def rows(s, p, *, basis: str = "month", period: Optional[str] = None,
          window: str = "current", program_id: Optional[int] = None,
          broker_party_id: Optional[int] = None, carrier_id: Optional[int] = None,
          open_problems: str = "include", currency: Optional[str] = None,
-         status: Optional[str] = None, page: int = 1, page_size: int = 50) -> dict:
+         status: Optional[str] = None, transaction: Optional[str] = None,
+         page: int = 1, page_size: int = 50) -> dict:
     """One page of the bordereau rows behind a window's totals, each figure
     with its label, the amount as sent, and how a calculated one was worked
-    out. `status` keeps the rows where any figure carries that label."""
+    out. `status` keeps the rows where any figure carries that label;
+    `transaction` the rows of one transaction type as sent (the summary's
+    `transactions[].sent`), or "none" for the rows that state none."""
     if window not in WINDOWS:
         raise HTTPException(400, f"window must be one of {', '.join(WINDOWS)}")
     if status and status not in (ff.REPORTED, ff.CALCULATED, ff.REVIEW, ff.MISSING):
@@ -535,6 +611,9 @@ def rows(s, p, *, basis: str = "month", period: Optional[str] = None,
         if currency and _currency_key(fig) != currency:
             continue
         if status and not any(fig[k]["status"] == status for k in METRICS):
+            continue
+        if transaction is not None and fig["transaction"]["sent"] != (
+                None if transaction == NOT_STATED else transaction):
             continue
         picked.append((o, cells, fig))
     picked.sort(key=lambda t: ((names["programme"].get(t[0].program_id) or "").lower(),

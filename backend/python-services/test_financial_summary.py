@@ -522,7 +522,32 @@ def test_files_with_open_problems_can_be_left_out(files):
     assert _totals(fs.summary(None, CARRIER))["gross_premium"]["current"]["value"] == 1050
     out = fs.summary(None, CARRIER, open_problems="exclude")
     assert _totals(out)["gross_premium"]["current"]["value"] == 1000
-    assert out["coverage"]["open_problems"] == {"files": 0, "excluded": True}
+    # The file left out is still named, so the screen can say which one.
+    left_out = out["coverage"]["open_problems"]
+    assert (left_out["files"], left_out["excluded"]) == (1, True)
+    assert [(f["export_id"], f["open"]) for f in left_out["list"]] == [(2, 3)]
+
+
+def test_files_with_open_problems_are_named_when_counted_too(files):
+    files.exports = [export(1, "2027-03", [full_row()]), export(2, "2027-03", [full_row("P2")])]
+    files.open = {2: 3}
+    op = fs.summary(None, CARRIER)["coverage"]["open_problems"]
+    assert (op["files"], op["excluded"]) == (1, False)
+    assert [(f["export_id"], f["filename"], f["open"]) for f in op["list"]] == [(2, "file-2.xlsx", 3)]
+
+
+def test_transaction_types_per_currency_and_as_a_rows_filter(files):
+    files.exports = [export(1, "2027-03", [full_row(txn="New"), full_row("P2", txn="CN"),
+                                           full_row("P3", txn="New", cur="GBP"),
+                                           full_row("P4", txn=None)])]
+    out = fs.summary(None, CARRIER)
+    usd = next(g for g in out["groups"] if g["currency"] == "USD")["transactions"]
+    assert [(t["sent"], t["negative"], t["rows"]) for t in usd] == [
+        ("New", False, 1), ("CN", True, 1), (None, False, 1)]   # P3 is GBP
+    assert sum(t["rows"] for t in out["transactions"]) == 4      # every row, all currencies
+    assert [r["policy"] for r in fs.rows(None, CARRIER, currency="USD", transaction="CN")["items"]] == ["P2"]
+    assert [r["policy"] for r in fs.rows(None, CARRIER, transaction="none")["items"]] == ["P4"]
+    assert fs.rows(None, CARRIER, transaction="New")["total"] == 2
 
 
 def test_a_broker_sees_only_its_own_files(files):
@@ -542,6 +567,62 @@ def test_kavachio_is_refused(files):
 def test_net_written_premium_stays_not_available(files):
     files.exports = [export(1, "2027-03", [full_row()])]
     assert fs.summary(None, CARRIER)["net_written_premium"]["status"] == "not_available"
+
+
+def _why(out, currency="USD"):
+    return next(g for g in out["groups"] if g["currency"] == currency)["why"]
+
+
+def test_why_tells_no_column_from_a_column_left_empty(files):
+    # The template has a Brokerage column (left empty here) but none for fees.
+    files.exports = [export(1, "2027-03", [full_row(brok=None), full_row("P2", brok=None)])]
+    why = _why(fs.summary(None, CARRIER))
+    assert why["brokerage_amount"]["empty"] == [{
+        "export_id": 1, "filename": "file-1.xlsx", "period": "2027-03",
+        "programme": "Fleet", "rows": 2, "of_rows": 2}]
+    assert why["brokerage_amount"]["no_column"] == why["brokerage_amount"]["switched_off"] == []
+    assert [f["export_id"] for f in why["fees"]["no_column"]] == [1]
+    assert why["fees"]["empty"] == why["fees"]["switched_off"] == []
+    assert "gross_premium" not in why            # every row reported it
+
+
+def test_why_counts_only_the_rows_that_lack_the_figure(files):
+    files.exports = [export(1, "2027-03", [full_row(brok=None), full_row("P2", brok=40)])]
+    f = _why(fs.summary(None, CARRIER))["brokerage_amount"]["empty"][0]
+    assert (f["rows"], f["of_rows"]) == (1, 2)
+
+
+def test_a_switched_off_column_is_said_so_not_left_empty(files, monkeypatch):
+    # The carrier switched the column off, so it is never written: their own
+    # setting, not the broker's layout and not an empty cell.
+    monkeypatch.setattr(ps, "_structures", lambda s, ids: {1: structure(Brokerage={"active": False})})
+    files.exports = [export(1, "2027-03", [full_row(brok=None)])]
+    why = _why(fs.summary(None, CARRIER))["brokerage_amount"]
+    assert [f["export_id"] for f in why["switched_off"]] == [1]
+    assert why["empty"] == why["no_column"] == []
+
+
+def test_one_switched_on_column_beside_a_switched_off_one_is_a_column():
+    st = structure([("Policy No", "policy_number"), ("Fee A", PT + "fee_total_amount"),
+                    ("Fee B", PT + "fee_total_amount"), ("Tax", PT + "tax_total_amount")],
+                   **{"Fee A": {"active": False}, "Tax": {"active": False}})
+    assert ff.marked(st) == {"policy": True, "fees": True, "taxes": False}
+
+
+def test_why_carries_the_rows_own_review_reason(files):
+    files.exports = [export(1, "2027-03", [full_row(pct="abc"), full_row("P2", pct="abc")])]
+    why = _why(fs.summary(None, CARRIER))["commission_pct"]
+    assert why["review_rows"] == 2
+    # One reason shown once, with the first row that gave it.
+    assert why["review"] == [{"export_id": 1, "filename": "file-1.xlsx", "period": "2027-03",
+                              "programme": "Fleet", "row": 2,
+                              "reason": "“Commission %” is not a number"}]
+
+
+def test_why_is_kept_per_currency(files):
+    files.exports = [export(1, "2027-03", [full_row(net=None, cur="USD"), full_row("P2", cur="GBP")])]
+    out = fs.summary(None, CARRIER)
+    assert "net_premium" in _why(out, "USD") and "net_premium" not in _why(out, "GBP")
 
 
 def test_rows_carry_every_label_and_the_amount_as_sent(files):

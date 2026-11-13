@@ -162,8 +162,6 @@ export default function AddProgram() {
   // list is open.
   const [programId, setProgramId] = useState<number | null>(null);
   const [configuring, setConfiguring] = useState(false);
-  // Step 1 folds to a line once configured; this opens its details again.
-  const [showProgramme, setShowProgramme] = useState(false);
   const [assigning, setAssigning] = useState(false);
   // Brokers an earlier attempt already put on the programme. The server
   // refuses a second add ("already on this programme", 409), so a retry after
@@ -588,20 +586,14 @@ export default function AddProgram() {
         )}
 
         {/* The programme — common to Broker and Reinsurance. Once configured it
-            folds to a line; its details can still be opened to read. */}
+            folds to a line; the form only creates, so there is nothing more to open. */}
         <Card className="mb-5"
           title={<span className="flex items-center gap-2">
             <Step n={1}>Configure program</Step>
             {locked && <span className="inline-flex items-center gap-1 rounded-full bg-ok/10 px-2 py-0.5 text-[11px] font-medium text-ok">
               <Check size={11} strokeWidth={3} /> Configured</span>}
-          </span>}
-          action={locked ? (
-            <button type="button" className="text-xs font-medium text-navy hover:underline"
-              onClick={() => setShowProgramme(v => !v)}>
-              {showProgramme ? "Hide details" : "Show details"}
-            </button>
-          ) : undefined}>
-          {locked && !showProgramme ? (
+          </span>}>
+          {locked ? (
             // Each value under the same label as on the form, so the folded
             // line says what it is.
             <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-5">
