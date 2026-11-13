@@ -4960,6 +4960,19 @@ async def admin_task_propose(task_id: int,
     if not sheets_dict:
         raise HTTPException(400, "landing sample has no readable sheets")
 
+    # The admin's click, as its own row and under their name. The suggestion
+    # row written when the AI finishes stays "Kavachio · Automatic" — the AI
+    # made it — but on its own it read as if nobody had asked for it.
+    try:
+        from audit import log_activity, actor_email
+        log_activity(tenant_id, actor_email(_p.user_id), "datamodel_mapping_started",
+                     target=f"task:{task_id}",
+                     details={"task_id": task_id, "format_id": fmt_id,
+                              "source_filename": source_filename},
+                     principal=_p)
+    except Exception:  # noqa: BLE001
+        pass
+
     def _propose() -> dict:
         # Same AI mapping engine (+ scoring) as the normal upload flow — and the
         # minutes-long step the heartbeat above exists to cover.
@@ -5061,10 +5074,14 @@ def admin_task_resolve(task_id: int, body: TaskResolveBody,
             s.commit()
             try:
                 from audit import log_activity, actor_email
-                log_activity(task.tenant_id, body.resolved_by, "mapping_task_resolved",
+                # The admin who clicked, not whatever name the screen sent
+                # (it sent "default", so the row named nobody).
+                log_activity(task.tenant_id, actor_email(_p.user_id) or body.resolved_by,
+                             "mapping_task_resolved",
                              target=f"task:{task_id}",
                              details={"task_id": task_id, "action": body.action,
-                                      "mapper_id": body.mapper_id, "queued": 0})
+                                      "mapper_id": body.mapper_id, "queued": 0},
+                             principal=_p)
             except Exception:  # noqa: BLE001
                 pass
             return {"id": task.id, "status": task.status, "queued": 0}
@@ -5100,11 +5117,13 @@ def admin_task_resolve(task_id: int, body: TaskResolveBody,
 
     try:
         from audit import log_activity, actor_email
-        log_activity(None, body.resolved_by, "mapping_task_resolved",
+        log_activity(None, actor_email(_p.user_id) or body.resolved_by,
+                     "mapping_task_resolved",
                      target=f"task:{task_id}",
                      details={"task_id": task_id, "action": body.action,
                               "mapper_id": body.mapper_id,
-                              "queued": len(landing_ids)})
+                              "queued": len(landing_ids)},
+                     principal=_p)
     except Exception:  # noqa: BLE001
         pass
 

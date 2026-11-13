@@ -284,6 +284,7 @@ ACTION_WORDS = {
     "output_template_activated": "Activated an output template",
     "output_template_refreshed": "Refreshed an output template",
     "canonical_fields_saved":    "Saved the data-model fields",
+    "datamodel_mapping_started": "Started mapping a file's columns to the data model",
     "datamodel_mapping_proposed": "Proposed a data-model mapping",
     "mapping_task_resolved":     "Resolved a data-mapping task",
     # the book
@@ -526,6 +527,8 @@ _STATUS = {
     "login_success":    ("Successful", "ok"),
     "login_failed":     ("Failed", "bad"),
     "logout":           ("Signed out", "muted"),
+    # The admin's click; the AI's own "Suggested…" row follows when it is done.
+    "datamodel_mapping_started": ("Started", "info"),
     "forgot_request":   ("Reset requested", "info"),
     "password_reset":   ("Password reset", "info"),
     "password_changed": ("Password changed", "info"),

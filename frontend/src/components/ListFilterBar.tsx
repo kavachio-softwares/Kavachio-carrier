@@ -9,6 +9,9 @@ export type SelectFilter = {
 };
 
 export type DateRangeFilter = {
+  /** Which date the range filters on, shown before the two boxes
+   *  ("Added between"). Without it a reader cannot tell. */
+  label?: string;
   from: string;
   onFromChange: (v: string) => void;
   to: string;
@@ -50,10 +53,13 @@ export function ListFilterBar({
       ))}
       {dateRange && (
         <div className="fbar-daterange">
-          <input type="date" className="fbar-date" aria-label="From date"
+          {dateRange.label && <span className="fbar-dlabel">{dateRange.label}</span>}
+          <input type="date" className="fbar-date" title="From"
+            aria-label={dateRange.label ? `${dateRange.label}: from` : "From date"}
             value={dateRange.from} onChange={e => dateRange.onFromChange(e.target.value)} />
           <span className="sub">–</span>
-          <input type="date" className="fbar-date" aria-label="To date"
+          <input type="date" className="fbar-date" title="To"
+            aria-label={dateRange.label ? `${dateRange.label}: to` : "To date"}
             value={dateRange.to} onChange={e => dateRange.onToChange(e.target.value)} />
         </div>
       )}

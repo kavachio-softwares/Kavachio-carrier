@@ -1045,9 +1045,12 @@ def tenants_list(
             # they are the proof that its own admin got started.
             programmes = s.query(func.count(Program.id)).filter(
                 Program.tenant_id == t.id).scalar() or 0
-            brokers = s.query(func.count(Party.id)).filter(
-                Party.tenant_id == t.id,
-                func.cast(Party.party_type, String) == "broker").scalar() or 0
+            # The same people the carrier's Users tab lists: the broker login
+            # of every broker this carrier works with — the ones it onboarded
+            # AND the ones another carrier onboarded that accepted its
+            # invitation or sit on its programmes. One query for both
+            # screens, so the two numbers cannot drift apart.
+            brokers = _carrier_broker_logins(s, t.id).count()
             items.append({
                 "mga": t.tenant_name,
                 "name": t.legal_name or (t.tenant_name or "").title(),
@@ -1427,7 +1430,9 @@ def parties_list(
             # true pagination (unlike the old client-side post-filter, which
             # filtered an already-sliced page and could show fewer rows than
             # the page size with no indication more matches existed elsewhere).
-            query = query.filter(Party.is_active.is_(True), Party.is_active.is_(None)) \
+            # Active = true OR NULL (NULL predates the column default). The two
+            # used to be ANDed, so "Active" matched nothing at all.
+            query = query.filter(or_(Party.is_active.is_(True), Party.is_active.is_(None))) \
                 if is_active else query.filter(Party.is_active.is_(False))
         elif not include_inactive:
             # Selectors must never offer a deactivated party, so active-only is the
@@ -7310,6 +7315,20 @@ def _user_dict(u: AppUser, mga: Optional[str] = None) -> dict:
             "last_login_at": _iso_utc(u.last_login_at)}
 
 
+def _carrier_broker_logins(s, tid):
+    """The broker logins of every broker this carrier works with — what the
+    Carriers list counts as the carrier's brokers and what its Users tab lists
+    (`/users?kind=broker`) when Kavachio opens it. A broker company with no
+    login has nobody to show, so it is not counted either."""
+    from auth_deps import db_role_values
+    broker_ids = _carrier_broker_ids(s, tid)
+    if not broker_ids:
+        return s.query(AppUser).filter(False)
+    return s.query(AppUser).filter(
+        AppUser.broker_party_id.in_(broker_ids),
+        AppUser.role.in_(db_role_values("broker_admin")))
+
+
 @router.get("/users")
 def users_list(
     mga: str,
@@ -7318,9 +7337,15 @@ def users_list(
     status: Optional[str] = None,
     page: Optional[int] = Query(None, ge=1),
     page_size: Optional[int] = Query(None, ge=1, le=200),
+    # Opt-in: "broker" leaves out the carrier's own people. Kavachio's
+    # carrier page uses it, so its Users tab lists the same brokers the
+    # Carriers list counts. Omitted → every row, as before.
+    kind: Optional[str] = None,
     principal: Principal = Depends(current_principal),
 ):
     from auth_deps import _ROLE_ALIASES, db_role_values
+    if kind not in (None, "", "broker"):
+        raise HTTPException(400, "kind must be 'broker' or left out")
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
 
@@ -7340,7 +7365,8 @@ def users_list(
         broker_admins = (and_(AppUser.broker_party_id.in_(broker_ids),
                               AppUser.role.in_(db_role_values("broker_admin")))
                          if broker_ids else False)
-        who = broker_admins if seat == "user" else or_(own_people, broker_admins)
+        who = (broker_admins if seat == "user" or kind == "broker"
+               else or_(own_people, broker_admins))
 
         # kavachio_admin is a cross-tenant platform role, not a member of this
         # tenant's org — never surfaced on a tenant's own Users screen.

@@ -80,12 +80,6 @@ type Run = {
 const TYPE_LABEL: Record<string, string> = {
   carrier: "Carrier", mga: "MGA", mgu: "MGU", broker: "Broker", tpa: "TPA", reinsurer: "Reinsurer",
 };
-// The org Details tab only offers the types a tenant can be provisioned as
-// (mirrors the Add Broker form + backend allow-list). A legacy carrier/reinsurer
-// value is still shown as a read-only option so its label doesn't vanish.
-const EDITABLE_TYPES: [string, string][] = [
-  ["mga", "MGA"], ["mgu", "MGU"], ["broker", "Broker"], ["tpa", "TPA"],
-];
 const CURRENCIES: [string, string][] = [
   ["USD", "US Dollar"], ["GBP", "Pound"], ["EUR", "Euro"],
   ["CAD", "Canadian Dollar"], ["AUD", "Australian Dollar"],
@@ -206,8 +200,36 @@ export default function TenantDetail() {
       .finally(() => { if (live) setDrawerLoading(false); });
     return () => { live = false; };
   }, [isAdmin, selectedProgramId, mga]);
-  const drawerPageCount = Math.max(1, Math.ceil(drawerRows.length / DRAWER_PAGE));
-  const drawerItems = drawerRows.slice((drawerPage - 1) * DRAWER_PAGE, drawerPage * DRAWER_PAGE);
+  // Drawer filters — the rows are already read whole, so they filter here,
+  // before the page is cut. Cleared whenever another programme is opened.
+  const [drawerQ, setDrawerQ] = useState("");
+  const [drawerBroker, setDrawerBroker] = useState("");
+  const [drawerStatus, setDrawerStatus] = useState("");
+  useEffect(() => { setDrawerQ(""); setDrawerBroker(""); setDrawerStatus(""); }, [selectedProgramId]);
+  useEffect(() => { setDrawerPage(1); }, [drawerQ, drawerBroker, drawerStatus]);
+  const CARRIER_HELD = "__carrier__";
+  const NO_CONTRACT = "__none__";
+  const drawerBrokerOptions = Array.from(new Set(drawerRows.map(r => r.broker).filter((b): b is string => !!b)))
+    .sort((a, b) => a.localeCompare(b));
+  const drawerHasCarrierHeld = drawerRows.some(r => r.broker == null);
+  const drawerStatusOptions = Array.from(new Map(drawerRows.filter(r => r.contract)
+    .map(r => { const b = contractBadge(r.contract!); return [b.label, b.label] as const; })).keys()).sort();
+  const drawerHasNoContract = drawerRows.some(r => r.contract == null);
+  const dq2 = drawerQ.trim().toLowerCase();
+  const drawerFiltered = drawerRows.filter(r => {
+    if (drawerBroker === CARRIER_HELD ? r.broker != null : drawerBroker && r.broker !== drawerBroker) return false;
+    if (drawerStatus === NO_CONTRACT ? r.contract != null
+        : drawerStatus && (!r.contract || contractBadge(r.contract).label !== drawerStatus)) return false;
+    if (dq2) {
+      const c = r.contract;
+      const name = c ? (c.name || c.filename || `Contract #${c.id}`).toLowerCase() : "";
+      if (!name.includes(dq2)) return false;
+    }
+    return true;
+  });
+  const drawerFiltersActive = drawerQ !== "" || drawerBroker !== "" || drawerStatus !== "";
+  const drawerPageCount = Math.max(1, Math.ceil(drawerFiltered.length / DRAWER_PAGE));
+  const drawerItems = drawerFiltered.slice((drawerPage - 1) * DRAWER_PAGE, drawerPage * DRAWER_PAGE);
   // Escape closes the drawer.
   useEffect(() => {
     if (selectedProgramId == null) return;
@@ -233,7 +255,6 @@ export default function TenantDetail() {
 
   // Users tab filters — independent of the Recent runs tab's own filters below.
   const [userQ, setUserQ] = useState("");
-  const [userRole, setUserRole] = useState("");
   const [userStatusFilter, setUserStatusFilter] = useState("");
   const userDq = useDebouncedValue(userQ, 300);
   // Recent runs tab filters.
@@ -272,7 +293,6 @@ export default function TenantDetail() {
     try {
       const { data } = await api.put<TenantRow>(`/tenants/${mga}`, {
         legal_name: form.legal_name.trim(),
-        tenant_type: form.tenant_type || null,
         currency: form.currency || null,
       });
       setT(prev => (prev ? { ...prev, ...data } : data));
@@ -287,7 +307,7 @@ export default function TenantDetail() {
   // TRUE server-side pagination for both tabs — the backend filters + pages;
   // we send the current filters and receive just this page + the matching
   // total. Each tab's "disabled" filterKey (when not admin) mirrors Tenants.tsx.
-  const userFilterKey = `${userDq}|${userRole}|${userStatusFilter}`;
+  const userFilterKey = `${userDq}|${userStatusFilter}`;
   const {
     page: userPage, setPage: setUserPage, items: userItems, total: userTotal,
     pageCount: userPageCount,
@@ -295,16 +315,18 @@ export default function TenantDetail() {
     (page, pageSize) =>
       api.get<{ items: U[]; total: number }>("/users", {
         params: {
-          mga, page, page_size: pageSize,
-          q: userDq || undefined, role: userRole || undefined, status: userStatusFilter || undefined,
+          // Brokers only: the carrier's own login is not one of "its users"
+          // here, and the count matches the Brokers column on the Carriers list.
+          mga, page, page_size: pageSize, kind: "broker",
+          q: userDq || undefined, status: userStatusFilter || undefined,
         },
       }).then(r => r.data),
     isAdmin ? userFilterKey : "disabled",
     PAGE_SIZE,
   );
   const userPageRows = userItems;
-  const userFiltersActive = userQ !== "" || userRole !== "" || userStatusFilter !== "";
-  function clearUserFilters() { setUserQ(""); setUserRole(""); setUserStatusFilter(""); }
+  const userFiltersActive = userQ !== "" || userStatusFilter !== "";
+  function clearUserFilters() { setUserQ(""); setUserStatusFilter(""); }
 
   // --- Programs & Contracts tab: three lists, three pagers ---------------
   // All three were read whole before, and the contracts one request PER
@@ -405,17 +427,13 @@ export default function TenantDetail() {
                 <input value={form.legal_name}
                   onChange={e => setForm(f => f && { ...f, legal_name: e.target.value })} />
               </div>
+              {/* Shown, never changed: onboarding only ever creates a carrier,
+                  and a carrier turned into "Broker" or "MGA" here would match no
+                  screen or rule built for it. Not sent on save. */}
               <div className="field">
                 <label>Type</label>
-                <select value={form.tenant_type}
-                  onChange={e => setForm(f => f && { ...f, tenant_type: e.target.value })}>
-                  {!EDITABLE_TYPES.some(([v]) => v === form.tenant_type) && (
-                    <option value={form.tenant_type}>
-                      {form.tenant_type ? (TYPE_LABEL[form.tenant_type] ?? form.tenant_type) : "—"}
-                    </option>
-                  )}
-                  {EDITABLE_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                </select>
+                <input value={form.tenant_type ? (TYPE_LABEL[form.tenant_type] ?? form.tenant_type) : "Carrier"}
+                  disabled readOnly aria-readonly="true" />
               </div>
               <div className="field" style={{ marginBottom: 0 }}>
                 <label>Base currency</label>
@@ -464,11 +482,6 @@ export default function TenantDetail() {
               search={{ value: userQ, onChange: setUserQ, placeholder: "Search name or email…" }}
               selects={[
                 {
-                  key: "role", ariaLabel: "Filter by role", value: userRole, onChange: setUserRole,
-                  options: [{ value: "", label: "All Roles" },
-                    ...Object.entries(ROLE_LABEL).map(([value, label]) => ({ value, label }))],
-                },
-                {
                   key: "status", ariaLabel: "Filter by status", value: userStatusFilter, onChange: setUserStatusFilter,
                   options: [{ value: "", label: "All Statuses" },
                     ...Object.entries(USER_STATUS_LABEL).map(([value, label]) => ({ value, label }))],
@@ -498,7 +511,7 @@ export default function TenantDetail() {
                   })}
                 </tbody>
               </table>
-              {userTotal === 0 && !userFiltersActive && <div className="empty">No users in this organization.</div>}
+              {userTotal === 0 && !userFiltersActive && <div className="empty">No brokers with a login for this carrier yet.</div>}
               {userTotal === 0 && userFiltersActive && <div className="empty">No users match the filters.</div>}
             </div>
             {userTotal > 0 && (
@@ -571,11 +584,35 @@ export default function TenantDetail() {
             </div>
             <div className="drawer-b" style={{ padding: 0 }}>
               <div className="card-h" style={{ borderTop: 0 }}>
-                <h3>Contracts &amp; Brokers</h3><span className="sub">{drawerRows.length}</span>
+                <h3>Contracts &amp; Brokers</h3>
+                <span className="sub">{drawerFiltersActive ? `${drawerFiltered.length} of ${drawerRows.length}` : drawerRows.length}</span>
               </div>
+              {!drawerLoading && drawerRows.length > 0 && (
+                <ListFilterBar
+                  search={{ value: drawerQ, onChange: setDrawerQ, placeholder: "Search contracts…" }}
+                  selects={[
+                    {
+                      key: "broker", ariaLabel: "Filter by broker", value: drawerBroker, onChange: setDrawerBroker,
+                      options: [{ value: "", label: "All brokers" },
+                        ...drawerBrokerOptions.map(b => ({ value: b, label: b })),
+                        ...(drawerHasCarrierHeld ? [{ value: CARRIER_HELD, label: "Held by the carrier" }] : [])],
+                    },
+                    {
+                      key: "status", ariaLabel: "Filter by contract status", value: drawerStatus, onChange: setDrawerStatus,
+                      options: [{ value: "", label: "All contract statuses" },
+                        ...drawerStatusOptions.map(l => ({ value: l, label: l })),
+                        ...(drawerHasNoContract ? [{ value: NO_CONTRACT, label: "No contract yet" }] : [])],
+                    },
+                  ]}
+                  onClear={() => { setDrawerQ(""); setDrawerBroker(""); setDrawerStatus(""); }}
+                  active={drawerFiltersActive}
+                />
+              )}
               {drawerLoading ? <div className="muted" style={{ padding: "14px 20px" }}>Loading…</div>
                 : drawerRows.length === 0
-                  ? <div className="empty">No contracts or brokers on this program yet.</div> : (
+                  ? <div className="empty">No contracts or brokers on this program yet.</div>
+                : drawerFiltered.length === 0
+                  ? <div className="empty">No contracts or brokers match the filters.</div> : (
                 <div className="tbl-wrap">
                   <table>
                     <thead><tr>
@@ -613,9 +650,9 @@ export default function TenantDetail() {
                   </table>
                 </div>
               )}
-              {drawerRows.length > DRAWER_PAGE && (
+              {drawerFiltered.length > DRAWER_PAGE && (
                 <Pagination page={drawerPage} pageCount={drawerPageCount} pageSize={DRAWER_PAGE}
-                  totalItems={drawerRows.length} onPageChange={setDrawerPage} noun="rows" />
+                  totalItems={drawerFiltered.length} onPageChange={setDrawerPage} noun="rows" />
               )}
             </div>
           </aside>
@@ -628,7 +665,7 @@ export default function TenantDetail() {
           <div className="card">
             <ListFilterBar
               search={{ value: runQ, onChange: setRunQ, placeholder: "Search program or file…" }}
-              dateRange={{ from: runDateFrom, onFromChange: setRunDateFrom, to: runDateTo, onToChange: setRunDateTo }}
+              dateRange={{ label: "Received between", from: runDateFrom, onFromChange: setRunDateFrom, to: runDateTo, onToChange: setRunDateTo }}
               onClear={clearRunFilters}
               active={runFiltersActive}
             />

@@ -163,7 +163,7 @@ export default function AuditLogs() {
             )}
 
             <label className="fbar-field">
-              <span className="sub">Role / actor</span>
+              <span className="sub">Actor / Role</span>
               <select className="fbar-select" aria-label="Role or actor" value={actor}
                 onChange={e => setActor(e.target.value)}>
                 <option value="">Everyone in your reach</option>

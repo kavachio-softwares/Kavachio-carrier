@@ -182,7 +182,7 @@ export default function AdminMappingTasks() {
                   ...brokers.map(b => ({ value: String(b.id), label: b.name }))],
               },
             ]}
-            dateRange={{ from: dateFrom, onFromChange: setDateFrom, to: dateTo, onToChange: setDateTo }}
+            dateRange={{ label: "Raised between", from: dateFrom, onFromChange: setDateFrom, to: dateTo, onToChange: setDateTo }}
             onClear={clearFilters}
             active={filtersActive}
           />
