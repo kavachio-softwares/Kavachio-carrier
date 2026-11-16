@@ -2801,6 +2801,60 @@ class MonthlyReportSend(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+
+class ExecutiveReportSetting(Base):
+    """Executive Reporting 38.2 — how a carrier's Executive Report is sent by
+    itself: weekly (on a weekday) or monthly (on a working day), as which file,
+    to whom. The recipients are the carrier's own logins it ticks AND any other
+    email addresses it types — this report, unlike the Monthly Report, may go
+    outside the app (decision of 12 Nov 2026).
+
+    One row per carrier, written only when the carrier saves the schedule;
+    none means automatic sending OFF. Its own table rather than a second row
+    in monthly_report_setting, whose tenant_id is unique. Each change is also
+    in the Audit Logs ("executive_report_settings_updated")."""
+    __tablename__ = "executive_report_setting"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, unique=True, index=True, nullable=False)
+    auto_send = Column(Boolean, nullable=False, default=False)
+    cadence = Column(String, nullable=False, default="month")      # week | month
+    week_day = Column(Integer, nullable=False, default=0)          # 0 = Monday … 4 = Friday
+    send_day = Column(Integer, nullable=False, default=3)          # Nth working day of the next month
+    file_format = Column(String, nullable=False, default="pdf")    # pdf | excel | both
+    user_ids = Column(JSON, nullable=True)                         # the carrier's logins ticked
+    emails = Column(JSON, nullable=True)                           # other addresses, as typed
+    updated_by_user_id = Column(Integer, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ExecutiveReportSend(Base):
+    """Executive Reporting 38.2 — one Executive Report sent: by the schedule or
+    by hand. Keeps who it went to (each address, and whether it arrived) and
+    the numbers EXACTLY as they went out (`pack`), so the file downloaded again
+    later is the file people received. `scheduled_key` ("<tenant>:<cadence>:
+    <period>") is set only on the automatic send and is unique, so two app
+    instances running the daily job can never both send it."""
+    __tablename__ = "executive_report_send"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, index=True, nullable=False)
+    cadence = Column(String, nullable=False)                       # week | month
+    period = Column(String, nullable=False)                        # YYYY-MM, or the week's Monday
+    kind = Column(String, nullable=False)                          # scheduled | now
+    scheduled_key = Column(String, unique=True, nullable=True)
+    file_format = Column(String, nullable=False)
+    # [{"user_id", "email", "name", "delivered", "error"}] — user_id None for an outside address
+    recipients = Column(JSON, nullable=True)
+    delivered = Column(Integer, nullable=False, default=0)
+    failed = Column(Integer, nullable=False, default=0)
+    pack = Column(JSON, nullable=True)                             # the numbers as sent
+    options = Column(JSON, nullable=True)                          # the carrier's name as sent
+    sent_by_user_id = Column(Integer, nullable=True)               # None = the daily job
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    # Set by "Clear all" on the Sent reports list: hidden from that list only.
+    # The row, its recipients and its numbers are kept (the sent file still
+    # downloads), and a scheduled send stays counted so it never goes twice.
+    hidden_at = Column(DateTime, nullable=True)
+
 def _ensure_column(conn, inspector, table: str, column: str, ddl_type: str) -> None:
     """Add `column` to `table` if it isn't already there. Dialect-agnostic
     column inspection so this works on both SQLite and PostgreSQL."""
@@ -3288,6 +3342,8 @@ def init_db():
             _ensure_column(conn, inspector, "ceded_input", "cin_layout", json_type)
         if inspector.has_table("intake_route"):
             _ensure_column(conn, inspector, "intake_route", "notify_emails", json_type)
+        if inspector.has_table("executive_report_send"):
+            _ensure_column(conn, inspector, "executive_report_send", "hidden_at", "TIMESTAMP")
             if not _had_run_state:
                 conn.exec_driver_sql(
                     "UPDATE file_arrival SET run_state = 'pre_autorun' "

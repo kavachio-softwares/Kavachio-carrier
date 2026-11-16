@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, CalendarDays, ScrollText, History, FileSpreadsheet, BarChart3, Timer, AlertTriangle,
+  FileCheck, CalendarDays, ScrollText, History, FileSpreadsheet, BarChart3, Presentation, Timer, AlertTriangle,
 } from "lucide-react";
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
@@ -148,6 +148,8 @@ const GROUPS: {
     requires: "carrier_admin",
     items: [
       { to: "/monthly-report", label: "Monthly Report", icon: BarChart3 },
+      // 38.2: the whole book for leadership, downloadable and sent by email.
+      { to: "/executive-report", label: "Executive Report", icon: Presentation },
     ],
   },
   {

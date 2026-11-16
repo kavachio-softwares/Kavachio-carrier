@@ -73,6 +73,7 @@ from policy_routes import router as policy_router
 # Financial Summary (Phase 2, 35): premium, commission and the rest of the money
 # in the same processed bordereaux, against earlier periods (financial_summary.py).
 from financial_routes import router as financial_router
+from executive_routes import router as executive_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
 from mapper import (
     apply_spec_multi,
@@ -172,6 +173,7 @@ app.include_router(submission_router)
 app.include_router(itd_router)
 app.include_router(policy_router)
 app.include_router(financial_router)
+app.include_router(executive_router)
 
 
 def _mark_deprecated_aliases() -> None:

@@ -8,11 +8,16 @@
 //
 // Deliberately NOT a sidebar entry: it is opened from the Dashboard (both
 // seats) and from File Submissions (carrier), like Party and Contracts.
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+//
+// 38.1: a number clicked on a report (Financial Summary, Monthly Report) opens
+// this page on the policies behind that number only — the report's own
+// selection, worked out on the server (backend drill_down.py). The URL says
+// which number (api/policies drillLink); the other filters still apply on top.
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Search } from "lucide-react";
 import {
-  getPolicyDetail, searchPolicies, type PolicyDateField, type PolicyDetail,
+  DRILL_KEYS, drillFrom, getPolicyDetail, searchPolicies, type PolicyDateField, type PolicyDetail,
   type PolicyLine, type PolicyRow, type PolicySearchResult,
 } from "../api/policies";
 import { useBrokerCarrierId } from "../brokerCarrier";
@@ -51,7 +56,12 @@ export default function PolicySearch() {
   const broker = isBrokerSeat();
   // A broker works one carrier at a time when the sidebar says so.
   const carrierId = useBrokerCarrierId();
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
+  const qs = params.toString();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const drill = useMemo(() => drillFrom(params), [qs]);
+  const drillKey = drill ? JSON.stringify(drill) : "";
 
   const [typed, setTyped] = useState(params.get("q") ?? "");
   const q = useDebouncedValue(typed.trim(), 350);
@@ -70,7 +80,7 @@ export default function PolicySearch() {
 
   // A new search or filter starts again from the first page.
   useEffect(() => { setPage(1); },
-    [q, programId, brokerId, state, dateField, from, to, carrierId]);
+    [q, programId, brokerId, state, dateField, from, to, carrierId, drillKey]);
 
   useEffect(() => {
     let live = true;
@@ -79,13 +89,21 @@ export default function PolicySearch() {
       q, program_id: programId, broker_party_id: broker ? null : brokerId,
       carrier_id: broker ? carrierId : null, state,
       date_field: dateField, date_from: from, date_to: to,
-      page, page_size: PAGE_SIZE,
+      page, page_size: PAGE_SIZE, drill,
     })
       .then(r => { if (live) setData(r); })
       .catch(() => { if (live) setFailed(true); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
-  }, [q, programId, brokerId, state, dateField, from, to, page, carrierId, broker]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, programId, brokerId, state, dateField, from, to, page, carrierId, broker, drillKey]);
+
+  /** Back to every policy: the number's own filters go, the rest stay. */
+  const showAll = () => {
+    const next = new URLSearchParams(params);
+    DRILL_KEYS.forEach(k => next.delete(k));
+    setParams(next, { replace: true });
+  };
 
   const f = data?.filters;
   const filtered = !!(q || programId != null || brokerId != null || state || from || to);
@@ -105,9 +123,27 @@ export default function PolicySearch() {
             </h2>
           </div>
           <div className="actions">
-            <Link className="btn" to={broker ? "/broker" : "/home"}>← Dashboard</Link>
+            {drill
+              ? <button className="btn" onClick={() => navigate(-1)}>← Back to the report</button>
+              : <Link className="btn" to={broker ? "/broker" : "/home"}>← Dashboard</Link>}
           </div>
         </div>
+
+        {drill && (
+          <div className="note" style={{ marginBottom: 14, display: "flex", gap: 12,
+                                         alignItems: "center", flexWrap: "wrap" }}>
+            <span>
+              Policies behind <b>{data?.drill?.label ?? drill.label ?? "this number"}</b>
+              {data?.drill?.period_name ? <> · {data.drill.period_name}</> : null}
+              {data?.drill && <span className="sub">
+                {" "}· {data.drill.files} {data.drill.files === 1 ? "file" : "files"}
+                {data.drill.rows != null && <>, {data.drill.rows.toLocaleString("en-GB")} {data.drill.rows === 1 ? "row" : "rows"}</>}
+              </span>}
+              <InfoTip text="Only the rows this number was counted from. Premium and bordereaux on each line come from those rows only. A row with no policy number is not a policy, so it is not listed." />
+            </span>
+            <span className="linkish" style={{ marginLeft: "auto" }} onClick={showAll}>Show all policies</span>
+          </div>
+        )}
 
         <div className="card" style={{ overflow: "visible", marginBottom: 14 }}>
           <div className="card-h" style={{ gap: 14, flexWrap: "wrap", borderBottom: "none",
@@ -186,7 +222,8 @@ export default function PolicySearch() {
             <div className="empty">Loading…</div>
           ) : data.total === 0 ? (
             <div className="empty">
-              {filtered ? "No policies match these filters."
+              {drill && !filtered ? "None of the rows behind this number carry a policy number."
+                : filtered ? "No policies match these filters."
                 : data.files === 0 ? "No bordereaux have been processed yet."
                 : "No policy numbers were found in the processed bordereaux."}
             </div>

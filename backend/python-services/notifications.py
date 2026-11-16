@@ -182,7 +182,8 @@ def notification_email_html(title: str, body: Optional[str],
                             greeting_name: Optional[str] = None,
                             action: Optional[str] = None,
                             footer: str = PLATFORM_ADMIN_FOOTER,
-                            extra_html: str = "") -> str:
+                            extra_html: str = "",
+                            badge: Optional[str] = "Action needed") -> str:
     """Branded HTML body for a notification email.
 
     Renders whatever labelled facts the caller passes and, when given, the ONE
@@ -192,8 +193,15 @@ def notification_email_html(title: str, body: Optional[str],
 
     Built from tables and inline styles only: Outlook and several webmail
     clients strip <style> blocks and don't support flex/grid, so anything
-    fancier would render as an unstyled stack of text for a chunk of readers."""
+    fancier would render as an unstyled stack of text for a chunk of readers.
+
+    `badge` is the tag in the top corner ("Action needed" unless the caller
+    says otherwise, e.g. "Report"); None shows none."""
     greeting = f"Hi {escape(greeting_name)}," if (greeting_name or "").strip() else "Hi,"
+    badge_html = (f"""<span style="display:inline-block;background:#FFF4E5;color:#B26A00;font-size:10.5px;
+                             font-weight:700;letter-spacing:.7px;text-transform:uppercase;
+                             padding:6px 11px;border-radius:20px;white-space:nowrap">{escape(badge)}</span>"""
+                  if badge else "")
 
     visible = [(label, value) for label, value in facts if value not in (None, "")]
     rows = "".join(
@@ -271,9 +279,7 @@ def notification_email_html(title: str, body: Optional[str],
                 <div style="font-size:12px;color:#8B93A2;margin-top:3px">Bordereau Management</div>
               </td>
               <td align="right" style="vertical-align:middle">
-                <span style="display:inline-block;background:#FFF4E5;color:#B26A00;font-size:10.5px;
-                             font-weight:700;letter-spacing:.7px;text-transform:uppercase;
-                             padding:6px 11px;border-radius:20px;white-space:nowrap">Action needed</span>
+                {badge_html}
               </td>
             </tr>
           </table>

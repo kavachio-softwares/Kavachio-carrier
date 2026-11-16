@@ -67,6 +67,7 @@ import RecentRuns from "./pages/RecentRuns";
 import Calendar from "./pages/Calendar";
 import BordereauCalendar from "./pages/BordereauCalendar";
 import MonthlyReport from "./pages/MonthlyReport";
+import ExecutiveReport from "./pages/ExecutiveReport";
 import MonthlySendSchedule from "./pages/MonthlySendSchedule";
 import PolicySearch from "./pages/PolicySearch";
 import FinancialSummary from "./pages/FinancialSummary";
@@ -287,6 +288,7 @@ export default function App() {
         {/* 44 — every open problem, its owner, due date and age. A programme's
             own view is ?program=<id>, linked from the Programmes list. */}
         <Route path="/open-problems" element={<OpenProblems />} />
+        <Route path="/executive-report" element={<ExecutiveReport />} />
         {/* How a broker's file reaches you, and everything that has landed —
             one screen with two tabs. The old paths are kept as redirects: they
             are in emails to brokers and in bookmarks, and a link that 404s is a

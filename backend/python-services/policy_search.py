@@ -97,8 +97,14 @@ def seat_of(s, p) -> Seat:
     raise HTTPException(403, "Policy search is for carriers and brokers.")
 
 
-def _exports(s, seat: Seat, carrier_id: Optional[int] = None) -> list:
-    """The current processed files this seat may read, oldest first."""
+def _exports(s, seat: Seat, carrier_id: Optional[int] = None,
+             ids: Optional[set[int]] = None) -> list:
+    """The current processed files this seat may read, oldest first.
+
+    `ids` (the drill-down, drill_down.py) asks for exactly these files instead:
+    the ones a number counted, a version since replaced included — "the
+    policies behind it" are the ones in the files it was counted from. Still
+    only the seat's own files."""
     from db import OutputExport
     from exception_tally import current_export_ids
     q = s.query(OutputExport.id, OutputExport.tenant_id, OutputExport.program_id,
@@ -117,6 +123,8 @@ def _exports(s, seat: Seat, carrier_id: Optional[int] = None) -> list:
                      OutputExport.program_id.in_(seat.program_ids))
         if carrier_id is not None:
             q = q.filter(OutputExport.tenant_id == carrier_id)
+    if ids is not None:
+        live = ids
     if not live:
         return []
     return q.filter(OutputExport.id.in_(live)).order_by(OutputExport.id).all()
@@ -271,11 +279,18 @@ def _period(o, versions: dict) -> Optional[str]:
 
 
 # ── the search ──────────────────────────────────────────────────────────────
-def _policies(s, seat: Seat, carrier_id: Optional[int]) -> tuple[list[dict], dict, int]:
+def _policies(s, seat: Seat, carrier_id: Optional[int],
+              within: Optional[dict[int, Optional[set[str]]]] = None
+              ) -> tuple[list[dict], dict, int]:
     """Every policy this seat may read, one per carrier + programme + broker +
-    policy number. Returns (policies, names, files read)."""
+    policy number. Returns (policies, names, files read).
+
+    `within` (the drill-down) keeps only the rows behind one number: file id →
+    the policy keys counted in it, or None for every row of that file. A
+    policy's rows, files and premium are then those rows' only."""
     from exception_tally import export_versions
-    exports = _exports(s, seat, carrier_id)
+    exports = (_exports(s, seat, carrier_id) if within is None
+               else _exports(s, seat, carrier_id, ids=set(within)))
     if not exports:
         return [], {"programme": {}, "broker": {}, "insurer": {}}, 0
     structures = _structures(s, {o.template_id for o in exports})
@@ -284,7 +299,10 @@ def _policies(s, seat: Seat, carrier_id: Optional[int]) -> tuple[list[dict], dic
     groups: dict[tuple, dict] = {}
     for o in exports:
         period = _period(o, versions)
+        keep = within.get(o.id) if within is not None else None
         for ln in _lines_of(s, o, structures.get(o.template_id)):
+            if keep is not None and policy_key(ln["policy"]) not in keep:
+                continue
             key = (o.tenant_id, o.program_id, o.broker_party_id, policy_key(ln["policy"]))
             g = groups.get(key)
             if g is None:
@@ -359,8 +377,12 @@ def search(s, p, *, q: Optional[str] = None, program_id: Optional[int] = None,
            broker_party_id: Optional[int] = None, carrier_id: Optional[int] = None,
            state: Optional[str] = None, date_field: str = "start",
            date_from: Optional[str] = None, date_to: Optional[str] = None,
-           page: int = 1, page_size: int = 25) -> dict:
+           page: int = 1, page_size: int = 25, drill: Optional[dict] = None) -> dict:
     """One page of this seat's policies, and the choices its filters offer.
+
+    `drill` (drill_down.resolve) narrows the search to the policies behind one
+    number on a report: {"within": {file id: keys | None}, "title": …}. The
+    other filters still apply on top of it.
 
     `carrier_id` narrows a BROKER to one carrier (the sidebar's carrier
     switch); a carrier seat is always its own company and ignores it.
@@ -372,7 +394,8 @@ def search(s, p, *, q: Optional[str] = None, program_id: Optional[int] = None,
     if (date_from and lo is None) or (date_to and hi is None):
         raise HTTPException(400, "dates must be YYYY-MM-DD")
     seat = seat_of(s, p)
-    items, names, files = _policies(s, seat, carrier_id if seat.kind == "broker" else None)
+    items, names, files = _policies(s, seat, carrier_id if seat.kind == "broker" else None,
+                                    within=(drill or {}).get("within"))
 
     # The filters' choices come from the whole set, so picking one never
     # empties the other lists.
@@ -420,6 +443,8 @@ def search(s, p, *, q: Optional[str] = None, program_id: Optional[int] = None,
         "seat": seat.kind,
         "files": files,
         "filters": filters,
+        "drill": ({k: v for k, v in drill.items() if k != "within"}
+                  if drill is not None else None),
     }
 
 

@@ -480,6 +480,37 @@ def straight_through(run) -> bool:
     return run.status == "clean" and not (run.human_touch or [])
 
 
+def runs_in(s, tenant_id: int, start: datetime, end: datetime,
+            program_id: Optional[int] = None,
+            broker_party_id: Optional[int] = None) -> list:
+    """Every run recorded in [start, end) for this carrier, oldest first."""
+    from db import CheckRun
+    q = s.query(CheckRun).filter(CheckRun.tenant_id == tenant_id,
+                                 CheckRun.created_at >= start, CheckRun.created_at < end)
+    if program_id:
+        q = q.filter(CheckRun.program_id == program_id)
+    if broker_party_id:
+        q = q.filter(CheckRun.broker_party_id == broker_party_id)
+    return q.order_by(CheckRun.id.asc()).all()
+
+
+def first_runs(runs: list) -> list:
+    """The FILES among these runs: each processed file's first `run`. Files
+    are told apart by their export (a canonical run with no export has none
+    to share, so it stands alone). `summary` counts these, and the drill-down
+    to the policies behind its numbers reads the same ones."""
+    files, seen = [], set()
+    for r in runs:
+        if r.lane not in (DIRECT, CANONICAL) or r.kind != RUN:
+            continue
+        key = ("export", r.export_id) if r.export_id else ("run", r.id)
+        if key in seen:
+            continue
+        seen.add(key)
+        files.append(r)
+    return files
+
+
 def summary(s, tenant_id: int, start: datetime, end: datetime,
             program_id: Optional[int] = None,
             broker_party_id: Optional[int] = None) -> dict:
@@ -490,27 +521,11 @@ def summary(s, tenant_id: int, start: datetime, end: datetime,
     arrived, before anyone fixed anything — so a re-generate never adds a file
     or hides the errors it first had. Self-checks, previews and dry runs are
     checks, not files: they count in `checks`, never in the volumes."""
-    from db import CheckResult, CheckRun
+    from db import CheckResult
 
-    q = s.query(CheckRun).filter(CheckRun.tenant_id == tenant_id,
-                                 CheckRun.created_at >= start, CheckRun.created_at < end)
-    if program_id:
-        q = q.filter(CheckRun.program_id == program_id)
-    if broker_party_id:
-        q = q.filter(CheckRun.broker_party_id == broker_party_id)
-    runs = q.order_by(CheckRun.id.asc()).all()
-
-    # One file = its first `run`; files are told apart by their export (a
-    # canonical run with no export has none to share, so it stands alone).
-    files, seen = [], set()
-    for r in runs:
-        if r.lane not in (DIRECT, CANONICAL) or r.kind != RUN:
-            continue
-        key = ("export", r.export_id) if r.export_id else ("run", r.id)
-        if key in seen:
-            continue
-        seen.add(key)
-        files.append(r)
+    runs = runs_in(s, tenant_id, start, end, program_id=program_id,
+                   broker_party_id=broker_party_id)
+    files = first_runs(runs)
 
     groups = {key: {"key": key, "label": words, "policies": 0, "rows": 0}
               for key, words, _t in GROUPS}

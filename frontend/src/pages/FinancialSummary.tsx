@@ -14,8 +14,11 @@
 //
 // Deliberately NOT a sidebar entry: opened from the Dashboard (both seats), as
 // Policies is.
+//
+// 38.1: every amount opens the Policies page on the policies behind it — the
+// same window, figure, currency, programme and broker (api/policies drillLink).
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   Ban, Banknote, Handshake, Landmark, Layers, Percent, Receipt, TrendingUp, Wallet,
   type LucideIcon,
@@ -26,6 +29,7 @@ import {
   type MetricKey, type MetricTotals, type MetricWhy, type MissingFile, type PartTotals,
   type TransactionType,
 } from "../api/finance";
+import { drillLink } from "../api/policies";
 import { useBrokerCarrierId } from "../brokerCarrier";
 import { isBrokerSeat } from "../auth";
 import { ChartCard, StatCard } from "../components/StatCard";
@@ -112,6 +116,32 @@ function change(c: number | null, unit: "money" | "percent"): string | undefined
   if (c == null) return undefined;
   const sign = c > 0 ? "+" : c < 0 ? "-" : "";
   return unit === "percent" ? `${sign}${Math.abs(c).toFixed(2)} pts` : `${sign}${Math.abs(c).toFixed(1)}%`;
+}
+
+/** Where a number leads: the Policies page on the policies behind it. */
+type Win = "current" | "previous" | "last_year";
+type DrillTo = (o: { window: Win; label: string; metric?: MetricKey;
+                     program?: number | null; broker?: number | null }) => string;
+
+const BEHIND = "See the policies behind this number";
+
+/** A number that opens the policies behind it. */
+function NumLink({ to, children }: { to: string | null; children: ReactNode }) {
+  if (!to) return <>{children}</>;
+  return <Link className="linkish" to={to} title={BEHIND}>{children}</Link>;
+}
+
+/** Where a number leads: the Policies page on the policies behind it. */
+type Win = "current" | "previous" | "last_year";
+type DrillTo = (o: { window: Win; label: string; metric?: MetricKey;
+                     program?: number | null; broker?: number | null }) => string;
+
+const BEHIND = "See the policies behind this number";
+
+/** A number that opens the policies behind it. */
+function NumLink({ to, children }: { to: string | null; children: ReactNode }) {
+  if (!to) return <>{children}</>;
+  return <Link className="linkish" to={to} title={BEHIND}>{children}</Link>;
 }
 
 /** What a total no row has shows: "Needs review" stays in words (someone has
@@ -234,6 +264,20 @@ export default function FinancialSummary() {
     groups.find(g => g.currency === currency) ?? groups[0];
   const filtered = programId != null || brokerId != null || openProblems === "exclude";
   const w = data?.windows;
+  const notes = data ? coverageItems(data).length : 0;
+
+
+  const drillTo: DrillTo | null = data?.period && group ? o => drillLink(
+    { from: "financial", label: o.label, basis, period: data.period ?? undefined, window: o.window,
+      metric: o.metric, currency: group.currency, open_problems: openProblems },
+    { program: o.program !== undefined ? o.program : programId,
+      broker: broker ? null : o.broker !== undefined ? o.broker : brokerId }) : null;
+
+  const drillTo: DrillTo | null = data?.period && group ? o => drillLink(
+    { from: "financial", label: o.label, basis, period: data.period ?? undefined, window: o.window,
+      metric: o.metric, currency: group.currency, open_problems: openProblems },
+    { program: o.program !== undefined ? o.program : programId,
+      broker: broker ? null : o.broker !== undefined ? o.broker : brokerId }) : null;
 
   return (
     <div className="proto">
@@ -355,13 +399,17 @@ export default function FinancialSummary() {
               <div className="card"><div className="empty">No policy rows in this period.</div></div>
             ) : tab === "overview" ? (
               <>
-                <MetricCards group={group} basis={basis} nwp={data.net_written_premium} />
-                <CompareTable group={group} data={data} />
+                <MetricCards group={group} basis={basis} nwp={data.net_written_premium} drillTo={drillTo} />
+                <CompareTable group={group} data={data} drillTo={drillTo} />
               </>
             ) : tab === "programmes" ? (
-              <Parts title="By programme" parts={group.by_programme} currency={group.currency} />
+              <Parts title="By programme" parts={group.by_programme} currency={group.currency}
+                drillTo={drillTo && ((p, m) => drillTo({ window: "current", metric: m.key,
+                  label: `${m.title} · ${p.name}`, program: p.id }))} />
             ) : tab === "brokers" ? (
-              <Parts title="By broker" parts={group.by_broker} currency={group.currency} />
+              <Parts title="By broker" parts={group.by_broker} currency={group.currency}
+                drillTo={drillTo && ((p, m) => p.id == null ? null : drillTo({ window: "current", metric: m.key,
+                  label: `${m.title} · ${p.name}`, broker: p.id }))} />
             ) : (
               <RowsCard basis={basis} period={data.period} programId={programId}
                 brokerId={broker ? null : brokerId} carrierId={broker ? carrierId : null}
@@ -375,9 +423,10 @@ export default function FinancialSummary() {
   );
 }
 
-function MetricCards({ group, basis, nwp }: {
-  group: CurrencyGroup; basis: Basis; nwp: Summary["net_written_premium"];
+function MetricCards({ group, basis, nwp, drillTo }: {
+  group: CurrencyGroup; basis: Basis; nwp: Summary["net_written_premium"]; drillTo: DrillTo | null;
 }) {
+  const navigate = useNavigate();
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))", gap: 16 }}>
       {METRICS.map(m => {
@@ -386,6 +435,9 @@ function MetricCards({ group, basis, nwp }: {
         const ly = change(t.change.last_year, t.unit);
         return (
           <StatCard key={m.key} title={m.title} icon={m.icon} info={m.info}
+            onClick={drillTo && v != null
+              ? () => navigate(drillTo({ window: "current", metric: m.key, label: m.title }))
+              : undefined}
             value={v == null ? emptyValue(t) : t.unit === "percent" ? rate(v) : money(v, group.currency)}
             valueInfo={v == null ? missingWhy(group, m.key) : undefined}
             trend={change(t.change.previous, t.unit)}
@@ -402,7 +454,7 @@ function MetricCards({ group, basis, nwp }: {
   );
 }
 
-function CompareTable({ group, data }: { group: CurrencyGroup; data: Summary }) {
+function CompareTable({ group, data, drillTo }: { group: CurrencyGroup; data: Summary; drillTo: DrillTo | null }) {
   const w = data.windows;
   const showLy = data.basis !== "year";
   const fmt = (k: MetricKey, v: number | null) =>
@@ -426,6 +478,8 @@ function CompareTable({ group, data }: { group: CurrencyGroup; data: Summary }) 
           <tbody>
             {METRICS.map(m => {
               const t = group.totals[m.key];
+              const to = (window: Win, v: number | null) =>
+                drillTo && v != null ? drillTo({ window, metric: m.key, label: m.title }) : null;
               return (
                 <tr key={m.key}>
                   <td className="l">{m.title}</td>
@@ -433,10 +487,11 @@ function CompareTable({ group, data }: { group: CurrencyGroup; data: Summary }) 
                     ? <span className="muted" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
                         {emptyValue(t)}<InfoTip text={missingWhy(group, m.key)} />
                       </span>
-                    : fmt(m.key, t.current.value)}</td>
-                  <td>{fmt(m.key, t.previous.value)}</td>
+                   
+                    : <NumLink to={to("current", t.current.value)}>{fmt(m.key, t.current.value)}</NumLink>}</td>
+                  <td><NumLink to={to("previous", t.previous.value)}>{fmt(m.key, t.previous.value)}</NumLink></td>
                   <td><Change c={t.change.previous} unit={t.unit} /></td>
-                  {showLy && <td>{fmt(m.key, t.last_year.value)}</td>}
+                  {showLy && <td><NumLink to={to("last_year", t.last_year.value)}>{fmt(m.key, t.last_year.value)}</NumLink></td>}
                   {showLy && <td><Change c={t.change.last_year} unit={t.unit} /></td>}
                   <td className="l"><span className="sub">{countsLine(t)}</span></td>
                 </tr>
@@ -455,7 +510,10 @@ function Change({ c, unit }: { c: number | null; unit: "money" | "percent" }) {
   return <span style={{ color: c! < 0 ? "var(--p-crit)" : c! > 0 ? "var(--p-ok)" : undefined, fontWeight: 600 }}>{s}</span>;
 }
 
-function Parts({ title, parts, currency }: { title: string; parts: PartTotals[]; currency: string }) {
+function Parts({ title, parts, currency, drillTo }: {
+  title: string; parts: PartTotals[]; currency: string;
+  drillTo: ((p: PartTotals, m: (typeof METRICS)[number]) => string | null) | null;
+}) {
   const bars = parts
     .map((p, i) => ({ id: p.id ?? -1 - i, name: p.name, value: p.totals.gross_premium.current.value ?? 0 }))
     .filter(r => r.value > 0);
@@ -479,7 +537,9 @@ function Parts({ title, parts, currency }: { title: string; parts: PartTotals[];
                   <td className="l">{p.name}</td>
                   {TABLE_METRICS.map(k => {
                     const t = p.totals[k];
-                    return <td key={k}>{t.current.value == null ? <span className="muted">{emptyValue(t)}</span> : money(t.current.value, currency)}</td>;
+                    const m = METRICS.find(x => x.key === k)!;
+                    return <td key={k}>{t.current.value == null ? <span className="muted">{emptyValue(t)}</span>
+                      : <NumLink to={drillTo ? drillTo(p, m) : null}>{money(t.current.value, currency)}</NumLink>}</td>;
                   })}
                   <td><Change c={p.totals.gross_premium.change.previous} unit="money" /></td>
                 </tr>

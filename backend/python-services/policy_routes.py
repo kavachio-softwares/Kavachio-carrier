@@ -1,7 +1,8 @@
 """Policy Search (Phase 2, 43.1) — the API behind the Policies screen.
 
   GET /policies          one page of the policies in the processed bordereaux,
-                         with the choices the screen's filters offer
+                         with the choices the screen's filters offer — or only
+                         the ones behind a number on a report (`from`, 38.1)
   GET /policies/detail   every bordereau row behind one of them
 
 For the carrier and broker seats only; policy_search.seat_of decides whose
@@ -13,6 +14,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 
+import drill_down
 import policy_search
 from auth_deps import Principal, current_principal
 from db import SessionLocal
@@ -32,19 +34,42 @@ def policies_search(
     date_to: Optional[str] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
+    # ── the number clicked (drill_down.resolve) ──
+    from_: Optional[str] = Query(None, alias="from"),
+    label: Optional[str] = None,
+    basis: str = "month",
+    period: Optional[str] = None,
+    window: str = "current",
+    metric: Optional[str] = None,
+    currency: Optional[str] = None,
+    open_problems: str = "include",
+    month: Optional[str] = None,
+    measure: Optional[str] = None,
     principal: Principal = Depends(current_principal),
 ):
     """Search and filter the policies themselves — by policy number or insured
     (`q`), programme, broker (carrier seat), state, and a date range on the
     cover start, cover end or bordereau month (`date_field`). A broker's
     `carrier_id` narrows to one carrier, as the sidebar's carrier switch does
-    on every broker screen."""
+    on every broker screen.
+
+    `from` names a number clicked on a report — `financial` (Financial
+    Summary: basis, period, window, metric, currency, open_problems) or
+    `monthly` (Monthly Report: month, measure) — and keeps only the policies
+    behind it; programme and broker narrow it exactly as they narrowed the
+    number."""
     with SessionLocal() as s:
+        drill = drill_down.resolve(
+            s, principal, source=from_, label=label, basis=basis, period=period,
+            window=window, metric=metric, currency=currency,
+            open_problems=open_problems, month=month, measure=measure,
+            program_id=program_id, broker_party_id=broker_party_id,
+            carrier_id=carrier_id)
         return policy_search.search(
             s, principal, q=q, program_id=program_id,
             broker_party_id=broker_party_id, carrier_id=carrier_id, state=state,
             date_field=date_field, date_from=date_from, date_to=date_to,
-            page=page, page_size=page_size)
+            page=page, page_size=page_size, drill=drill)
 
 
 @router.get("/detail")

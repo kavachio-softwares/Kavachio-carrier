@@ -40,6 +40,54 @@ export interface PolicySearchResult {
   /** Processed files the policies were read from. */
   files: number;
   filters: { programmes: Choice[]; brokers: Choice[]; insurers: Choice[]; states: string[] };
+  /** The number on a report these are the policies behind (38.1); null for a plain search. */
+  drill: PolicyDrill | null;
+}
+
+/** Which number on a report was clicked (backend drill_down.py). */
+export interface PolicyDrillParams {
+  from: "financial" | "monthly";
+  /** What the report called the number, shown back above the list. */
+  label?: string;
+  // Financial Summary
+  basis?: string;
+  period?: string;
+  window?: "current" | "previous" | "last_year";
+  metric?: string;
+  currency?: string;
+  open_problems?: "include" | "exclude";
+  // Monthly Report
+  month?: string;
+  measure?: string;
+}
+
+export interface PolicyDrill {
+  source: "financial" | "monthly";
+  label: string | null;
+  period: string | null;
+  /** "March 2027", "Q1 2027", "2027". */
+  period_name: string;
+  /** Files behind the number. */
+  files: number;
+  /** Rows behind the number (Financial Summary); null when not counted by row. */
+  rows: number | null;
+}
+
+/** The URL query that opens the Policies page on the policies behind a number. */
+export function drillLink(d: PolicyDrillParams, scope: { program?: number | null; broker?: number | null } = {}): string {
+  const q = new URLSearchParams(clean({ ...d, program: scope.program, broker: scope.broker }) as Record<string, string>);
+  return `/policies?${q.toString()}`;
+}
+
+/** Read the clicked number back out of the Policies page's own URL. */
+export const DRILL_KEYS = ["from", "label", "basis", "period", "window", "metric", "currency",
+  "open_problems", "month", "measure"] as const;
+export function drillFrom(params: URLSearchParams): PolicyDrillParams | null {
+  const from = params.get("from");
+  if (from !== "financial" && from !== "monthly") return null;
+  const out: Record<string, string> = {};
+  for (const k of DRILL_KEYS) { const v = params.get(k); if (v) out[k] = v; }
+  return out as unknown as PolicyDrillParams;
 }
 
 export type PolicyDateField = "start" | "end" | "month";
@@ -55,6 +103,7 @@ export interface PolicySearchParams {
   date_to?: string;
   page?: number;
   page_size?: number;
+  drill?: PolicyDrillParams | null;
 }
 
 /** Drop the empty ones, so the request carries only the filters in use. */
@@ -62,8 +111,8 @@ function clean(p: object): Record<string, string | number> {
   return Object.fromEntries(Object.entries(p).filter(([, v]) => v !== null && v !== undefined && v !== ""));
 }
 
-export async function searchPolicies(p: PolicySearchParams): Promise<PolicySearchResult> {
-  return (await api.get<PolicySearchResult>("/policies", { params: clean(p) })).data;
+export async function searchPolicies({ drill, ...p }: PolicySearchParams): Promise<PolicySearchResult> {
+  return (await api.get<PolicySearchResult>("/policies", { params: clean({ ...p, ...(drill ?? {}) }) })).data;
 }
 
 /** One bordereau row of a policy, with every column of it. */

@@ -4,13 +4,18 @@
 // month before the records began says "Not available" rather than showing
 // zeros. The split by broker and programme lives on the Exception Resolution
 // tab; it and the last six months are also in the PDF / Excel.
-import { useEffect, useState } from "react";
+//
+// 38.1: every number opens what is behind it — the policies (api/policies
+// drillLink, counted from the same files) for volumes and errors, the
+// Bordereau Calendar for timeliness, Exception Resolution for fixes.
+import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { FileText, LineChart } from "lucide-react";
 import { getMonthlyReport, type MonthMeasures, type MonthlyReport } from "../api/reports";
+import { drillLink } from "../api/policies";
 import { Delta, type Better, type ChangeKind } from "../components/Delta";
 import { InfoTip } from "../components/InfoTip";
-import { fmtMonth, fmtMonthName, fmtTook, num, pct, plural } from "../utils/reportFormat";
+import { fmtMonth, fmtMonthName, fmtTook, lastMonths, num, pct, plural } from "../utils/reportFormat";
 import type { TabProps } from "./MonthlyReport";
 
 /** One measure: the number compared, and what its cell says. */
@@ -22,6 +27,40 @@ interface Measure {
   show: (m: MonthMeasures) => string;
   kind: ChangeKind;
   better: Better;
+  /** What the number opens: the policies behind it (a drill_down measure),
+   *  the Bordereau Calendar or Exception Resolution. None for words. */
+  opens?: { policies: string } | "calendar" | "fixes";
+}
+
+/** Where a measure's number for one month leads, or null. */
+type Opens = (measure: Measure, month: string) => string | null;
+
+function opener(programId: number | null, brokerId: number | null): Opens {
+  const shown = new Set(lastMonths());
+  const scope = new URLSearchParams();
+  if (programId != null) scope.set("programme", String(programId));
+  if (brokerId != null) scope.set("broker", String(brokerId));
+  return (measure, month) => {
+    const o = measure.opens;
+    if (!o) return null;
+    if (typeof o === "object") {
+      return drillLink({ from: "monthly", label: measure.label, month, measure: o.policies },
+                       { program: programId, broker: brokerId });
+    }
+    if (o === "calendar") return `/bordereau-calendar?month=${month}`;
+    // The report's month picker holds the last twelve months only.
+    if (!shown.has(month)) return null;
+    const q = new URLSearchParams(scope);
+    q.set("month", month);
+    return `/monthly-report/exception-resolution?${q.toString()}`;
+  };
+}
+
+/** A number that opens what is behind it. */
+function Opened({ to, children }: { to: string | null; children: ReactNode }) {
+  if (!to) return <>{children}</>;
+  return <Link to={to} className="linkish" style={{ color: "inherit" }}
+               title="See what is behind this number">{children}</Link>;
 }
 
 const ofPct = (n: number, of: number, p: number | null) =>
@@ -32,65 +71,68 @@ function measures(r: MonthlyReport) {
   const unit = r.months[r.month]?.volumes.counted_by === "rows" ? " (rows)" : " policies";
   const timeliness: Measure[] = [
     { label: "Files due", value: m => m.timeliness.due, show: m => num(m.timeliness.due),
-      kind: "count", better: "none",
+      kind: "count", better: "none", opens: "calendar",
       tip: "Files whose due date falls in the month. A programme with no broker owes nothing and is left out." },
     { label: "Arrived on time", value: m => m.timeliness.on_time_pct,
       show: m => ofPct(m.timeliness.on_time, m.timeliness.due_so_far, m.timeliness.on_time_pct),
-      kind: "points", better: "up",
+      kind: "points", better: "up", opens: "calendar",
       tip: "Of the files already due, how many came on or before their due date." },
     { label: "Arrived late", value: m => m.timeliness.late, show: m => num(m.timeliness.late),
-      kind: "count", better: "down" },
+      kind: "count", better: "down", opens: "calendar" },
     { label: "Overdue", value: m => m.timeliness.overdue, show: m => num(m.timeliness.overdue),
-      kind: "count", better: "down", tip: "Past the due date, nothing yet, and still expected." },
+      kind: "count", better: "down", opens: "calendar", tip: "Past the due date, nothing yet, and still expected." },
     { label: "Never arrived", value: m => m.timeliness.never, show: m => num(m.timeliness.never),
-      kind: "count", better: "down", tip: "The next period began and this one's file never came." },
+      kind: "count", better: "down", opens: "calendar", tip: "The next period began and this one's file never came." },
     { label: "Average days late", value: m => m.timeliness.avg_days_late,
-      show: m => fmtTook(m.timeliness.avg_days_late), kind: "time", better: "down",
+      show: m => fmtTook(m.timeliness.avg_days_late), kind: "time", better: "down", opens: "calendar",
       tip: "For the files that arrived late: how many days after their due date, on average." },
     { label: "Late-file cases still open", value: m => m.timeliness.cases_open,
-      show: m => num(m.timeliness.cases_open), kind: "count", better: "down",
+      show: m => num(m.timeliness.cases_open), kind: "count", better: "down", opens: "calendar",
       tip: "Files due this month whose late-file case is not settled yet — Overdue, Delinquent, In dispute or Extended. As it stands today." },
   ];
   const volumes: Measure[] = [
     { label: "Files handled", value: m => m.volumes.files, show: m => num(m.volumes.files),
-      kind: "share", better: "none", tip: "Files checked in the month, each counted once." },
+      kind: "share", better: "none", opens: { policies: "files" },
+      tip: "Files checked in the month, each counted once." },
     { label: "Rows handled", value: m => m.volumes.rows, show: m => num(m.volumes.rows),
-      kind: "share", better: "none" },
+      kind: "share", better: "none", opens: { policies: "rows" } },
     { label: `New${unit}`, value: m => m.volumes.new, show: m => num(m.volumes.new),
-      kind: "share", better: "none" },
+      kind: "share", better: "none", opens: { policies: "new" } },
     { label: `Renewed${unit}`, value: m => m.volumes.renewed, show: m => num(m.volumes.renewed),
-      kind: "share", better: "none" },
+      kind: "share", better: "none", opens: { policies: "renewed" } },
     { label: `Cancelled${unit}`, value: m => m.volumes.cancelled, show: m => num(m.volumes.cancelled),
-      kind: "share", better: "none" },
+      kind: "share", better: "none", opens: { policies: "cancelled" } },
   ];
   const quality: Measure[] = [
     { label: "Errors found", value: m => m.quality.errors, show: m => num(m.quality.errors),
-      kind: "share", better: "down", tip: "Every error the checks found, as each file first arrived." },
+      kind: "share", better: "down", opens: { policies: "errors" },
+      tip: "Every error the checks found, as each file first arrived." },
     { label: "Critical errors", value: m => m.quality.critical, show: m => num(m.quality.critical),
-      kind: "share", better: "down" },
+      kind: "share", better: "down", opens: { policies: "critical" } },
     { label: "Rows with errors", value: m => m.quality.rows_with_errors_pct,
-      show: m => pct(m.quality.rows_with_errors_pct), kind: "points", better: "down" },
+      show: m => pct(m.quality.rows_with_errors_pct), kind: "points", better: "down",
+      opens: { policies: "errors" } },
     { label: "Files clean first time", value: m => m.quality.clean_first_time_pct,
       show: m => ofPct(m.quality.clean_first_time, m.volumes.files, m.quality.clean_first_time_pct),
-      kind: "points", better: "up",
+      kind: "points", better: "up", opens: { policies: "clean" },
       tip: "Files that passed every check when they arrived, so nobody had to fix, re-send or release them." },
     { label: "Most common problem", value: () => null, show: m => m.quality.top_check ?? "—",
       kind: "count", better: "none" },
   ];
   const fixes: Measure[] = [
     { label: "Problems fixed", value: m => m.fixes.fixed, show: m => num(m.fixes.fixed),
-      kind: "share", better: "none", tip: "Problems fixed in the month, whenever they were found." },
+      kind: "share", better: "none", opens: "fixes", tip: "Problems fixed in the month, whenever they were found." },
     { label: "Average fix time", value: m => m.fixes.avg_days, show: m => fmtTook(m.fixes.avg_days),
-      kind: "time", better: "down" },
+      kind: "time", better: "down", opens: "fixes" },
     { label: `Fixed within target (${plural(r.target_days, "day")})`,
       value: m => m.fixes.within_target_pct,
       show: m => ofPct(m.fixes.within_target, m.fixes.fixed, m.fixes.within_target_pct),
-      kind: "points", better: "up" },
+      kind: "points", better: "up", opens: "fixes" },
     { label: "Waiting to be fixed at month end", value: m => m.fixes.waiting,
-      show: m => num(m.fixes.waiting), kind: "share", better: "down",
+      show: m => num(m.fixes.waiting), kind: "share", better: "down", opens: "fixes",
       tip: "Problems found but not fixed by the month's last day. For the month still running, as of today." },
     { label: "Waiting longer than target at month end", value: m => m.fixes.waiting_past_target,
-      show: m => num(m.fixes.waiting_past_target), kind: "count", better: "down",
+      show: m => num(m.fixes.waiting_past_target), kind: "count", better: "down", opens: "fixes",
       tip: "Of those, the ones already older than the target on the month's last day." },
   ];
   return { timeliness, volumes, quality, fixes };
@@ -134,9 +176,13 @@ function glance(r: MonthlyReport, filtered: boolean): string {
 }
 
 /** A month's cell: its number, or "Not available" before the records began. */
-function Cell({ m, measure, strong }: { m: MonthMeasures | undefined; measure: Measure; strong?: boolean }) {
+function Cell({ m, measure, strong, to }: {
+  m: MonthMeasures | undefined; measure: Measure; strong?: boolean; to?: string | null;
+}) {
   if (!m?.has_data) return <span className="muted">Not available</span>;
-  return <span style={strong ? { fontWeight: 600 } : { color: "var(--p-muted)" }}>{measure.show(m)}</span>;
+  return <span style={strong ? { fontWeight: 600 } : { color: "var(--p-muted)" }}>
+    <Opened to={to ?? null}>{measure.show(m)}</Opened>
+  </span>;
 }
 
 function Change({ now, then, measure }: { now?: MonthMeasures; then?: MonthMeasures; measure: Measure }) {
@@ -165,6 +211,7 @@ export default function MonthlyOverview({ filters, onLists, qs }: TabProps) {
   const filtered = programId != null || brokerId != null;
   const m = r?.months[r.month], prev = r?.months[r.last_month], ly = r?.months[r.last_year];
   const ms = r ? measures(r) : null;
+  const opens = opener(programId, brokerId);
 
   // The four headline numbers, each beside last month and last year.
   const cards = r && ms ? [
@@ -223,7 +270,7 @@ export default function MonthlyOverview({ filters, onLists, qs }: TabProps) {
           <div className="tile" key={c.title}>
             <div className="k">{c.title}</div>
             <div className="v">
-              {m?.has_data ? c.big(m) : "—"}{" "}
+              {m?.has_data ? <Opened to={opens(c.measure, r!.month)}>{c.big(m)}</Opened> : "—"}{" "}
               {m?.has_data && <small>{c.small(m)}</small>}
             </div>
             <div className="foot" style={{ display: "flex", flexDirection: "column", gap: 6,
@@ -292,10 +339,10 @@ export default function MonthlyOverview({ filters, onLists, qs }: TabProps) {
                           {row.label}{row.tip && <InfoTip text={row.tip} />}
                         </span>
                       </td>
-                      <td className="r"><Cell m={m} measure={row} strong /></td>
-                      <td className="r"><Cell m={prev} measure={row} /></td>
+                      <td className="r"><Cell m={m} measure={row} strong to={opens(row, r.month)} /></td>
+                      <td className="r"><Cell m={prev} measure={row} to={opens(row, r.last_month)} /></td>
                       <td className="r"><Change now={m} then={prev} measure={row} /></td>
-                      <td className="r"><Cell m={ly} measure={row} /></td>
+                      <td className="r"><Cell m={ly} measure={row} to={opens(row, r.last_year)} /></td>
                       <td className="r"><Change now={m} then={ly} measure={row} /></td>
                     </tr>
                   )),

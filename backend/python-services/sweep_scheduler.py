@@ -216,6 +216,16 @@ def _send_monthly_reports() -> int:
         return report_delivery.run_due(s)
 
 
+
+def _send_executive_reports() -> int:
+    """38.2 — every carrier's Executive Report that is due today
+    (executive_delivery.run_due). Once per carrier per week or month: the send
+    row's unique key sees to that."""
+    from db import SessionLocal
+    import executive_delivery
+    with SessionLocal() as s:
+        return executive_delivery.run_due(s)
+
 async def _loop() -> None:
     hour = _run_hour()
     log.info("C-9 sweep scheduler on — daily at %02d:00 UTC", hour)
@@ -240,6 +250,12 @@ async def _loop() -> None:
                     log.info("Monthly report: sent for %s carrier(s)", n)
             except Exception:  # noqa: BLE001
                 log.exception("Monthly report run failed; will retry next cycle")
+            try:
+                n = await loop.run_in_executor(None, _send_executive_reports)
+                if n:
+                    log.info("Executive report: sent for %s carrier(s)", n)
+            except Exception:  # noqa: BLE001
+                log.exception("Executive report run failed; will retry next cycle")
             # Sleep until the next scheduled hour, then run again.
             await asyncio.sleep(_seconds_until_next_run(datetime.now(timezone.utc), hour))
     except asyncio.CancelledError:
