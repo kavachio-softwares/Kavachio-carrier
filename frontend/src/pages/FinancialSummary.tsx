@@ -17,7 +17,7 @@
 //
 // 38.1: every amount opens the Policies page on the policies behind it — the
 // same window, figure, currency, programme and broker (api/policies drillLink).
-import { useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   Ban, Banknote, Handshake, Landmark, Layers, Percent, Receipt, TrendingUp, Wallet,
@@ -116,19 +116,6 @@ function change(c: number | null, unit: "money" | "percent"): string | undefined
   if (c == null) return undefined;
   const sign = c > 0 ? "+" : c < 0 ? "-" : "";
   return unit === "percent" ? `${sign}${Math.abs(c).toFixed(2)} pts` : `${sign}${Math.abs(c).toFixed(1)}%`;
-}
-
-/** Where a number leads: the Policies page on the policies behind it. */
-type Win = "current" | "previous" | "last_year";
-type DrillTo = (o: { window: Win; label: string; metric?: MetricKey;
-                     program?: number | null; broker?: number | null }) => string;
-
-const BEHIND = "See the policies behind this number";
-
-/** A number that opens the policies behind it. */
-function NumLink({ to, children }: { to: string | null; children: ReactNode }) {
-  if (!to) return <>{children}</>;
-  return <Link className="linkish" to={to} title={BEHIND}>{children}</Link>;
 }
 
 /** Where a number leads: the Policies page on the policies behind it. */
@@ -264,14 +251,6 @@ export default function FinancialSummary() {
     groups.find(g => g.currency === currency) ?? groups[0];
   const filtered = programId != null || brokerId != null || openProblems === "exclude";
   const w = data?.windows;
-  const notes = data ? coverageItems(data).length : 0;
-
-
-  const drillTo: DrillTo | null = data?.period && group ? o => drillLink(
-    { from: "financial", label: o.label, basis, period: data.period ?? undefined, window: o.window,
-      metric: o.metric, currency: group.currency, open_problems: openProblems },
-    { program: o.program !== undefined ? o.program : programId,
-      broker: broker ? null : o.broker !== undefined ? o.broker : brokerId }) : null;
 
   const drillTo: DrillTo | null = data?.period && group ? o => drillLink(
     { from: "financial", label: o.label, basis, period: data.period ?? undefined, window: o.window,
@@ -487,7 +466,6 @@ function CompareTable({ group, data, drillTo }: { group: CurrencyGroup; data: Su
                     ? <span className="muted" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
                         {emptyValue(t)}<InfoTip text={missingWhy(group, m.key)} />
                       </span>
-                   
                     : <NumLink to={to("current", t.current.value)}>{fmt(m.key, t.current.value)}</NumLink>}</td>
                   <td><NumLink to={to("previous", t.previous.value)}>{fmt(m.key, t.previous.value)}</NumLink></td>
                   <td><Change c={t.change.previous} unit={t.unit} /></td>
