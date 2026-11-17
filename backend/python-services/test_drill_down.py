@@ -13,7 +13,7 @@ import os
 from types import SimpleNamespace
 
 os.environ.setdefault("DATABASE_URL", "sqlite://")
-os.environ.setdefault("GEMINI_API_KEY", "test-placeholder")
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-placeholder")
 
 import pytest
 from fastapi import HTTPException

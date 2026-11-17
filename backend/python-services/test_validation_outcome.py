@@ -24,7 +24,7 @@ import os
 import types
 
 # exporter builds a Gemini client on import; no call is made here.
-os.environ.setdefault("GEMINI_API_KEY", "test-key-not-used")
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-key-not-used")
 
 import pytest
 

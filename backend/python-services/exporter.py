@@ -57,7 +57,7 @@ from contract_upload_services.gemini_service import DETERMINISTIC_SEED, model_fo
 
 # Today's model for the template-mapping and sheet-role calls; each can be moved
 # by config (KAVACHIO_MODEL_TEMPLATE_MAPPING / KAVACHIO_MODEL_SHEET_ROLES).
-_DEFAULT_MAPPING_MODEL = "gemini-2.5-flash"
+_DEFAULT_MAPPING_MODEL = "gemini-3.5-flash"
 
 log = logging.getLogger("bdx.exporter")
 
@@ -1417,18 +1417,13 @@ def classify_sheet_roles(client, structure: dict) -> dict:
 
 def propose_template_mapping(structure: dict[str, Any]) -> dict[str, Any]:
     """Run LLM (per-sheet, in parallel), mutating `structure` in-place."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        log.warning("No GEMINI_API_KEY — returning template with empty mappings.")
+    from contract_upload_services.gemini_service import (
+        AI_NOT_CONFIGURED, ai_configured, get_client)
+    if not ai_configured():
+        log.warning("%s — returning template with empty mappings.", AI_NOT_CONFIGURED)
         return structure
 
-    from google import genai
-    from google.genai import types as genai_types
-
-    client = genai.Client(
-        api_key=api_key,
-        http_options=genai_types.HttpOptions(timeout=600_000),  # 600 s
-    )
+    client = get_client(timeout_ms=600_000)  # 600 s
 
     # Classify tabs (data vs reference/lookup) from headers so reference tabs are
     # kept out of rule generation. Header-only + non-fatal — see classify_sheet_roles.

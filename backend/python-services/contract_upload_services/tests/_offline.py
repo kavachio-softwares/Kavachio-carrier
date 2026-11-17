@@ -24,7 +24,7 @@ import sys
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..")))
 
-os.environ.setdefault("GEMINI_API_KEY", "test-key-not-used")
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-key-not-used")
 os.environ.setdefault("KAVACHIO_DECISION_LOG", "0")
 
 if "db" not in sys.modules and not os.environ.get("DATABASE_URL"):

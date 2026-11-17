@@ -14,7 +14,7 @@ import os
 import sys
 from types import SimpleNamespace
 
-os.environ.setdefault("GEMINI_API_KEY", "test-key-not-used")
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-key-not-used")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pytest

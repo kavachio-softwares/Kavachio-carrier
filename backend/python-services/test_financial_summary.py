@@ -11,7 +11,7 @@ from types import SimpleNamespace
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 # exporter (whose reference-tab test the reader shares) builds an AI client at
 # import; nothing here calls it.
-os.environ.setdefault("GEMINI_API_KEY", "test-placeholder")
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-placeholder")
 
 import pytest
 from fastapi import HTTPException

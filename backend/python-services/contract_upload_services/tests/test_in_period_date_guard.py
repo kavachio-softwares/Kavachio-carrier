@@ -38,7 +38,7 @@ try:
     load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 except ImportError:
     pass
-os.environ.setdefault("GEMINI_API_KEY", "test-key-not-used")
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-key-not-used")
 
 from contract_upload_services.output_schema import (     # noqa: E402
     is_processing_date_column,
