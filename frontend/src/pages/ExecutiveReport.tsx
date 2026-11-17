@@ -240,7 +240,7 @@ function headlineLink(r: Report, label: string): string | null {
   if (label === "Clean first time" && r.cadence === "month")
     return drillLink({ from: "monthly", label: "Files clean first time", month: r.period, measure: "clean" });
   if (label === "On time") return r.timeliness.month ? `/bordereau-calendar?month=${r.timeliness.month}` : "/bordereau-calendar";
-  if (["Open problems", "Escalations", "New problems", "New escalations"].includes(label)) return "/open-problems";
+  // Open problems / escalations linked to /open-problems — hidden 17 Nov 2026.
   return null;
 }
 
@@ -395,7 +395,8 @@ function Body({ r }: { r: Report }) {
             : "Late files marked delinquent, disputes waiting for your decision, and anything past its due date"
               + ", as they stood at the end of that day. Contracts waiting for a signature count only when the period runs to today, because when one started waiting is not kept."} />
           {!daily && <span className="sub">{asAt}</span>}
-          <Link className="linkish right" to="/open-problems" style={{ fontSize: 13 }}>Open Problems</Link>
+          {/* Hidden 17 Nov 2026 with the Open Problems page.
+          <Link className="linkish right" to="/open-problems" style={{ fontSize: 13 }}>Open Problems</Link> */}
         </div>
         {r.problems.escalation_list.length === 0 ? <div className="empty">
           {daily ? "Nothing became an escalation today." : "Nothing needs escalating."}</div> : daily ? (

@@ -26,7 +26,7 @@ import {
 import {
   getFinancialRows, getFinancialSummary, type Basis, type CurrencyGroup, type Figure,
   type FigureStatus, type FileRef, type FinancialRows, type FinancialSummary as Summary,
-  type MetricKey, type MetricTotals, type MetricWhy, type MissingFile, type PartTotals,
+  type MetricKey, type MetricTotals, type MetricWhy, type MissingFile, type NetMismatch, type PartTotals,
   type TransactionType,
 } from "../api/finance";
 import { drillLink } from "../api/policies";
@@ -36,7 +36,7 @@ import { ChartCard, StatCard } from "../components/StatCard";
 import { RankedBars } from "../components/BrokerCharts";
 import { InfoTip } from "../components/InfoTip";
 import { Pagination } from "../components/Pagination";
-import { periodLabel } from "../utils/date";
+import { fmtStamp, periodLabel } from "../utils/date";
 
 const ROWS_PAGE = 25;
 
@@ -144,6 +144,15 @@ const RATE_AMOUNT: Partial<Record<MetricKey, MetricKey>> = {
   commission_pct: "commission_amount", brokerage_pct: "brokerage_amount",
 };
 const NEVER_FILLED = "Kavachio never fills in a missing figure or counts it as 0.";
+
+// The two calculation notes behind "How these totals are worked out". Running-
+// total files are handled by the setup's ITD setting (backend itd.py), which is
+// off unless switched on — hence the second note.
+const HOW_TOTALS_WORK =
+  "Each month counts only what that month's file contains; Quarter and Year add the months together. "
+  + "Every amount is the sum of the rows' own amounts; the rates are total commission (or brokerage) ÷ total gross premium. "
+  + "Running totals: some brokers send files that repeat earlier months. Kavachio then keeps only the new rows and the change in each amount, "
+  + "but only when that broker's Bordereau Setup has running-total handling switched on. With it off, earlier months' amounts are counted again.";
 const ROWS_TAB = "The Bordereau rows tab gives every row's reason.";
 
 function fileName(f: FileRef): string {
@@ -184,6 +193,22 @@ function figureWhy(w: MetricWhy | undefined, title: string, reviewOnly = false):
   }
   if (w.empty.length > 2) out.push(`${w.empty.length - 2} more files left it empty too.`);
   return out;
+}
+
+const amount = (n: number) => n.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/** The ⓘ beside a net premium total when some rows' net is not gross −
+ *  commission (financial_summary._net_mismatch). A pointer only: the total
+ *  stays exactly as the bordereaux sent it. */
+function netMismatchText(m: NetMismatch | null | undefined): string | undefined {
+  if (!m || !m.rows) return undefined;
+  const ex = m.examples[0];
+  const one = ex ? `${fileName(ex)}, row ${ex.row}, policy ${ex.policy}: ${amount(ex.expected)} expected, ${amount(ex.sent)} sent` : "";
+  const head = m.rows === 1
+    ? `1 row's net premium is not gross − commission: ${one}.`
+    : `${m.rows} rows' net premium is not gross − commission (${amount(Math.abs(m.gap))} ${m.gap > 0 ? "more" : "less"} than expected in all) — e.g. ${one}.`;
+  return `${head} No brokerage, fees or taxes on ${m.rows === 1 ? "that row explain" : "those rows explain"} the gap. `
+    + "The total is shown as the bordereaux sent it; nothing is changed or recalculated.";
 }
 
 /** The ⓘ text beside a total no row has: why it is missing or needs review. */
@@ -354,13 +379,19 @@ export default function FinancialSummary() {
           </div></div>
         ) : (
           <div style={loading ? { opacity: 0.6 } : undefined}>
-            <div className="sub" style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+            <div className="sub" style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
               <span>
                 {periodName(w?.current?.period)}: {fileCount(w?.current?.files)}, {count(w?.current?.rows ?? 0, "policy row", "policy rows")}
                 {" "}· compared with {periodName(w?.previous?.period)} ({fileCount(w?.previous?.files)})
                 {basis !== "year" && <> and {periodName(w?.last_year?.period)} ({fileCount(w?.last_year?.files)})</>}
               </span>
               <InfoTip text="Only the latest version of each file counts: an earlier version for the same month is replaced, not added, and an identical copy is counted once. A missing figure is never counted as 0, and different currencies are never added together." />
+            </div>
+            {/* How the adding up works, and the running-total (ITD) catch —
+                asked for on screen so a reader can trust or question a total. */}
+            <div className="sub" style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 5 }}>
+              How these totals are worked out
+              <InfoTip text={HOW_TOTALS_WORK} />
             </div>
             {tab === "overview" && <Notes data={data} />}
 
@@ -418,7 +449,8 @@ function MetricCards({ group, basis, nwp, drillTo }: {
               ? () => navigate(drillTo({ window: "current", metric: m.key, label: m.title }))
               : undefined}
             value={v == null ? emptyValue(t) : t.unit === "percent" ? rate(v) : money(v, group.currency)}
-            valueInfo={v == null ? missingWhy(group, m.key) : undefined}
+            valueInfo={v == null ? missingWhy(group, m.key)
+              : m.key === "net_premium" ? netMismatchText(group.net_mismatch) : undefined}
             trend={change(t.change.previous, t.unit)}
             subtitle={<>
               {basis !== "year" && ly && <div>Same period last year: {ly}</div>}
@@ -451,7 +483,7 @@ function CompareTable({ group, data, drillTo }: { group: CurrencyGroup; data: Su
               <th>Change</th>
               {showLy && <th>{periodName(w.last_year?.period)}</th>}
               {showLy && <th>Change</th>}
-              <th className="l">Rows this period</th>
+              <th className="l">Policy rows this period</th>
             </tr>
           </thead>
           <tbody>
@@ -466,7 +498,8 @@ function CompareTable({ group, data, drillTo }: { group: CurrencyGroup; data: Su
                     ? <span className="muted" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
                         {emptyValue(t)}<InfoTip text={missingWhy(group, m.key)} />
                       </span>
-                    : <NumLink to={to("current", t.current.value)}>{fmt(m.key, t.current.value)}</NumLink>}</td>
+                    : <><NumLink to={to("current", t.current.value)}>{fmt(m.key, t.current.value)}</NumLink>
+                        {m.key === "net_premium" && <MismatchTip m={group.net_mismatch} />}</>}</td>
                   <td><NumLink to={to("previous", t.previous.value)}>{fmt(m.key, t.previous.value)}</NumLink></td>
                   <td><Change c={t.change.previous} unit={t.unit} /></td>
                   {showLy && <td><NumLink to={to("last_year", t.last_year.value)}>{fmt(m.key, t.last_year.value)}</NumLink></td>}
@@ -480,6 +513,12 @@ function CompareTable({ group, data, drillTo }: { group: CurrencyGroup; data: Su
       </div>
     </div>
   );
+}
+
+/** The net-mismatch ⓘ in a table cell, beside the number; nothing when none. */
+function MismatchTip({ m }: { m: NetMismatch | null | undefined }) {
+  const text = netMismatchText(m);
+  return text ? <span style={{ marginLeft: 5, display: "inline-flex", verticalAlign: "middle" }}><InfoTip text={text} /></span> : null;
 }
 
 function Change({ c, unit }: { c: number | null; unit: "money" | "percent" }) {
@@ -517,7 +556,8 @@ function Parts({ title, parts, currency, drillTo }: {
                     const t = p.totals[k];
                     const m = METRICS.find(x => x.key === k)!;
                     return <td key={k}>{t.current.value == null ? <span className="muted">{emptyValue(t)}</span>
-                      : <NumLink to={drillTo ? drillTo(p, m) : null}>{money(t.current.value, currency)}</NumLink>}</td>;
+                      : <><NumLink to={drillTo ? drillTo(p, m) : null}>{money(t.current.value, currency)}</NumLink>
+                          {k === "net_premium" && <MismatchTip m={p.net_mismatch} />}</>}</td>;
                   })}
                   <td><Change c={p.totals.gross_premium.change.previous} unit="money" /></td>
                 </tr>
@@ -705,6 +745,8 @@ function RowsCard({ basis, period, programId, brokerId, carrierId, openProblems,
                     <th className="l">Policy</th>
                     <th className="l">Programme</th>
                     {showBroker && <th className="l">Broker</th>}
+                    <th className="l">Period</th>
+                    <th className="l">Processed</th>
                     <th className="l">Transaction</th>
                     <th>Cover</th>
                     {ROW_METRICS.map(m => <th key={m.key}>{m.label}</th>)}
@@ -718,6 +760,8 @@ function RowsCard({ basis, period, programId, brokerId, carrierId, openProblems,
                       </td>
                       <td className="l">{r.programme ?? "—"}</td>
                       {showBroker && <td className="l">{r.broker ?? "—"}</td>}
+                      <td className="l" style={{ whiteSpace: "nowrap" }}>{periodName(r.period)}</td>
+                      <td className="l" style={{ whiteSpace: "nowrap" }}>{fmtStamp(r.processed_at)}</td>
                       <td className="l">
                         {r.transaction.sent ?? <span className="muted">—</span>}
                         {r.transaction.negative && <div><span className="badge b-warn"><span className="d" />Negative</span></div>}

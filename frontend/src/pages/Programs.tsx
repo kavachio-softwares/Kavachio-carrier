@@ -296,10 +296,11 @@ export default function Programs() {
                         </div>
                         {/* 44.2 — this programme's open problems: what is
                             waiting, on whom, and what is overdue. */}
+                        {/* Hidden 17 Nov 2026 with the Open Problems page.
                         <Link to={`/open-problems?program=${p.id}`} onClick={e => e.stopPropagation()}
                           className="mt-0.5 inline-block text-xs font-semibold text-navy hover:underline">
                           Open problems
-                        </Link>
+                        </Link> */}
                       </td>
                       <td className="align-middle">
                         {/* Each pill opens its own step for this programme. */}

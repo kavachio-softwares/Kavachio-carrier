@@ -71,7 +71,8 @@ import ExecutiveReport from "./pages/ExecutiveReport";
 import MonthlySendSchedule from "./pages/MonthlySendSchedule";
 import PolicySearch from "./pages/PolicySearch";
 import FinancialSummary from "./pages/FinancialSummary";
-import OpenProblems from "./pages/OpenProblems";
+// Open Problems (44) hidden 17 Nov 2026 — page kept, route switched off.
+// import OpenProblems from "./pages/OpenProblems";
 // Feature 10 — file intake channels.
 import Files from "./pages/Files";
 import AddUser from "./pages/AddUser";
@@ -287,7 +288,8 @@ export default function App() {
         {/* <Route path="/exception-resolution" element={<ExceptionResolution />} /> */}
         {/* 44 — every open problem, its owner, due date and age. A programme's
             own view is ?program=<id>, linked from the Programmes list. */}
-        <Route path="/open-problems" element={<OpenProblems />} />
+        {/* Hidden 17 Nov 2026: the page must not open. Uncomment to bring it back. */}
+        {/* <Route path="/open-problems" element={<OpenProblems />} /> */}
         <Route path="/executive-report" element={<ExecutiveReport />} />
         {/* How a broker's file reaches you, and everything that has landed —
             one screen with two tabs. The old paths are kept as redirects: they

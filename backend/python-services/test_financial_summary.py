@@ -397,7 +397,7 @@ def export(eid, period, rows, *, tenant=7, program=11, broker=50, content=None):
 
 @pytest.fixture
 def files(monkeypatch):
-    box = SimpleNamespace(exports=[], open={})
+    box = SimpleNamespace(exports=[], open={}, processed={})
     fs._REMEMBERED.clear()
 
     def _exports(s, seat, carrier_id=None):
@@ -416,6 +416,7 @@ def files(monkeypatch):
                         lambda s, ids: {o.id: {"reporting_period": o._period} for o in box.exports})
     monkeypatch.setattr(fs, "_bytes", lambda s, o: xlsx([h for h, _f in COLUMNS], o._rows))
     monkeypatch.setattr(fs, "_open_counts", lambda s, ids: {i: box.open.get(i, 0) for i in ids})
+    monkeypatch.setattr(fs, "_processed_times", lambda s, ids: {i: box.processed[i] for i in ids if i in box.processed})
     monkeypatch.setattr(ps, "seat_of", _seat_of)
     return box
 
@@ -617,6 +618,48 @@ def test_why_carries_the_rows_own_review_reason(files):
     assert why["review"] == [{"export_id": 1, "filename": "file-1.xlsx", "period": "2027-03",
                               "programme": "Fleet", "row": 2,
                               "reason": "“Commission %” is not a number"}]
+
+
+def test_rows_carry_their_period_and_when_the_file_was_processed(files):
+    import datetime as dt
+    files.exports = [export(1, "2027-03", [full_row()]), export(2, "2027-03", [full_row("P2")])]
+    files.processed = {1: dt.datetime(2027, 4, 2, 8, 38)}
+    items = {r["export_id"]: r for r in fs.rows(None, CARRIER)["items"]}
+    assert items[1]["period"] == "2027-03"
+    assert items[1]["processed_at"] == "2027-04-02T08:38:00"
+    assert items[2]["processed_at"] is None          # no record: the file's own time (none here)
+
+
+def _group(out, currency="USD"):
+    return next(g for g in out["groups"] if g["currency"] == currency)
+
+
+def test_net_mismatch_points_at_the_row_and_changes_nothing(files):
+    files.exports = [export(1, "2027-03", [full_row(gross=1000, comm=100, net=950),
+                                           full_row("P2", gross=500, pct=10, comm=50, net=450)])]
+    g = _group(fs.summary(None, CARRIER))
+    assert g["net_mismatch"] == {"rows": 1, "gap": 50.0, "examples": [{
+        "export_id": 1, "filename": "file-1.xlsx", "period": "2027-03", "programme": "Fleet",
+        "row": 2, "policy": "P1", "expected": 900.0, "sent": 950.0}]}
+    # Read-only: net is still added up exactly as sent.
+    assert g["totals"]["net_premium"]["current"]["value"] == 1400
+    assert g["by_programme"][0]["net_mismatch"]["rows"] == 1
+    assert g["by_broker"][0]["net_mismatch"]["rows"] == 1
+
+
+def test_brokerage_on_the_row_can_explain_the_gap(files):
+    files.exports = [export(1, "2027-03", [full_row(gross=1000, comm=100, brok=50, net=850)])]
+    assert _group(fs.summary(None, CARRIER))["net_mismatch"] is None
+
+
+def test_a_cancellation_that_balances_is_no_mismatch(files):
+    files.exports = [export(1, "2027-03", [full_row(txn="CN", gross=1000, comm=100, net=900)])]
+    assert _group(fs.summary(None, CARRIER))["net_mismatch"] is None
+
+
+def test_no_mismatch_without_all_three_figures(files):
+    files.exports = [export(1, "2027-03", [full_row(net=None), full_row("P2", gross=None, net=5)])]
+    assert _group(fs.summary(None, CARRIER))["net_mismatch"] is None
 
 
 def test_why_is_kept_per_currency(files):

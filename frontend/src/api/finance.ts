@@ -32,7 +32,19 @@ export interface MetricTotals {
 
 export type Totals = Record<MetricKey, MetricTotals>;
 
-export interface PartTotals { id: number | null; name: string; totals: Totals }
+export interface PartTotals {
+  id: number | null; name: string; totals: Totals;
+  net_mismatch?: NetMismatch | null;
+}
+
+/** READ-ONLY pointer: rows whose net premium as sent is not gross − commission,
+ *  with no brokerage, fees or taxes to explain it. Totals are not changed. */
+export interface NetMismatch {
+  rows: number;
+  /** Σ (sent − expected). */
+  gap: number;
+  examples: (FileRef & { row: number; policy: string; expected: number; sent: number })[];
+}
 
 export interface CurrencyGroup {
   /** A currency code, or "none" (not stated) / "review" (unclear). */
@@ -48,6 +60,7 @@ export interface CurrencyGroup {
   why: Partial<Record<MetricKey, MetricWhy>>;
   /** This period's transaction types in this currency (the rows tab's buttons). */
   transactions: TransactionType[];
+  net_mismatch: NetMismatch | null;
 }
 
 /** A transaction type as the bordereaux sent it; `sent` null = none stated. */
@@ -145,6 +158,8 @@ export interface FinancialRow {
   export_id: number;
   filename: string | null;
   period: string | null;
+  /** When the file was processed (UTC) — the time File Submissions shows. */
+  processed_at: string | null;
   programme: string | null;
   broker: string | null;
   insurer: string | null;

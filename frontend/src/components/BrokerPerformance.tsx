@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { InfoTip } from "./InfoTip";
 import { ChartCard } from "./StatCard";
+import type { SelectedProgramme } from "./ProgrammeOverview";
 
 // The validated outcome pair (see BrokerCharts.tsx): resolved vs still open.
 const RESOLVED = "#0E9F6E";
@@ -53,16 +54,38 @@ const DAYS = 30;
  * Every number is also written out on the row, so colour is never the only
  * way to read it.
  */
-export default function BrokerPerformance({ mga }: { mga: string }) {
+export default function BrokerPerformance({ mga, programme, onClearProgramme }: {
+  mga: string;
+  /** Picked on the Programme Overview: only this programme's files count. */
+  programme?: SelectedProgramme | null;
+  onClearProgramme?: () => void;
+}) {
   const [rows, setRows] = useState<BrokerPerf[] | null>(null);
   const [activeTotal, setActiveTotal] = useState(0);
+  const programId = programme?.id;
 
   useEffect(() => {
+    let live = true;
+    setRows(null);
     api.get<{ items: BrokerPerf[]; active_total: number }>(
-      "/dashboard/broker-performance", { params: { mga, days: DAYS, limit: 5 } })
-      .then(r => { setRows(r.data.items); setActiveTotal(r.data.active_total); })
-      .catch(() => { setRows([]); setActiveTotal(0); });
-  }, [mga]);
+      "/dashboard/broker-performance",
+      { params: { mga, days: DAYS, limit: 5, program_id: programId } })
+      .then(r => { if (live) { setRows(r.data.items); setActiveTotal(r.data.active_total); } })
+      .catch(() => { if (live) { setRows([]); setActiveTotal(0); } });
+    return () => { live = false; };
+  }, [mga, programId]);
+
+  // Which programme the card is narrowed to, and the way back to all of them.
+  const scope = programme && (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, marginBottom: 12 }}>
+      <span className="badge b-info"><span className="d" />{programme.name}</span>
+      {onClearProgramme && (
+        <button type="button" className="linkish"
+          style={{ background: "none", border: 0, cursor: "pointer", padding: 0, fontSize: 12.5 }}
+          onClick={onClearProgramme}>Show all programmes</button>
+      )}
+    </div>
+  );
 
   return (
     <ChartCard
@@ -73,13 +96,17 @@ export default function BrokerPerformance({ mga }: { mga: string }) {
         + "share resolved, amber the share still open — the same numbers as those "
         + "files' exception screens, or one grey bar when nothing was flagged. Bars "
         + "are not compared with each other; the counts on the right are. Click a "
-        + "broker for its files, split by programme."} />}
+        + "broker for its files, split by programme. Pick a programme in the "
+        + "Programme Overview to see only its brokers."} />}
     >
+      {scope}
       {rows === null ? (
         <div className="empty">Loading…</div>
       ) : rows.length === 0 ? (
         <div className="empty">
-          No broker company has sent a file in the last {DAYS} days.
+          {programme
+            ? `No broker has sent a file for ${programme.name} in the last ${DAYS} days.`
+            : `No broker company has sent a file in the last ${DAYS} days.`}
         </div>
       ) : (
         <>

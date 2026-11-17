@@ -16,6 +16,7 @@ import { StatCard } from "../components/StatCard";
 import { ArrivalsCard } from "../components/ArrivalsCard";
 import { getReinsuranceDashboard, type ReinsuranceDashboard } from "../api/treaty";
 import BrokerPerformance from "../components/BrokerPerformance";
+import ProgrammeOverview, { type SelectedProgramme } from "../components/ProgrammeOverview";
 import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
 import { clickedDayIndex } from "../components/BrokerCharts";
 
@@ -179,6 +180,8 @@ export default function Home() {
   // year in the bar above them. "All Months" takes the whole year, "All Years"
   // everything. It opens on the current month, which is what they all
   // counted before there was a pick.
+  // The programme picked on the Programme Overview; Broker Performance follows it.
+  const [pickedProgramme, setPickedProgramme] = useState<SelectedProgramme | null>(null);
   const [year, setYear] = useState<string>(String(new Date().getFullYear()));
   const [month, setMonth] = useState<string>(pad2(new Date().getMonth() + 1));
   const period = year === ALL ? ALL : month === ALL ? year : `${year}-${month}`;
@@ -672,7 +675,6 @@ export default function Home() {
                 cell(3, <StatCard title="Parties" icon={Users} subtitle=""
                   value={partyCount == null || reinsurerCount == null
                     ? fmt(partyCount ?? reinsurerCount) : fmt(partyCount + reinsurerCount)}
-                  info={"Brokers send you business. Reinsurers are the companies you cede risk to."}
                   split={[
                     { label: "Brokers", value: fmt(partyCount), onClick: () => nav("/brokers") },
                     { label: "Reinsurers", value: fmt(reinsurerCount),
@@ -687,8 +689,6 @@ export default function Home() {
                   left a carrier guessing which it was looking at. */}
               {cell(3, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText}
                 onClick={() => nav("/contracts")}
-                info={"Broker contracts are with the brokers who send you business. "
-                  + "Reinsurance treaties are with the reinsurers you cede risk to."}
                 split={[
                   { label: "Broker contracts", value: fmt(brokerCount),
                     onClick: () => nav("/contracts?type=insurer_broker"),
@@ -801,12 +801,20 @@ export default function Home() {
 
         </div>
 
+        {/* The top of the hierarchy (programme → broker → contract → bordereau):
+            one row per programme, worst first. Carrier only — it reads the Open
+            Problems list, which is the carrier's. */}
+        {carrierAdmin && (
+          <ProgrammeOverview mga={mga} selected={pickedProgramme} onSelect={setPickedProgramme} />
+        )}
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
           {/* Processing Volume Chart */}
           <div className="card" style={{ padding: "24px 20px", display: "flex", flexDirection: "column" }}>
             <div className="card-h" style={{ marginBottom: 20 }}>
               <h3>Bordereau Status</h3>
               <InfoTip text="Clean vs Flagged runs and Resolved exceptions over the last 7 days." />
+              <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--p-faint)" }}>Last 7 days</span>
             </div>
             <div style={{ width: "100%", height: 260 }}>
               <ResponsiveContainer width="100%" height="100%">
@@ -848,7 +856,10 @@ export default function Home() {
               in place of the Exceptions Breakdown chart. How each broker
               company is working and putting its issues right — the five that
               most recently sent this carrier a file. */}
-          {carrierAdmin ? <BrokerPerformance mga={mga} /> : (
+          {carrierAdmin ? (
+            <BrokerPerformance mga={mga} programme={pickedProgramme}
+              onClearProgramme={() => setPickedProgramme(null)} />
+          ) : (
           /* Exceptions Breakdown Pie Chart */
           <div className="card" style={{ padding: "24px 20px", display: "flex", flexDirection: "column" }}>
             <div className="card-h" style={{ marginBottom: 20 }}>

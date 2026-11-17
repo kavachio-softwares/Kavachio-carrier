@@ -5109,6 +5109,11 @@ def program_contract_activate(program_id: int, contract_id: int,
 
 # ---- S-12 Operations Home — dashboard stats + activity --------------------
 
+# Days ahead in which a signed or active contract counts as "expiring soon" —
+# the Contracts tile's line and the Programme Overview's renewal nudge.
+CONTRACT_EXPIRING_SOON_DAYS = 30
+
+
 @router.get("/dashboard/stats")
 def dashboard_stats(mga: str, principal: Principal = Depends(current_principal)):
     """Aggregates for the home dashboard."""
@@ -5282,7 +5287,7 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         # EXPIRING_SOON_DAYS — the "N expiring soon" line under the Contracts
         # tile. Counted over every contract, not only the ones waiting on the
         # carrier. An already-expired one is not "soon"; it is gone.
-        EXPIRING_SOON_DAYS = 30
+        EXPIRING_SOON_DAYS = CONTRACT_EXPIRING_SOON_DAYS
         _today_d = _cr._today()
         _soon_d = _today_d + timedelta(days=EXPIRING_SOON_DAYS)
         contracts_expiring_soon = 0
@@ -5837,6 +5842,7 @@ def report_open_problems(mga: str, program_id: Optional[int] = None,
 def dashboard_broker_performance(mga: str,
                                  days: int = Query(30, ge=7, le=90),
                                  limit: int = Query(5, ge=1, le=20),
+                                 program_id: Optional[int] = None,
                                  principal: Principal = Depends(current_principal)):
     """How each broker company is working, and how far its issues have been
     resolved — the most recently active `limit` brokers of this carrier.
@@ -5872,6 +5878,9 @@ def dashboard_broker_performance(mga: str,
     A superseded run is not counted twice: a "Fix & re-run" moves the landing
     pointer to the new export and the old one becomes history (see
     `exception_tally.current_export_ids`).
+
+    `program_id` narrows the card to one programme's files — the Programme
+    Overview's drill-down from a programme to its brokers.
     """
     since = datetime.utcnow() - timedelta(days=days)   # stored times are utcnow
     with SessionLocal() as s:
@@ -5882,11 +5891,14 @@ def dashboard_broker_performance(mga: str,
         # a broker missing from that list (its party reached the carrier by some
         # route the list does not cover) had its files silently dropped from the
         # card while the same files were still counted by every tile above it.
-        exports = (s.query(OutputExport.id, OutputExport.broker_party_id,
-                           OutputExport.status, OutputExport.created_at)
-                   .filter(OutputExport.tenant_id == tid,
-                           OutputExport.broker_party_id.isnot(None),
-                           OutputExport.created_at >= since)
+        exports_q = (s.query(OutputExport.id, OutputExport.broker_party_id,
+                             OutputExport.status, OutputExport.created_at)
+                     .filter(OutputExport.tenant_id == tid,
+                             OutputExport.broker_party_id.isnot(None),
+                             OutputExport.created_at >= since))
+        if program_id is not None:
+            exports_q = exports_q.filter(OutputExport.program_id == program_id)
+        exports = (exports_q
                    .order_by(OutputExport.created_at.desc(), OutputExport.id.desc())
                    .all())
         per: dict[int, dict] = {}
@@ -5913,11 +5925,14 @@ def dashboard_broker_performance(mga: str,
         def _work(broker_id) -> dict:
             """Every live file this broker sent this carrier in the window."""
             total = {"files": 0, "rows": 0, "exceptions": 0, "resolved": 0, "open": 0}
-            ids = [i for (i,) in s.query(OutputExport.id)
-                   .filter(OutputExport.tenant_id == tid,
-                           OutputExport.broker_party_id == broker_id,
-                           OutputExport.created_at >= since,
-                           OutputExport.id.in_(live or {-1})).all()]
+            ids_q = s.query(OutputExport.id).filter(
+                OutputExport.tenant_id == tid,
+                OutputExport.broker_party_id == broker_id,
+                OutputExport.created_at >= since,
+                OutputExport.id.in_(live or {-1}))
+            if program_id is not None:
+                ids_q = ids_q.filter(OutputExport.program_id == program_id)
+            ids = [i for (i,) in ids_q.all()]
             for eid in ids:
                 # One export at a time, then let it go: the exceptions column
                 # runs to megabytes on a big bordereau.
@@ -5944,6 +5959,229 @@ def dashboard_broker_performance(mga: str,
                 "work": _work(bid),
             })
         return {"days": days, "items": items, "active_total": len(per)}
+
+
+# What a programme is waiting on, most urgent first — the order the Programme
+# Overview lists them and the one status each row shows. Each names its cause,
+# so the badge says what is wrong rather than how worried to be.
+PROGRAMME_STATUS_ORDER = ("files_missing", "waiting_on_you", "exceptions_open",
+                          "contract_ending", "on_track", "setup_missing")
+
+
+@router.get("/dashboard/programme-overview")
+def dashboard_programme_overview(
+        mga: str,
+        month: Optional[str] = None,
+        days: int = Query(30, ge=7, le=90),
+        principal: Principal = Depends(require_carrier_admin("see the programme overview"))):
+    """One row per programme — the top of the hierarchy (programme → broker →
+    contract → bordereau) — so the dashboard starts where the business does.
+
+    Nothing here is counted afresh; every figure is read from the screen that
+    already owns it, so a programme's row and the page behind it agree:
+
+      files this month   the Bordereau Calendar (`calendar_board`) for `month`
+                         (YYYY-MM, default this month): due, received, late,
+                         overdue, never arrived — brokers owing nothing are not
+                         counted, as on the calendar
+      files missing      every bordereau still late or never sent, any month —
+                         the Open Problems page's "Late or missing file" rows
+      brokers / setup    the calendar's own per-programme schedule: the brokers
+                         allowed to report, and whether each has a live setup
+      contracts          broker contracts on the programme (the dashboard's
+                         "Broker contracts" figure, split by programme)
+      exceptions         every live file run in the last `days`, tallied by
+                         `exception_tally.export_tally` — the count Broker
+                         Performance and each file's exception screen show
+      waiting on you     the Open Problems rows only the carrier can move:
+                         disputes, files on hold, contracts to sign
+      clean              of those files, the share with nothing flagged
+
+    Status — the first that applies, in PROGRAMME_STATUS_ORDER:
+      setup_missing    no broker, or none with a live setup: its files cannot be
+                       checked, so nothing else is judged (listed last)
+      files_missing    a bordereau is overdue or never arrived, any month
+      waiting_on_you   a dispute, a held file or a contract to sign
+      exceptions_open  a file still has open exceptions for the broker to fix
+      contract_ending  a contract ends within CONTRACT_EXPIRING_SOON_DAYS
+      on_track         nothing waiting
+    Every cause that applies is returned in `statuses`, the first in `status`.
+
+    Read only — unlike /calendar/board it does not heal or sweep the calendar.
+    """
+    import re
+    import contract_routes as _cr
+    import fix_performance as fp
+    import open_problems as op
+    from exception_tally import current_export_ids, export_tally
+    from submission_calendar_service import calendar_board
+
+    today = datetime.utcnow().date()
+    month = month or today.strftime("%Y-%m")
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        raise HTTPException(400, "month must be YYYY-MM")
+    since = datetime.utcnow() - timedelta(days=days)
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        board = calendar_board(s, tid, month=month)
+
+        progs: dict[int, dict] = {}
+        for sch in board.get("schedules") or []:
+            brokers = sch.get("brokers") or []
+            progs[sch["program_id"]] = {
+                "program_id": sch["program_id"], "name": sch.get("program_name") or "—",
+                "brokers": len(brokers),
+                "brokers_without_setup": [b["broker_name"] for b in brokers
+                                          if not b.get("setup_live")],
+                "contracts": 0, "contract_ends_soon": None,
+                "due": 0, "received": 0, "late": 0, "overdue": 0, "never": 0,
+                "files_missing": 0, "missing_from": {},
+                "files": 0, "clean_files": 0,
+                "exceptions": 0, "exceptions_open": 0, "worst_file": None,
+                "waiting_on_you": 0,
+            }
+
+        # The calendar answers with ANOTHER month when nothing fell due in the
+        # one asked for — for this card, that month simply owed nothing.
+        if board.get("month") == month:
+            for r in board.get("rows") or []:
+                p = progs.get(r["program_id"])
+                if p is None or r.get("unassigned"):
+                    continue
+                p["due"] += 1
+                st = r.get("status")
+                if st in ("on_time", "received_late"):
+                    p["received"] += 1
+                    p["late"] += 1 if st == "received_late" else 0
+                elif st == "overdue":
+                    p["overdue"] += 1
+                elif st == "never_arrived":
+                    p["never"] += 1
+
+        soon = today + timedelta(days=CONTRACT_EXPIRING_SOON_DAYS)
+        for c in (s.query(Contract)
+                  .filter(Contract.tenant_id == tid,
+                          Contract.contract_type == "insurer_broker",
+                          Contract.program_id.in_(list(progs) or [-1])).all()):
+            p = progs[c.program_id]
+            p["contracts"] += 1
+            if (_cr._effective_lifecycle(c) in ("signed", "active") and c.expiry_dt
+                    and today <= c.expiry_dt <= soon):
+                ends = c.expiry_dt.isoformat()
+                if p["contract_ends_soon"] is None or ends < p["contract_ends_soon"]:
+                    p["contract_ends_soon"] = ends
+
+        # Exceptions: every live file in the window, one at a time (the
+        # exceptions column runs to megabytes), as Broker Performance does.
+        live = current_export_ids(s, tenant_id=tid)
+        ids = [i for (i,) in s.query(OutputExport.id).filter(
+            OutputExport.tenant_id == tid,
+            OutputExport.program_id.in_(list(progs) or [-1]),
+            OutputExport.created_at >= since,
+            OutputExport.id.in_(live or {-1})).all()]
+        for eid in ids:
+            r = s.get(OutputExport, eid)
+            if r is None:
+                continue
+            p = progs[r.program_id]
+            t = export_tally(r)
+            p["files"] += 1
+            p["clean_files"] += 1 if r.status == "clean" else 0
+            p["exceptions"] += t["exceptions"]
+            p["exceptions_open"] += t["open"]
+            # The file to open from the row: the one with the most still open,
+            # the newest on a tie.
+            w = p["worst_file"]
+            if t["open"] and (w is None or (t["open"], r.id) > (w["open"], w["export_id"])):
+                p["worst_file"] = {"export_id": r.id, "upload_id": r.source_upload_id,
+                                   "open": t["open"], "broker_party_id": r.broker_party_id}
+            s.expunge(r)
+
+        # From the Open Problems list: missing files (any month) and the moves
+        # that are the carrier's own. Failed checks are NOT taken from it — the
+        # exceptions above are the count every other screen shows.
+        for i in op.collect(s, tid, target=fp.target_days(s, tid)):
+            p = progs.get(i["program_id"])
+            if p is None:
+                continue
+            if i["type"] == op.LATE_FILE:
+                p["files_missing"] += 1
+                b = i.get("broker_party_id")
+                p["missing_from"][b] = p["missing_from"].get(b, 0) + 1
+            elif i["owner"] == op.CARRIER and i["type"] != op.CHECK:
+                p["waiting_on_you"] += 1
+
+        bids = ({b for p in progs.values() for b in p["missing_from"]}
+                | {p["worst_file"]["broker_party_id"] for p in progs.values() if p["worst_file"]}) - {None}
+        names = dict(s.query(Party.id, Party.legal_name).filter(Party.id.in_(bids)).all()) if bids else {}
+
+    def _name(bid) -> str:
+        return names.get(bid) or "the broker"
+
+    items = []
+    for p in progs.values():
+        pid = p["program_id"]
+        no_setup = not p["brokers"] or len(p["brokers_without_setup"]) == p["brokers"]
+        statuses = [k for k, on in (
+            ("files_missing", p["files_missing"] > 0),
+            ("waiting_on_you", p["waiting_on_you"] > 0),
+            ("exceptions_open", p["exceptions_open"] > 0),
+            ("contract_ending", bool(p["contract_ends_soon"])),
+        ) if on]
+        status = "setup_missing" if no_setup else (statuses[0] if statuses else "on_track")
+
+        # The next steps: one per cause, in status order, at most two — so a
+        # programme with files missing AND exceptions open offers both ways in.
+        # `link` is a screen path.
+        w = p["worst_file"]
+        steps: list[dict] = []
+        if not p["brokers"]:
+            steps.append({"text": "Add a broker", "link": f"/programs/{pid}/setup?tab=broker"})
+        elif no_setup or p["brokers_without_setup"]:
+            steps.append({"text": f"Finish the Bordereau Setup for {p['brokers_without_setup'][0]}",
+                          "link": f"/programs/{pid}/setup?tab=broker&stage=4"})
+        if not no_setup:
+            for k in statuses:
+                if k == "files_missing":
+                    bid, n = max(p["missing_from"].items(), key=lambda kv: kv[1])
+                    steps.append({"text": f"Chase {_name(bid)} — {n} {'file' if n == 1 else 'files'} missing",
+                                  "link": "/bordereau-calendar"})
+                elif k == "waiting_on_you":
+                    n = p["waiting_on_you"]
+                    steps.append({"text": f"{n} {'item is' if n == 1 else 'items are'} waiting on you",
+                                  "link": f"/open-problems?program={pid}"})
+                elif k == "exceptions_open" and w:
+                    # Straight to that file's exception screen, the way the
+                    # dashboard's other file links open it.
+                    steps.append({"text": f"{_name(w['broker_party_id'])} to fix — open the file "
+                                          f"with {w['open']} {'exception' if w['open'] == 1 else 'exceptions'}",
+                                  "link": f"/uploads/{w['upload_id'] or w['export_id']}/exceptions"
+                                          f"?download={w['export_id']}&from=home"})
+                elif k == "contract_ending":
+                    steps.append({"text": "A contract ends soon — start the renewal",
+                                  "link": "/contracts?type=insurer_broker"})
+        steps = steps[:2]
+
+        items.append({
+            "program_id": pid, "name": p["name"], "status": status, "statuses": statuses,
+            "brokers": p["brokers"], "brokers_without_setup": len(p["brokers_without_setup"]),
+            "contracts": p["contracts"], "contract_ends_soon": p["contract_ends_soon"],
+            "due": p["due"], "received": p["received"], "late": p["late"],
+            "overdue": p["overdue"], "never": p["never"], "files_missing": p["files_missing"],
+            "files": p["files"], "clean_files": p["clean_files"],
+            "exceptions": p["exceptions"], "exceptions_open": p["exceptions_open"],
+            "waiting_on_you": p["waiting_on_you"],
+            # The file the exceptions link opens (its exception screen).
+            "exceptions_link": (f"/uploads/{w['upload_id'] or w['export_id']}/exceptions"
+                                f"?download={w['export_id']}&from=home" if w else None),
+            "next_steps": steps,
+        })
+    items.sort(key=lambda r: (PROGRAMME_STATUS_ORDER.index(r["status"]),
+                              -r["files_missing"], -r["exceptions_open"], (r["name"] or "").lower()))
+    return {"month": month, "days": days, "expiring_days": CONTRACT_EXPIRING_SOON_DAYS,
+            "items": items,
+            "status_counts": {k: sum(1 for r in items if r["status"] == k)
+                              for k in PROGRAMME_STATUS_ORDER}}
 
 
 @router.get("/dashboard/brokers/{broker_party_id}/files")

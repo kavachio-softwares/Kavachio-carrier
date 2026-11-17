@@ -223,6 +223,18 @@ def _read(s, o, structure: Optional[dict], template_id: int) -> ff.FileRows:
     return fr
 
 
+def _processed_times(s, export_ids) -> dict[int, object]:
+    """{export id: when it was processed} — the run's landing record time, the
+    "Processed" File Submissions shows (direct_routes.direct_runs), so the two
+    screens give one time for one file."""
+    from db import LandingRecord
+    ids = sorted({i for i in export_ids if i})
+    if not ids:
+        return {}
+    return dict(s.query(LandingRecord.output_export_id, LandingRecord.created_at)
+                .filter(LandingRecord.output_export_id.in_(ids)).all())
+
+
 def _open_counts(s, export_ids) -> dict[int, int]:
     """Problems still open on each file, counted exactly as Exception Triage
     counts them (exception_tally.export_tally)."""
@@ -326,6 +338,45 @@ def _transactions(figs) -> list[dict]:
 
 # How many different reasons a figure's "needs review" carries to the screen.
 REVIEW_EXAMPLES = 3
+
+# What the bordereau may also take off the premium besides commission: a row
+# that reports any of these can rightly have net ≠ gross − commission.
+_OTHER_DEDUCTIONS = ("brokerage_amount", "fees", "taxes")
+
+
+def _net_mismatch(b: dict, file_ref) -> dict[str, dict]:
+    """READ-ONLY indicator: this period's rows whose net premium, as sent, is
+    not gross premium − commission, where nothing else on the row could
+    explain the gap (no brokerage, fees or taxes reported on it). Net premium
+    is still shown and added up exactly as the bordereau sent it — this only
+    points at the rows; no total, file or check result is changed.
+
+      {currency key: {"all" | ("programme", id) | ("broker", id):
+                      {"rows": n, "gap": Σ(sent − expected),
+                       "examples": [{file…, "row", "policy", "expected", "sent"}]}}}
+
+    Commission counts whether reported or worked out from the rate; amounts
+    are compared as counted, so a cancellation (all made negative) still
+    balances."""
+    out: dict[str, dict] = {}
+    for o, cells, fig in b["rows"]["current"]:
+        g, c, n = fig["gross_premium"], fig["commission_amount"], fig["net_premium"]
+        if (g["status"] != ff.REPORTED or n["status"] != ff.REPORTED
+                or c["status"] not in (ff.REPORTED, ff.CALCULATED)
+                or any(fig[k]["status"] != ff.MISSING for k in _OTHER_DEDUCTIONS)):
+            continue
+        expected = g["value"] - c["value"]
+        if abs(n["value"] - expected) < 0.005:
+            continue
+        group = out.setdefault(_currency_key(fig), {})
+        for part in ("all", ("programme", o.program_id), ("broker", o.broker_party_id)):
+            m = group.setdefault(part, {"rows": 0, "gap": 0.0, "examples": []})
+            m["rows"] += 1
+            m["gap"] = round(m["gap"] + n["value"] - expected, 2)
+            if len(m["examples"]) < REVIEW_EXAMPLES:
+                m["examples"].append(file_ref(o, row=cells["_row"], policy=fig["policy"],
+                                              expected=round(expected, 2), sent=n["value"]))
+    return out
 
 
 def _why(b: dict, file_ref) -> dict[str, dict]:
@@ -551,8 +602,14 @@ def summary(s, p, *, basis: str = "month", period: Optional[str] = None,
                 "programme": names["programme"].get(o.program_id), **extra}
 
     why = _why(b, _file)
+    mismatch = _net_mismatch(b, _file)
     for g in out_groups:
         g["why"] = why.get(g["currency"], {})
+        m = mismatch.get(g["currency"], {})
+        g["net_mismatch"] = m.get("all")
+        for kind, parts in (("programme", g["by_programme"]), ("broker", g["by_broker"])):
+            for part in parts:
+                part["net_mismatch"] = m.get((kind, part["id"]))
 
     return {
         "seat": b["seat"].kind,
@@ -620,11 +677,16 @@ def rows(s, p, *, basis: str = "month", period: Optional[str] = None,
                                t[0].id, t[1]["_row"]))
     start = (page - 1) * page_size
     items = []
-    for o, cells, fig in picked[start:start + page_size]:
+    page_rows = picked[start:start + page_size]
+    processed = _processed_times(s, {o.id for o, _c, _f in page_rows})
+    for o, cells, fig in page_rows:
+        at = processed.get(o.id) or o.created_at
         items.append({
             "export_id": o.id, "filename": o.filename,
             "template_id": o.template_id, "read_with_template_id": b["reading"](o),
             "period": ps._period(o, b["versions"]),
+            # UTC, as File Submissions sends it; the screen shows it local.
+            "processed_at": at.isoformat() if hasattr(at, "isoformat") else at,
             "programme": names["programme"].get(o.program_id),
             "broker": names["broker"].get(o.broker_party_id),
             "insurer": names["insurer"].get(o.tenant_id),

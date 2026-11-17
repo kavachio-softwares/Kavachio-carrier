@@ -110,7 +110,8 @@ const GROUPS: {
       { to: "/bordereau-calendar", label: "Bordereau Calendar", icon: CalendarDays },
       // 44: everything still waiting on someone — failed checks, late files,
       // disputes, files on hold, contracts to sign — with owner, due date, age.
-      { to: "/open-problems", label: "Open Problems", icon: AlertTriangle },
+      // Hidden 17 Nov 2026 — the page is switched off in App.tsx too.
+      // { to: "/open-problems", label: "Open Problems", icon: AlertTriangle },
       // My Calendar is deliberately NOT listed. Deadlines belong to a specific
       // carrier + program, so the calendar now lives inside that setup's own
       // screen where both are already fixed. The /calendar route still exists
