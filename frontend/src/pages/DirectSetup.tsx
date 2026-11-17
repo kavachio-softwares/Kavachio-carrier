@@ -1613,8 +1613,8 @@ function DirectSetupScreen() {
                     : <>Programme-wide Saved Setups</>}
                   <span className="text-[11px] rounded-full px-2 py-0.5 bg-surface-2 text-ink-muted">{pipelines.length}</span>
                   <InfoTip text={scope.brokerName
-                    ? `Setups built for ${scope.brokerName} on this programme, plus any programme-wide setup that also covers them. A setup is built against a contract and a contract belongs to one broker, so another broker's setups are not listed here. The active one loads automatically. Activating a setup replaces whichever was previously active for the same scope.`
-                    : "Setups on this programme that are not tied to a broker — they cover everyone on it. Pick a broker above to see the setups built on their contract. The active setup for the current scope loads automatically, and activating one replaces whichever was previously active for that same scope."} />
+                    ? `Setups for ${scope.brokerName} on this programme, plus programme-wide ones. The active one loads automatically; activating another replaces it.`
+                    : "Setups that cover every broker on this programme. Pick a broker above to see theirs. The active one loads automatically; activating another replaces it."} />
                 </div>
                 <ul className="space-y-1.5">
                   {pipelines.map(p => (

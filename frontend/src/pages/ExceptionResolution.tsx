@@ -307,7 +307,7 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         <div className="card-h" style={{ flexWrap: "wrap" }}>
           <Hourglass className="ci" />
           <h3>Waiting to be fixed</h3>
-          <InfoTip text="Every problem not fixed yet, one row per file and problem, longest waiting first. The owner is who has to act: the broker whose file it is, or the carrier for a file no broker sent." />
+          <InfoTip text="Every problem not fixed yet, one row per file and problem, longest waiting first. Owner = who must act: the file's broker, or the carrier if no broker sent it." />
           <div className="right">
             <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
               <span className="sub">Severity</span>

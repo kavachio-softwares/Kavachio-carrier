@@ -173,7 +173,9 @@ export default function RecentRuns() {
             card below keeps overflow:hidden for its rounded corners, which
             would otherwise clip the carrier dropdown. */}
         <div className="card" style={{ overflow: "visible", marginBottom: 14, padding: "14px 20px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          {/* flex-end: the dates carry a caption above them, so every control
+              shares one bottom line. */}
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 14, flexWrap: "wrap" }}>
             <div className="search">
               <Search className="ic" />
               <input placeholder="Search by file, broker, program or contract…" value={q}
@@ -189,13 +191,17 @@ export default function RecentRuns() {
                   onClick={() => setResult(f.v)}>{f.label}</button>
               ))}
             </div>
-            <div className="fbar-daterange">
-              <input type="date" className="fbar-date" aria-label="Processed from date"
-                value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
-              <span className="sub">–</span>
-              <input type="date" className="fbar-date" aria-label="Processed to date"
-                value={dateTo} onChange={e => setDateTo(e.target.value)} />
-            </div>
+            {/* Named after the column it filters, so the two boxes say what they are. */}
+            <label className="fbar-field" style={{ minWidth: 0 }}>
+              <span className="sub">Processed between</span>
+              <span className="fbar-daterange">
+                <input type="date" className="fbar-date" aria-label="Processed from date"
+                  value={dateFrom} max={dateTo || undefined} onChange={e => setDateFrom(e.target.value)} />
+                <span className="sub">–</span>
+                <input type="date" className="fbar-date" aria-label="Processed to date"
+                  value={dateTo} min={dateFrom || undefined} onChange={e => setDateTo(e.target.value)} />
+              </span>
+            </label>
             {filtersActive && (
               <span className="linkish" style={{ marginLeft: "auto" }}
                 onClick={() => { setQ(""); setCarrierIds([]); setResult(""); setDateFrom(""); setDateTo(""); }}>

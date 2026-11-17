@@ -25,6 +25,10 @@ export type BrokerPerf = {
   id: number; name: string;
   runs: number; clean: number; flagged: number; not_checked: number;
   last_run_at: string | null;
+  /** On the picked programme but sent nothing in the period: listed so the
+   *  card names who is quiet. `last_run_at` is then its last file ever on
+   *  that programme, or null if it never sent one. */
+  no_files?: boolean;
   work: Work;
 };
 
@@ -54,83 +58,79 @@ const DAYS = 30;
  * Every number is also written out on the row, so colour is never the only
  * way to read it.
  */
-export default function BrokerPerformance({ mga, programme, onClearProgramme }: {
+export default function BrokerPerformance({ mga, programme, period, periodLabel }: {
   mga: string;
   /** Picked on the Programme Overview: only this programme's files count. */
   programme?: SelectedProgramme | null;
-  onClearProgramme?: () => void;
+  /** The dashboard's period pick (YYYY-MM, YYYY or all) and its name. Without
+   *  one the card keeps its own window, the last DAYS days. */
+  period?: string;
+  periodLabel?: string;
 }) {
   const [rows, setRows] = useState<BrokerPerf[] | null>(null);
   const [activeTotal, setActiveTotal] = useState(0);
   const programId = programme?.id;
+  // How the card names its window: the dashboard's pick, or its own.
+  const when = periodLabel ?? `Last ${DAYS} days`;
+  const inWhen = periodLabel == null ? `in the last ${DAYS} days`
+    : periodLabel === "All years" ? "so far" : `in ${periodLabel}`;
+  const sent = rows?.filter(r => !r.no_files) ?? [];
 
   useEffect(() => {
     let live = true;
     setRows(null);
     api.get<{ items: BrokerPerf[]; active_total: number }>(
       "/dashboard/broker-performance",
-      { params: { mga, days: DAYS, limit: 5, program_id: programId } })
+      { params: { mga, days: DAYS, limit: 5, program_id: programId, period } })
       .then(r => { if (live) { setRows(r.data.items); setActiveTotal(r.data.active_total); } })
       .catch(() => { if (live) { setRows([]); setActiveTotal(0); } });
     return () => { live = false; };
-  }, [mga, programId]);
-
-  // Which programme the card is narrowed to, and the way back to all of them.
-  const scope = programme && (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, marginBottom: 12 }}>
-      <span className="badge b-info"><span className="d" />{programme.name}</span>
-      {onClearProgramme && (
-        <button type="button" className="linkish"
-          style={{ background: "none", border: 0, cursor: "pointer", padding: 0, fontSize: 12.5 }}
-          onClick={onClearProgramme}>Show all programmes</button>
-      )}
-    </div>
-  );
+  }, [mga, programId, period]);
 
   return (
     <ChartCard
       title="Broker Performance"
       info={<InfoTip text={
-        `The broker companies that sent files most recently, over the last ${DAYS} days. `
-        + "Each bar is every issue on every file that broker sent: green is the "
-        + "share resolved, amber the share still open — the same numbers as those "
-        + "files' exception screens, or one grey bar when nothing was flagged. Bars "
-        + "are not compared with each other; the counts on the right are. Click a "
-        + "broker for its files, split by programme. Pick a programme in the "
-        + "Programme Overview to see only its brokers."} />}
+        `Broker companies that sent files most recently, ${inWhen}. Green = share of issues resolved, amber = still open, grey = nothing flagged.\n`
+        + (programme ? `${programme.name}'s brokers that sent nothing show "No file received".\n` : "")
+        + "Click a broker to see its files by programme."} />}
     >
-      {scope}
       {rows === null ? (
         <div className="empty">Loading…</div>
       ) : rows.length === 0 ? (
         <div className="empty">
           {programme
-            ? `No broker has sent a file for ${programme.name} in the last ${DAYS} days.`
-            : `No broker company has sent a file in the last ${DAYS} days.`}
+            ? `${programme.name} has no broker yet.`
+            : `No broker company has sent a file ${inWhen}.`}
         </div>
       ) : (
         <>
           <div style={{ display: "flex", gap: 16, fontSize: 12, color: "var(--p-muted)", marginBottom: 14 }}>
-            <Swatch color={RESOLVED} label="Resolved" />
-            <Swatch color={OPEN} label="Still open" />
+            {/* No key when no broker sent a file: there are no bars to read. */}
+            {sent.length > 0 && <>
+              <Swatch color={RESOLVED} label="Resolved" />
+              <Swatch color={OPEN} label="Still open" />
+            </>}
             {/* Only when a grey bar is on the chart — a key for something not
                 drawn reads as a missing series. */}
             {rows.some(r => r.work.files > 0 && r.work.exceptions === 0) && (
               <Swatch color={CLEAN} label="Clean file" />
             )}
             <span style={{ marginLeft: "auto", color: "var(--p-faint)" }}>
-              Most recent {rows.length} · last {DAYS} days
+              {programme
+                ? `${sent.length} of ${rows.length} sent files · ${when}`
+                : `Most recent ${rows.length} · ${when}`}
             </span>
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            {rows.map(r => <Row key={r.id} r={r} />)}
+            {rows.map(r => <Row key={r.id} r={r} when={when} inWhen={inWhen} />)}
           </div>
 
-          {activeTotal > rows.length && (
+          {activeTotal > sent.length && (
             <div style={{ textAlign: "right", marginTop: 14, fontSize: 13 }}>
               <span style={{ color: "var(--p-faint)" }}>
-                {activeTotal - rows.length} more active {activeTotal - rows.length === 1 ? "broker" : "brokers"} ·{" "}
+                {activeTotal - sent.length} more active {activeTotal - sent.length === 1 ? "broker" : "brokers"} ·{" "}
               </span>
               <Link className="linkish" to="/brokers">All brokers →</Link>
             </div>
@@ -141,12 +141,35 @@ export default function BrokerPerformance({ mga, programme, onClearProgramme }: 
   );
 }
 
-function Row({ r }: { r: BrokerPerf }) {
+const monthYear = (iso: string) => new Date(iso).toLocaleDateString("en-GB",
+  { month: "long", year: "numeric" });
+
+function Row({ r, when, inWhen }: { r: BrokerPerf; when: string; inWhen: string }) {
   const w = r.work;
+  if (r.no_files) {
+    const last = r.last_run_at ? `Last file: ${monthYear(r.last_run_at)}` : "Has never sent a file";
+    return (
+      <div title={`${r.name}\nNo file received ${inWhen}\n${last}`}
+        style={{ display: "grid", gridTemplateColumns: "minmax(120px, 180px) 1fr 130px",
+                 alignItems: "center", gap: 14 }}>
+        <span style={{ minWidth: 0 }}>
+          <span style={{ display: "block", fontSize: 13, fontWeight: 600, color: "var(--p-ink)",
+                         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {r.name}
+          </span>
+          <span style={{ display: "block", fontSize: 11.5, color: "var(--p-faint)" }}>0 files</span>
+        </span>
+        <span style={{ fontSize: 12.5, color: "var(--p-warn-ink)", fontWeight: 600 }}>
+          No file received {inWhen}
+        </span>
+        <span style={{ fontSize: 11.5, textAlign: "right", color: "var(--p-faint)" }}>{last}</span>
+      </div>
+    );
+  }
   const cleanPct = r.runs ? Math.round((r.clean / r.runs) * 100) : 0;
   const tip = [
     r.name,
-    `Last ${DAYS} days: ${r.runs} ${r.runs === 1 ? "file" : "files"} — ${r.clean} clean, `
+    `${when}: ${r.runs} ${r.runs === 1 ? "file" : "files"} — ${r.clean} clean, `
       + `${r.flagged} with issues` + (r.not_checked ? `, ${r.not_checked} not checked` : ""),
     w.exceptions
       ? `${w.exceptions} issues across ${w.files} ${w.files === 1 ? "file" : "files"}`

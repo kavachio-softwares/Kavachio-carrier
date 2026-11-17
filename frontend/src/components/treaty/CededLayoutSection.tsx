@@ -183,7 +183,7 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
     <div>
       <div className="fh" style={{ marginTop: 0 }}>
         Output columns
-        <InfoTip text="Build it from the treaty's own terms, upload the Excel or CSV you already send, or create one from the Lloyd's risk sheet — the same choices as a broker's output template. Every Excel file also has a summary sheet with the reinsurer's share and totals." />
+        <InfoTip text="Build the columns from the treaty's terms, upload the Excel or CSV you already send, or start from the Lloyd's risk sheet. Excel files also get a summary sheet." />
       </div>
       <div className="seg" style={{ marginBottom: 12, flexWrap: "wrap" }}>
         {SOURCES.map(s => (

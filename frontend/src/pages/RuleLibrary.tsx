@@ -104,7 +104,7 @@ export default function RuleLibrary() {
             <h2>
               {platform ? "Platform Generic Rules" : "Generic Rules"}{" "}
               <InfoTip text={platform
-                ? "Generic checks that run on every broker's BDX files. Changes here affect all tenants."
+                ? "Generic checks that run on every broker's BDX files. Changes here affect every carrier."
                 : canManage
                   ? "Your own generic rules. They run on all your BDX files, alongside Kavachio's "
                     + "standard checks, and only your team can see them."

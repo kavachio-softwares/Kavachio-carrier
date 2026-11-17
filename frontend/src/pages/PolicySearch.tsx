@@ -139,7 +139,7 @@ export default function PolicySearch() {
                 {" "}· {data.drill.files} {data.drill.files === 1 ? "file" : "files"}
                 {data.drill.rows != null && <>, {data.drill.rows.toLocaleString("en-GB")} {data.drill.rows === 1 ? "row" : "rows"}</>}
               </span>}
-              <InfoTip text="Only the rows this number was counted from. Premium and bordereaux on each line come from those rows only. A row with no policy number is not a policy, so it is not listed." />
+              <InfoTip text="Only the rows this number was counted from; each line's premium and bordereaux come from them. Rows with no policy number are not listed." />
             </span>
             <span className="linkish" style={{ marginLeft: "auto" }} onClick={showAll}>Show all policies</span>
           </div>
@@ -196,7 +196,8 @@ export default function PolicySearch() {
             </label>
 
             <label className="fbar-field">
-              <span className="sub">From / to</span>
+              <span className="sub">
+                {(DATE_FIELDS.find(d => d.key === dateField)?.label ?? "Date")} between</span>
               <span className="fbar-daterange">
                 <input type="date" className="fbar-date" aria-label="From date"
                   value={from} max={to || undefined} onChange={e => setFrom(e.target.value)} />

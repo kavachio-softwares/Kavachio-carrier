@@ -149,10 +149,8 @@ const NEVER_FILLED = "Kavachio never fills in a missing figure or counts it as 0
 // total files are handled by the setup's ITD setting (backend itd.py), which is
 // off unless switched on — hence the second note.
 const HOW_TOTALS_WORK =
-  "Each month counts only what that month's file contains; Quarter and Year add the months together. "
-  + "Every amount is the sum of the rows' own amounts; the rates are total commission (or brokerage) ÷ total gross premium. "
-  + "Running totals: some brokers send files that repeat earlier months. Kavachio then keeps only the new rows and the change in each amount, "
-  + "but only when that broker's Bordereau Setup has running-total handling switched on. With it off, earlier months' amounts are counted again.";
+  "Each month counts only its own file; Quarter and Year add the months. Rates = total commission (or brokerage) ÷ total gross premium.\n"
+  + "If a broker's file repeats earlier months, those are counted again unless running totals are switched on in its Bordereau Setup.";
 const ROWS_TAB = "The Bordereau rows tab gives every row's reason.";
 
 function fileName(f: FileRef): string {
@@ -183,13 +181,13 @@ function figureWhy(w: MetricWhy | undefined, title: string, reviewOnly = false):
   }
   if (reviewOnly) return out;
   if (w.no_column.length) {
-    out.push(`Not in the bordereau: ${fileList(w.no_column)} ${w.no_column.length === 1 ? "has" : "have"} no column for ${title}.`);
+    out.push(`${fileList(w.no_column)} ${w.no_column.length === 1 ? "has" : "have"} no ${title} column.`);
   }
   if (w.switched_off.length) {
-    out.push(`${fileList(w.switched_off)}: the ${title} column is switched off in the output template, so it is never written.`);
+    out.push(`${fileList(w.switched_off)}: ${title} is switched off in the output template.`);
   }
   for (const f of w.empty.slice(0, 2)) {
-    out.push(`${fileName(f)} has a ${title} column, but it was left empty on ${rowsLeft(f)}.`);
+    out.push(`${fileName(f)} left ${title} empty on ${rowsLeft(f)}.`);
   }
   if (w.empty.length > 2) out.push(`${w.empty.length - 2} more files left it empty too.`);
   return out;
@@ -206,9 +204,8 @@ function netMismatchText(m: NetMismatch | null | undefined): string | undefined 
   const one = ex ? `${fileName(ex)}, row ${ex.row}, policy ${ex.policy}: ${amount(ex.expected)} expected, ${amount(ex.sent)} sent` : "";
   const head = m.rows === 1
     ? `1 row's net premium is not gross − commission: ${one}.`
-    : `${m.rows} rows' net premium is not gross − commission (${amount(Math.abs(m.gap))} ${m.gap > 0 ? "more" : "less"} than expected in all) — e.g. ${one}.`;
-  return `${head} No brokerage, fees or taxes on ${m.rows === 1 ? "that row explain" : "those rows explain"} the gap. `
-    + "The total is shown as the bordereaux sent it; nothing is changed or recalculated.";
+    : `${m.rows} rows' net premium is not gross − commission (${amount(Math.abs(m.gap))} ${m.gap > 0 ? "more" : "less"} in all), e.g. ${one}.`;
+  return `${head}\nNo brokerage, fees or taxes explain ${m.rows === 1 ? "it" : "them"}. The total is shown as sent.`;
 }
 
 /** The ⓘ text beside a total no row has: why it is missing or needs review. */
@@ -217,7 +214,7 @@ function missingWhy(group: CurrencyGroup, key: MetricKey): string {
   const parts: string[] = [];
   const amount = RATE_AMOUNT[key];
   if (amount) {
-    parts.push(`Worked out as total ${TITLE[amount].toLowerCase()} ÷ total gross premium, over the rows that carry both; no row this period has both.`);
+    parts.push(`Total ${TITLE[amount].toLowerCase()} ÷ total gross premium, and no row this period has both.`);
     parts.push(...figureWhy(why[amount], TITLE[amount]));
     parts.push(...figureWhy(why.gross_premium, TITLE.gross_premium));
     parts.push(...figureWhy(why[key], TITLE[key], true));
@@ -290,8 +287,8 @@ export default function FinancialSummary() {
           <div className="t">
             <h2>Financial Summary
               <InfoTip text={broker
-                ? "Premium, commission and the other money in the bordereaux you have sent, by programme, for a period against the period before it and the same period last year."
-                : "Premium, commission and the other money in the bordereaux your brokers have sent, by programme and by broker, for a period against the period before it and the same period last year."} />
+                ? "Premium, commission and other money in the bordereaux you sent, by programme, against the previous period and the same period last year."
+                : "Premium, commission and other money in your brokers' bordereaux, by programme and broker, against the previous period and the same period last year."} />
             </h2>
           </div>
           <div className="actions">
@@ -385,7 +382,7 @@ export default function FinancialSummary() {
                 {" "}· compared with {periodName(w?.previous?.period)} ({fileCount(w?.previous?.files)})
                 {basis !== "year" && <> and {periodName(w?.last_year?.period)} ({fileCount(w?.last_year?.files)})</>}
               </span>
-              <InfoTip text="Only the latest version of each file counts: an earlier version for the same month is replaced, not added, and an identical copy is counted once. A missing figure is never counted as 0, and different currencies are never added together." />
+              <InfoTip text="Only each file's latest version counts, and an identical copy counts once. A missing figure is never counted as 0; currencies are never added together." />
             </div>
             {/* How the adding up works, and the running-total (ITD) catch —
                 asked for on screen so a reader can trust or question a total. */}
@@ -662,7 +659,7 @@ function TypeButtons({ types, value, onChange }: {
                   padding: "12px 20px", borderBottom: "1px solid var(--p-border)" }}>
       <span className="sub" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
         Transaction types
-        <InfoTip text="As each bordereau wrote them; click one to show only those rows. Cancellations and return premiums (CN, Cancellation, flat cancellations, Endorsement - Return Premium) are counted as negative; every other row keeps the sign it was sent with. Codes Kavachio does not know are shown as sent, marked “not recognised”." />
+        <InfoTip text={"As each bordereau wrote them; click one to show only those rows.\nCancellations and return premiums count as negative. Unknown codes are marked “not recognised”."} />
       </span>
       <span className="seg sm">
         {types.map(t => {

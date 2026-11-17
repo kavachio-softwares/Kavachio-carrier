@@ -338,7 +338,7 @@ function Body({ r }: { r: Report }) {
             <h3>Programmes</h3>
             <InfoTip text={daily
               ? "Today's changes: programmes added today, whose contract went live today, and whose term ended yesterday so they went into run-off today."
-              : "Programmes that existed on that day, each term judged against it. A contract's past status is not kept, so each programme uses its contract's status today."} />
+              : "Programmes that existed on that day. Each shows its contract's status today, as past statuses are not kept."} />
             <Link className="linkish right" to="/programs" style={{ fontSize: 13, whiteSpace: "nowrap" }}>Open Programmes</Link>
           </div>
           {/* Three counts side by side, split by thin lines — no boxes inside the card. */}
@@ -362,7 +362,7 @@ function Body({ r }: { r: Report }) {
       <div className="card" style={{ flex: "2 1 480px", minWidth: 0 }}>
         <div className="card-h">
           <h3>{TREND_TITLE[r.trend[0]?.unit ?? "day"]}</h3>
-          <InfoTip text="Errors found and files clean first time, inside the dates the report covers: hour by hour for one day, day by day up to 31 days, week by week up to 26 weeks, month by month beyond that. Times are UTC." />
+          <InfoTip text="Errors found and files clean first time over the report's dates, by hour, day, week or month depending on its length. Times are UTC." />
         </div>
         <div style={{ height: 260, padding: "8px 16px 16px" }}>
           <ResponsiveContainer width="100%" height="100%">
@@ -391,9 +391,8 @@ function Body({ r }: { r: Report }) {
           <span className="badge b-crit" style={{ padding: "2px 8px" }}>
             {plural(r.problems.escalations, daily ? "new escalation" : "escalation")}</span>
           <InfoTip text={daily
-            ? "What became an escalation today: a late file marked delinquent, a dispute raised, or anything that passed its due date. Each says whether it is still open."
-            : "Late files marked delinquent, disputes waiting for your decision, and anything past its due date"
-              + ", as they stood at the end of that day. Contracts waiting for a signature count only when the period runs to today, because when one started waiting is not kept."} />
+            ? "New escalations today: late files marked delinquent, disputes raised, or anything past its due date. Each shows whether it is still open."
+            : "Late files marked delinquent, disputes waiting for your decision, and anything past its due date, as at the end of that day.\nContracts awaiting signature count only when the period runs to today."} />
           {!daily && <span className="sub">{asAt}</span>}
           {/* Hidden 17 Nov 2026 with the Open Problems page.
           <Link className="linkish right" to="/open-problems" style={{ fontSize: 13 }}>Open Problems</Link> */}
@@ -510,8 +509,7 @@ function Scorecard({ r }: { r: Report }) {
     <div className="card" style={{ marginBottom: 18 }}>
       <div className="card-h">
         <h3>Scorecard</h3>
-        <InfoTip text={"Each " + kind + " in one line: premium, files processed, files on time, files clean first time, and files late or still missing. "
-          + "Most late or missing first. ▲ / ▼ show the change since the period before, in percentage points. Click a late or missing number to see which files."} />
+        <InfoTip text={"Each " + kind + "'s premium and files: processed, on time, clean first time, late or missing. Most late or missing first.\n▲ / ▼ = change since the period before. Click a late or missing number to see the files."} />
         <span className="seg" style={{ marginLeft: "auto" }}>
           {(["broker", "programme"] as const).map(k => (
             <button key={k} type="button" className={kind === k ? "on" : ""} onClick={() => { setKind(k); setOpen(null); }}>
@@ -602,7 +600,7 @@ function ContractsCard({ r, asAt }: { r: Report; asAt: string }) {
         <div>
           <div className="card-h" style={{ borderBottom: "none" }}>
             <h4 style={{ margin: 0, fontSize: 14 }}>Premium cap used</h4>
-            <InfoTip text={"Premium written across each contract's whole term so far, against the most premium the contract allows. Near cap from 85%."
+            <InfoTip text={"Premium written so far in each contract's term, against its premium cap. Near cap from 85%."
               + (daily ? " Only contracts that sent files today." : "")} />
             {(c.over_cap > 0 || c.near_cap > 0) && <span className="sub">
               {[c.over_cap ? `${c.over_cap} over cap` : "", c.near_cap ? `${c.near_cap} near cap` : ""].filter(Boolean).join(" · ")}</span>}

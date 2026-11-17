@@ -155,7 +155,7 @@ export default function OpenProblems() {
             <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: ".04em", textTransform: "uppercase",
                           color: "var(--p-info-ink)" }}>
               Today at a glance
-              {data && <InfoTip text={`A problem is overdue once its due date has passed. Most are due ${plural(data.target_days, "day")} after they started — the fix target set on Exception Resolution. A late file is due on its calendar due date.`} />}
+              {data && <InfoTip text={`Overdue means past its due date: ${plural(data.target_days, "day")} after it started (your fix target), or the calendar due date for a late file.`} />}
             </div>
             <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.55, color: "var(--p-ink)" }}>
               {first || !data ? "Loading…" : summaryLine(data, filtered)}
@@ -187,7 +187,7 @@ export default function OpenProblems() {
           <div className="card-h">
             <Users2 className="ci" />
             <h3>Workload</h3>
-            <InfoTip text="Who has to act on each open problem: the broker company, or you (Carrier) for disputes to decide, files to release and contracts to sign. Pick a row to see only theirs." />
+            <InfoTip text="Who must act on each open problem: the broker, or you for disputes, held files and signatures. Pick a row to see only theirs." />
             <div className="right"><span className="sub">Most overdue first</span></div>
           </div>
           <div className="tbl-wrap">

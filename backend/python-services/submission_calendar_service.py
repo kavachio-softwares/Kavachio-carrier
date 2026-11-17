@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 from calendar import monthrange
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -2110,9 +2111,89 @@ def _superseded_kinds(session, cids) -> dict:
     return superseded_kinds(session, cids)
 
 
+# How far a broker on a programme is from owing files — the deadlines table's
+# Action column (NextStep) in the same order, so the filter and the button agree.
+BOARD_STAGES = ("no_broker", "no_contract", "contract_unsigned", "setup_missing", "ready")
+
+
+def _schedule_stage(b: dict) -> str:
+    if b.get("contract_id") is None:
+        return "no_contract"
+    if not b.get("contract_settled"):
+        return "contract_unsigned"
+    if not b.get("setup_live"):
+        return "setup_missing"
+    return "ready"
+
+
+@dataclass(frozen=True)
+class BoardFilters:
+    """What the carrier narrowed the Bordereau Calendar's two TABLES to.
+
+    Only the tables: the headline counts, the late-file cases and the list
+    "Remind on late files" sends to stay the whole month's, so a filter can
+    never make a late file look dealt with.
+
+      q            programme, broker, contract (and carrier) name, any part
+      program_id   one programme
+      broker_id    one broker
+      statuses     month rows by arrival status (derive_status values)
+      cases        month rows by case state; "none" = no case open
+      frequencies  programmes by reporting frequency; "not_set"
+      stages       brokers on a programme by BOARD_STAGES
+    """
+    q: str = ""
+    program_id: Optional[int] = None
+    broker_id: Optional[int] = None
+    statuses: frozenset = frozenset()
+    cases: frozenset = frozenset()
+    frequencies: frozenset = frozenset()
+    stages: frozenset = frozenset()
+
+    @property
+    def narrows_rows(self) -> bool:
+        return bool(self.q.strip() or self.program_id is not None or self.broker_id is not None
+                    or self.statuses or self.cases)
+
+    @property
+    def narrows_schedules(self) -> bool:
+        return bool(self.q.strip() or self.program_id is not None or self.broker_id is not None
+                    or self.frequencies or self.stages)
+
+
+def board_filter_options(session, tenant_id: Optional[int]) -> dict:
+    """The programme and broker choices for the board's filters, from the whole
+    calendar rather than the filtered one — picking a broker must not shrink
+    the list it was picked from.
+
+    Carrier and platform boards only. A broker's own board must never be given
+    this: it would name the carrier's other programmes and brokers."""
+    prog_q = session.query(Program.id, Program.name)
+    if tenant_id is not None:
+        prog_q = prog_q.filter(Program.tenant_id == tenant_id)
+    progs = prog_q.all()
+    pids = [pid for pid, _ in progs]
+    bids: set = set()
+    if pids:
+        bids |= {b for (b,) in session.query(ProgramBroker.broker_party_id).filter(
+            ProgramBroker.program_id.in_(pids),
+            func.coalesce(ProgramBroker.status, "active") == "active").distinct().all()}
+        bids |= {b for (b,) in session.query(ExpectedSubmission.broker_party_id).filter(
+            ExpectedSubmission.program_id.in_(pids)).distinct().all()}
+    bids.discard(None)
+    names = _party_names(session, list(bids))
+    return {
+        "programmes": sorted(({"id": pid, "name": name or f"Programme {pid}"}
+                              for pid, name in progs), key=lambda p: p["name"].lower()),
+        "brokers": sorted(({"id": b, "name": names.get(b) or f"Broker {b}"} for b in bids),
+                          key=lambda b: b["name"].lower()),
+    }
+
+
 def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = None,
                    today: Optional[date] = None, broker_id: Optional[int] = None,
-                   program_ids: Optional[list[int]] = None) -> dict:
+                   program_ids: Optional[list[int]] = None,
+                   filters: Optional[BoardFilters] = None) -> dict:
     """The carrier's Bordereau Calendar for one due-month.
 
     Returns the rows (one per programme x broker x period due that month), the
@@ -2134,8 +2215,23 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
     pass the programmes from its active ProgramBroker links, so a period on a
     programme it was taken off cannot appear — the same isolation rule as
     broker_bordereau_rows.
+
+    `filters` (BoardFilters) narrows the two tables and nothing else. With any
+    row filter set, `late_rows` carries the month's late files in full — what
+    "Remind on late files" sends — since `rows` may no longer hold them all.
+    `rows_total` / `schedules_total` are the counts before filtering.
+
+    Only the shown month's rows are loaded (the month picker reads due dates
+    alone), and the per-row and per-programme lookups run only for what a
+    filter keeps.
     """
     today = today or datetime.utcnow().date()
+    f = filters or BoardFilters()
+    needle = f.q.strip().lower()
+
+    def _has(*texts) -> bool:
+        return any(needle in (t or "").lower() for t in texts)
+
     prog_q = session.query(Program)
     sched_q = session.query(SubmissionSchedule)
     rows_q = session.query(ExpectedSubmission)
@@ -2151,13 +2247,42 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
         rows_q = rows_q.filter(ExpectedSubmission.program_id.in_(program_ids))
     programs = {p.id: p for p in prog_q.all()}
     schedules = {s.program_id: s for s in sched_q.all()}
-    all_rows = rows_q.order_by(ExpectedSubmission.due_date.asc()).all()
     if broker_id is not None:
         # A broker-narrowed board still needs every programme it could be due
         # on, not just the ones with a broker-matching row this month — the
         # "Bordereau deadlines" table below reads from `programs` directly.
-        prog_ids = {e.program_id for e in all_rows}
+        prog_ids = {pid for (pid,) in rows_q.with_entities(
+            ExpectedSubmission.program_id).distinct().all()}
         programs = {pid: p for pid, p in programs.items() if pid in prog_ids}
+
+    # Every due-month there is, for the month picker — read as dates alone.
+    # The rows themselves are loaded for the month shown, not for all of them.
+    months = sorted({_month_key(d) for (d,) in rows_q.with_entities(
+        ExpectedSubmission.due_date).filter(ExpectedSubmission.due_date.isnot(None))
+        .distinct().all()}, reverse=True)
+    # ALL_MONTHS counts every period at once, and a bare year the twelve months
+    # of it — the dashboard's "All Years" and "All Months" picks. No screen
+    # sends either by default, so every other caller is unchanged.
+    every_month = month == ALL_MONTHS
+    whole_year = _is_year(month)
+
+    if not every_month and not whole_year and month not in months:
+        # Default to the month being worked on: the current one if it has
+        # anything in it, otherwise the most recent month that does — so the
+        # screen opens on real work rather than on an empty heading.
+        month = _month_key(today) if _month_key(today) in months else (
+            months[0] if months else _month_key(today))
+
+    shown_q = rows_q
+    if whole_year:
+        y = int(month)
+        shown_q = shown_q.filter(ExpectedSubmission.due_date >= date(y, 1, 1),
+                                 ExpectedSubmission.due_date <= date(y, 12, 31))
+    elif not every_month:
+        y, m = (int(x) for x in month.split("-"))
+        shown_q = shown_q.filter(ExpectedSubmission.due_date >= date(y, m, 1),
+                                 ExpectedSubmission.due_date <= date(y, m, monthrange(y, m)[1]))
+    all_rows = shown_q.order_by(ExpectedSubmission.due_date.asc(), ExpectedSubmission.id.asc()).all()
 
     # Cross-tenant only: which carrier each row/programme belongs to, so the
     # platform admin's table can say. `tenant_id` already pins single-tenant
@@ -2168,65 +2293,53 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
         for t in session.query(Tenant).filter(Tenant.id.in_(tids)).all():
             carrier_name[t.id] = t.legal_name or (t.tenant_name or "").title() or f"Carrier {t.id}"
 
-    months = sorted({_month_key(e.due_date) for e in all_rows if e.due_date},
-                    reverse=True)
-    # ALL_MONTHS counts every period at once, and a bare year the twelve months
-    # of it — the dashboard's "All Years" and "All Months" picks. No screen
-    # sends either by default, so every other caller is unchanged.
-    every_month = month == ALL_MONTHS
-    whole_year = _is_year(month)
-
-    def shown(e) -> bool:
-        k = _month_key(e.due_date)
-        if every_month:
-            return True
-        if whole_year:
-            return bool(k) and k.startswith(f"{month}-")
-        return k == month
-
-    if not every_month and not whole_year and month not in months:
-        # Default to the month being worked on: the current one if it has
-        # anything in it, otherwise the most recent month that does — so the
-        # screen opens on real work rather than on an empty heading.
-        month = _month_key(today) if _month_key(today) in months else (
-            months[0] if months else _month_key(today))
-
-    names = _party_names(session, [e.broker_party_id for e in all_rows])
-    contacts = broker_contacts(session, [e.broker_party_id for e in all_rows])
-    latest_sent = _latest_release_state(
-        session, [e.id for e in all_rows if shown(e)])
-    newest = _newest_files(session, [e.id for e in all_rows
-                                     if shown(e) and e.version_count])
-    contract_of = _row_contracts(session, [e for e in all_rows if shown(e)])
-    # A period answers to its NEWEST file's contract: the first file may have
-    # been checked against a contract that has since been replaced.
-    for exp_id, f in newest.items():
-        if f.get("contract_id"):
-            contract_of[exp_id] = (f["contract_id"], f["contract_name"])
-    kinds = _superseded_kinds(session, {c for c, _ in contract_of.values()})
-    # The four ways a due file can stand (MOPR 39.1): arrived on time, arrived
-    # late, overdue (still waited for) and never (the period closed empty).
-    rows, counts = [], {"due": 0, "on_time": 0, "late": 0, "overdue": 0,
-                        "never": 0, "released": 0, "unsent_correction": 0}
-    # MOPR 39.2 — the same month's files by where their case stands.
-    case_counts = {s: 0 for s in (CASE_OVERDUE, DELINQUENT, IN_DISPUTE,
-                                  EXTENDED, RESOLVED)}
-    programmes_in_month = set()
-
-    for e in all_rows:
-        if not shown(e):
-            continue
+    def _status(e) -> str:
         sch = schedules.get(e.program_id)
         soon = sch.soon_window_days if sch and sch.soon_window_days is not None else DEFAULT_SOON_WINDOW_DAYS
-        status = derive_status(e.due_date, today, soon, e.received_at, e.closes_on)
-        unassigned = e.broker_party_id is None
-        # Stops counting once the carrier settled it (submission_case.days_over).
-        days_over = case_days_over(e, today)
+        return derive_status(e.due_date, today, soon, e.received_at, e.closes_on)
+
+    status_of = {e.id: _status(e) for e in all_rows}
+    late = {e.id for e in all_rows
+            if e.broker_party_id is not None and status_of[e.id] in ("overdue", "never_arrived")}
+
+    def _picked(e) -> bool:
+        """Every row filter but the search, which needs the contract name."""
+        if f.program_id is not None and e.program_id != f.program_id:
+            return False
+        if f.broker_id is not None and e.broker_party_id != f.broker_id:
+            return False
+        # A row with no broker owes nothing: it has no arrival status or case.
+        if f.statuses and (e.broker_party_id is None or status_of[e.id] not in f.statuses):
+            return False
+        if f.cases and (e.broker_party_id is None or (e.case_state or "none") not in f.cases):
+            return False
+        return True
+
+    # The rows worth describing: those the filters keep, plus the late ones the
+    # reminder button still needs. The lookups below run for these only.
+    keep = [e for e in all_rows if _picked(e) or (f.narrows_rows and e.id in late)]
+
+    names = _party_names(session, [e.broker_party_id for e in keep])
+    contacts = broker_contacts(session, [e.broker_party_id for e in keep])
+    # Whether each period's newest version went out — every row, for the
+    # "unsent correction" count.
+    latest_sent = _latest_release_state(session, [e.id for e in all_rows])
+    newest = _newest_files(session, [e.id for e in keep if e.version_count])
+    contract_of = _row_contracts(session, keep)
+    # A period answers to its NEWEST file's contract: the first file may have
+    # been checked against a contract that has since been replaced.
+    for exp_id, nf in newest.items():
+        if nf.get("contract_id"):
+            contract_of[exp_id] = (nf["contract_id"], nf["contract_name"])
+    kinds = _superseded_kinds(session, {c for c, _ in contract_of.values()})
+
+    def _row(e, status: str) -> dict:
+        prog = programs.get(e.program_id)
+        cid, cname = contract_of.get(e.id) or (None, None)
         days_late = ((e.received_at - e.due_date).days
                      if e.received_at and e.due_date and e.received_at > e.due_date
                      else None)
-        prog = programs.get(e.program_id)
-        rows.append({
+        return {
             "id": e.id,
             "program_id": e.program_id,
             "program_name": prog.name if prog else f"Programme {e.program_id}",
@@ -2234,16 +2347,16 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             "broker_party_id": e.broker_party_id,
             "broker_name": names.get(e.broker_party_id),
             # The contract this period answers to (see _row_contracts).
-            "contract_id": (contract_of.get(e.id) or (None, None))[0],
-            "contract_name": (contract_of.get(e.id) or (None, None))[1],
+            "contract_id": cid,
+            "contract_name": cname,
             # That contract has since been replaced (renewed, or a new
             # contract uploaded for the programme and broker).
-            "contract_replaced": kinds.get((contract_of.get(e.id) or (None, None))[0]) == "replaced",
-            "contract_renewed": kinds.get((contract_of.get(e.id) or (None, None))[0]) == "renewed",
+            "contract_replaced": kinds.get(cid) == "replaced",
+            "contract_renewed": kinds.get(cid) == "renewed",
             # Files for this period under any OTHER contract — a replaced
             # one's history, kept and shown in View Versions.
             "other_contract_files": (newest.get(e.id) or {}).get("other_contract_files", 0),
-            "unassigned": unassigned,
+            "unassigned": e.broker_party_id is None,
             "period": e.period,
             "due_date": e.due_date.isoformat() if e.due_date else None,
             # Still nothing after this day and the period is Never arrived.
@@ -2252,7 +2365,8 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             "latest_received_at": e.latest_received_at.isoformat()
                 if e.latest_received_at else None,
             "status": status,
-            "days_over": days_over,
+            # Stops counting once the carrier settled it (submission_case.days_over).
+            "days_over": case_days_over(e, today),
             "days_late": days_late,
             "released_at": e.released_at.isoformat() if e.released_at else None,
             "released_count": e.released_count or 0,
@@ -2269,7 +2383,29 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             "contacts": contacts.get(e.broker_party_id, []),
             # MOPR 39.2 — what is being done about it, if it is missing.
             "case": case_dict(e),
-        })
+        }
+
+    # The four ways a due file can stand (MOPR 39.1): arrived on time, arrived
+    # late, overdue (still waited for) and never (the period closed empty).
+    rows, late_rows = [], []
+    counts = {"due": 0, "on_time": 0, "late": 0, "overdue": 0,
+              "never": 0, "released": 0, "unsent_correction": 0}
+    # MOPR 39.2 — the same month's files by where their case stands.
+    case_counts = {s: 0 for s in (CASE_OVERDUE, DELINQUENT, IN_DISPUTE,
+                                  EXTENDED, RESOLVED)}
+    programmes_in_month = set()
+    keep_ids = {e.id for e in keep}
+
+    for e in all_rows:
+        status = status_of[e.id]
+        unassigned = e.broker_party_id is None
+        if e.id in keep_ids:
+            r = _row(e, status)
+            if _picked(e) and (not needle or _has(
+                    r["program_name"], r["broker_name"], r["contract_name"], r["carrier_name"])):
+                rows.append(r)
+            if f.narrows_rows and e.id in late:
+                late_rows.append(r)
         # Nobody owes anything on a programme with no broker, so it is counted
         # nowhere — including in "due this month".
         if unassigned:
@@ -2294,11 +2430,37 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             counts["unsent_correction"] += 1
 
     # How often each programme reports — the answer that fills everything above.
+    # Filters are applied cheapest first, so a programme they drop costs no
+    # more queries.
     cover_ends = program_cover_ends(session, list(programs.keys()))
     schedule_rows = []
     for pid, p in sorted(programs.items(), key=lambda kv: (kv[1].name or "").lower()):
+        if f.program_id is not None and pid != f.program_id:
+            continue
         sch = schedules.get(pid)
         resolved = resolve_for_schedule(session, sch)[0] if sch is not None else None
+        if f.frequencies and ((resolved.frequency if resolved else None) or "not_set") not in f.frequencies:
+            continue
+        bids = active_broker_ids(session, pid)
+        if broker_id is not None:
+            bids = [b for b in bids if b == broker_id]
+        if f.broker_id is not None:
+            bids = [b for b in bids if b == f.broker_id]
+            if not bids:
+                continue
+        brokers = _schedule_brokers(session, pid, bids, today)
+        if needle and not _has(p.name, carrier_name.get(p.tenant_id)):
+            # The programme's name does not match, so only the brokers that do.
+            brokers = [b for b in brokers if _has(b["broker_name"], b["contract_name"])]
+            if not brokers:
+                continue
+        if f.stages:
+            if brokers:
+                brokers = [b for b in brokers if _schedule_stage(b) in f.stages]
+                if not brokers:
+                    continue
+            elif "no_broker" not in f.stages:
+                continue
         nxt_q = session.query(ExpectedSubmission).filter(
             ExpectedSubmission.program_id == pid,
             ExpectedSubmission.received_at.is_(None),
@@ -2308,9 +2470,6 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
         if broker_id is not None:
             nxt_q = nxt_q.filter(ExpectedSubmission.broker_party_id == broker_id)
         nxt = nxt_q.order_by(ExpectedSubmission.due_date.asc()).first()
-        bids = active_broker_ids(session, pid)
-        if broker_id is not None:
-            bids = [b for b in bids if b == broker_id]
         schedule_rows.append({
             "program_id": pid,
             "program_name": p.name,
@@ -2322,7 +2481,7 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             "next_due": nxt.due_date.isoformat() if nxt and nxt.due_date else None,
             "broker_count": len(bids),
             # One entry per broker: contract, its end, next due date, setup.
-            "brokers": _schedule_brokers(session, pid, bids, today),
+            "brokers": brokers,
             # When the contract stops. This is what bounds the calendar, so the
             # screen can say why the deadlines end where they do instead of the
             # list simply running out.
@@ -2330,7 +2489,7 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
                              if cover_ends.get(pid) else None),
         })
 
-    return {
+    out = {
         "month": month,
         "months": months,
         "rows": rows,
@@ -2338,4 +2497,9 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
         "case_counts": case_counts,
         "programme_count": len(programmes_in_month),
         "schedules": schedule_rows,
+        "rows_total": len(all_rows),
+        "schedules_total": len(programs),
     }
+    if f.narrows_rows:
+        out["late_rows"] = late_rows
+    return out

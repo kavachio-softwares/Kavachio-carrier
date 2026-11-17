@@ -639,11 +639,11 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
         <span className="spacer">
           <select className="sel" value={range} aria-label="Received"
             onChange={e => setRange(e.target.value as Range)}>
-            <option value="all">All Time</option>
-            <option value="today">Today</option>
-            <option value="month">This Month</option>
-            <option value="30">Last 30 Days</option>
-            <option value="90">Last 90 Days</option>
+            <option value="all">Received: All Time</option>
+            <option value="today">Received: Today</option>
+            <option value="month">Received: This Month</option>
+            <option value="30">Received: Last 30 Days</option>
+            <option value="90">Received: Last 90 Days</option>
           </select>
           <select className="sel" aria-label="Status"
             value={STATUS_OPTIONS.some(([v]) => v === filter) ? filter : ""}

@@ -1429,6 +1429,7 @@ def _protected_bordereaux(s, tid: int, programme_ids: set[int]) -> dict:
 
 @router.get("/reinsurance/dashboard")
 def reinsurance_dashboard(period: Optional[str] = Query(None),
+                          program_id: Optional[int] = Query(None),
                           p: Principal = Depends(current_principal)):
     """The carrier's reinsurance at a glance, for the Home dashboard.
 
@@ -1544,7 +1545,7 @@ def reinsurance_dashboard(period: Optional[str] = Query(None),
             "bordereaux": bdx,
             # The reinsurance (ceded) bordereaux themselves.
             # Follows the dashboard's Monthly Activity month when one is given.
-            "ceded": __import__("ceded_routes").dashboard_counts(s, tid, period),
+            "ceded": __import__("ceded_routes").dashboard_counts(s, tid, period, program_id),
             # Treaties running out within 90 days, soonest first, and whether
             # a renewal has been raised for each — the dashboard's one list.
             "expiring": sorted(expiring, key=lambda e: e["days_left"]),

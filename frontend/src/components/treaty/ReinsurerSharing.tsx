@@ -125,9 +125,7 @@ export function TreatyFlowCard({ contractId, lifecycle, data, onData, canSign }:
         <ShieldCheck size={16} className="ci" />
         <h3>
           Treaty approval
-          <InfoTip text={"Each reinsurer on the treaty approves it, or asks for changes, on its "
-            + "private link. Once every one has approved, the terms are agreed and you sign. "
-            + "Then each reinsurer is asked to sign, and the treaty goes in force."} />
+          <InfoTip text="Each reinsurer approves on its private link. Once all have approved, you sign, then each reinsurer signs and the treaty goes in force." />
         </h3>
         {draft && (
           <div className="right">
@@ -252,10 +250,8 @@ export function ReinsurerSharing({ contractId, lifecycle, canSign }: {
               <span className="d" />
               {data.approvals.approved} of {data.approvals.total} approved
             </span>
-            <InfoTip text={"Each reinsurer approves the treaty on its private link. "
-              + "When every one has approved a draft, its terms are agreed. If you "
-              + "change the treaty or its wording, earlier approvals no longer count "
-              + "— send it again so they see the new version."} />
+            <InfoTip text={"Each reinsurer approves the treaty on its private link.\n"
+              + "If you change the treaty or its wording, send it again: earlier approvals no longer count."} />
           </div>
           <div className="tbl-wrap">
             <table>
@@ -300,10 +296,7 @@ export function ReinsurerSharing({ contractId, lifecycle, canSign }: {
         <div className="card-h">
           <ShieldCheck size={16} className="ci" />
           <h3>Share with a reinsurer</h3>
-          <InfoTip text={"Reinsurers are not on Kavachio. Each person you pick "
-            + "is emailed a private link and a one-time code. The link is "
-            + "read-only, shows only their own organisation's lines, and asks "
-            + "for the code again in every new browser session."} />
+          <InfoTip text="Each person you pick is emailed a private, read-only link and a one-time code. They see only their own organisation's lines." />
         </div>
         <div style={{ padding: "14px 20px" }}>
           {!data.can_share ? (

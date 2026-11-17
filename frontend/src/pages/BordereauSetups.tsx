@@ -176,9 +176,7 @@ export default function BordereauSetups() {
         <div className="page-head">
           <div className="t">
             <h2>Bordereau Setups
-              <InfoTip text={"Every bordereau setup: broker bordereaux (the files your "
-                + "brokers send you) and reinsurance bordereaux (the statements you "
-                + "send your reinsurers). Open one to review it."} />
+              <InfoTip text="All your setups: broker bordereaux (files brokers send you) and reinsurance bordereaux (statements you send reinsurers). Open one to review it." />
             </h2>
           </div>
           <div className="actions">{newSetup}</div>

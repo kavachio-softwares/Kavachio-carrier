@@ -142,8 +142,8 @@ export default function AuditLogs() {
           <div className="card-h" style={{ gap: 14, flexWrap: "wrap", borderBottom: "none",
                                            alignItems: "flex-end" }}>
             <label className="fbar-field">
-              <span className="sub">Date range</span>
-              <select className="fbar-select" aria-label="Date range" value={range}
+              <span className="sub">Timestamp</span>
+              <select className="fbar-select" aria-label="Timestamp range" value={range}
                 onChange={e => setRange(e.target.value)}>
                 {RANGES.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
               </select>
@@ -151,7 +151,7 @@ export default function AuditLogs() {
 
             {range === "custom" && (
               <label className="fbar-field">
-                <span className="sub">From / to</span>
+                <span className="sub">Timestamp between</span>
                 <span className="fbar-daterange">
                   <input type="date" className="fbar-date" aria-label="From date"
                     value={from} max={to} onChange={e => setFrom(e.target.value)} />

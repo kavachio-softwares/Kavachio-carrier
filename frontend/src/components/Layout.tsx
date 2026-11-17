@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
-  LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
+  LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, ChevronDown, Layers, ListChecks, ClipboardList,
   FileCheck, CalendarDays, ScrollText, History, FileSpreadsheet, BarChart3, Presentation, Timer, AlertTriangle,
 } from "lucide-react";
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
@@ -72,10 +72,18 @@ const GROUPS: {
     ],
   },
   {
-    title: "Operations",
+    // The Dashboard on its own at the top, above every section — the page
+    // the day starts on, not one item of Operations (17 Nov 2026).
+    title: "",
     requires: "carrier_admin",
     items: [
       { to: "/home", label: "Dashboard", icon: LayoutDashboard },
+    ],
+  },
+  {
+    title: "Operations",
+    requires: "carrier_admin",
+    items: [
       // Hidden from the sidebar for now. The /program-management route still
       // exists and is still reached from a carrier's page — only the nav entry
       // is commented out.
@@ -98,11 +106,9 @@ const GROUPS: {
       // /direct/runs is scoped to the tenant, never to who pressed the button,
       // so such a run is listed here beside the brokers' own.
       { to: "/runs", label: "File Submissions", icon: History },
-      // The carrier's own processing: what it cedes to its reinsurers, per
-      // treaty and period, built from the files listed above.
-      // The carrier's own processing: a treaty's reinsurance bordereau for a
-      // period, checked and sent — named as the broker side's "Process Bordereau".
-      { to: "/reinsurance/bordereaux", label: "Process Bordereau", icon: FileSpreadsheet },
+      // Process Reinsurance Bordereau has its own "Reinsurance" section below
+      // (17 Nov 2026): it is the carrier's OWN processing for its reinsurers,
+      // not the brokers' files this section watches.
       // The carrier's calendar IS listed: it is a whole-book view — every
       // broker's obligation for a due month — so unlike My Calendar it does not
       // belong inside one setup. It sits next to Process Bordereau because
@@ -137,6 +143,17 @@ const GROUPS: {
       // "Incoming Files" card instead. The /files route and its access rule
       // are unchanged — only the nav entry is commented out.
       // { to: "/files", label: "Files", icon: Inbox },
+    ],
+  },
+  {
+    // The carrier's own processing: a treaty's reinsurance bordereau for a
+    // period, built from the brokers' files, checked and sent to the
+    // reinsurers. Its own section so it is never mistaken for the brokers'
+    // Process Bordereau.
+    title: "Reinsurance",
+    requires: "carrier_admin",
+    items: [
+      { to: "/reinsurance/bordereaux", label: "Process Reinsurance BDX", icon: FileSpreadsheet },
     ],
   },
   {
@@ -412,6 +429,26 @@ export default function Layout() {
               && (!i.carrierAdminOnly || addsCarrierUsers(seat))),
         }))
         .filter(g => g.items.length > 0);
+  // Sections start closed; a heading opens or closes its links. The section
+  // holding the page on screen is opened for you (and stays open), so the
+  // sidebar always shows where you are. The untitled top group (Dashboard) is
+  // always open. In the icon-only sidebar every icon is shown — a closed
+  // section there would have no heading to open it with.
+  const itemActive = (to: string) =>
+    (!to.includes("?") && (loc.pathname === to || loc.pathname === `${to}/`))
+    || subScreenOwner(loc.pathname, loc.search) === to;
+  const activeGroup = groups.find(g => g.title && g.items.some(i => itemActive(i.to)))?.title;
+  const [openGroups, setOpenGroups] = useState<Set<string>>(
+    () => new Set(activeGroup ? [activeGroup] : []));
+  useEffect(() => {
+    if (activeGroup) setOpenGroups(o => o.has(activeGroup) ? o : new Set(o).add(activeGroup));
+  }, [activeGroup]);
+  const toggleGroup = (title: string) => setOpenGroups(o => {
+    const n = new Set(o);
+    if (n.has(title)) n.delete(title); else n.add(title);
+    return n;
+  });
+
   // The sidebar footer names the side, not the seat: "Carrier" / "Broker",
   // never "… Admin". Other screens keep ROLE_LABEL's full wording.
   const role = user ? normalizeRole(user.role) : null;
@@ -511,10 +548,20 @@ export default function Layout() {
               only the title, so a broker signing in saw every carrier link
               under a missing header and could click straight into screens
               that are not theirs. */}
-          {groups.filter(canSee).map(group => (
-            <div key={group.title}>
-              {group.title && <div className="group">{group.title}</div>}
-              {group.items.map(({ to, label, icon: Icon }) => {
+          {groups.filter(canSee).map((group, gi) => {
+            const open = !group.title || collapsed || openGroups.has(group.title);
+            return (
+            <div key={`${gi}-${group.title}`}>
+              {group.title && (
+                <button type="button" className="group group-btn"
+                  aria-expanded={open} title={collapsed ? group.title : undefined}
+                  onClick={() => { if (!collapsed) toggleGroup(group.title); }}>
+                  {group.title}
+                  <ChevronDown className="group-chev" size={13} strokeWidth={2}
+                    style={{ transform: open ? "none" : "rotate(-90deg)" }} />
+                </button>
+              )}
+              {open && group.items.map(({ to, label, icon: Icon }) => {
                 const subScreenActive = subScreenOwner(loc.pathname, loc.search) === to;
                 return (
                   <NavLink
@@ -532,7 +579,8 @@ export default function Layout() {
                 );
               })}
             </div>
-          ))}
+            );
+          })}
         </nav>
 
         <div className="side-foot">

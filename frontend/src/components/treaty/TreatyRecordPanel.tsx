@@ -222,9 +222,7 @@ export function TreatyRecordPanel({ contractId, onSaved }: {
       <div className="card">
         <div className="card-h">
           <h3>Programmes it protects</h3>
-          <InfoTip text={"The programme it was raised on is always protected. "
-            + "Others can be added while the treaty runs — the signed wording "
-            + "does not list them, so this does not change what was signed."} />
+          <InfoTip text="The programme it was raised on is always protected. You can add others while the treaty runs; this does not change the signed wording." />
           <span className="right">
             {rec.can_edit_programmes && !editingProgs && (
               <button className="btn sm" type="button" onClick={() => {

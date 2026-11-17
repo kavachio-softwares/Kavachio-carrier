@@ -1,5 +1,6 @@
 import { ReactNode, useState } from "react";
 import { Info } from "lucide-react";
+import { TipBody } from "../tipText";
 
 // Small hover/focus info icon + tooltip bubble, for a one-line heading that
 // needs a longer explanation without permanently taking up page space. Cards
@@ -17,9 +18,10 @@ export function InfoTip({ text }: { text: ReactNode }) {
       </button>
       {open && (
         <span role="tooltip"
-          className="absolute z-50 left-1/2 -translate-x-1/2 bottom-full mb-2 w-72 rounded-lg
-            bg-navy text-white text-[11.5px] leading-relaxed px-3 py-2.5 shadow-lg pointer-events-none">
-          {text}
+          className="absolute z-50 left-1/2 -translate-x-1/2 bottom-full mb-2 w-max max-w-[340px] rounded-lg
+            bg-navy text-white text-[12px] leading-relaxed px-3 py-2.5 shadow-lg pointer-events-none
+            text-left">
+          {typeof text === "string" ? <TipBody text={text} /> : text}
           <span className="absolute left-1/2 -translate-x-1/2 top-full h-0 w-0
             border-4 border-transparent border-t-navy" />
         </span>

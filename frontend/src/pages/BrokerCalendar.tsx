@@ -186,9 +186,7 @@ export default function BrokerCalendar() {
           <div className="t">
             <h2>
               Bordereau Calendar
-              <InfoTip text={"Every file you owe your carriers, by the date it is due. "
-                + "A file counts as done the moment you process it in Process Bordereau — "
-                + "that is when your carrier sees it arrive."} />
+              <InfoTip text={"Every file you owe your carriers, by due date. A file counts as done once you process it in Process Bordereau."} />
             </h2>
           </div>
           <div className="actions">

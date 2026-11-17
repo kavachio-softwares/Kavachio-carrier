@@ -125,11 +125,8 @@ export default function ReinsuranceBordereaux() {
         <div className="page-head">
           <div className="t">
             <h2>
-              Process Bordereau
-              <InfoTip text={"What you cede to your reinsurers, per treaty and period, "
-                + "worked out from the bordereaux your brokers sent. Each reinsurer gets "
-                + "its own statement — its share of every line — and agrees it or raises "
-                + "a query on its private link."} />
+              Process Reinsurance BDX
+              <InfoTip text="What you cede per treaty and period, from your brokers' bordereaux. Each reinsurer gets its own statement and agrees it or raises a query on its private link." />
             </h2>
             <p>
               Process a treaty&rsquo;s bordereau for a period, then send each

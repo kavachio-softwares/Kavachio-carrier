@@ -1439,8 +1439,7 @@ export default function ContractNew() {
               + "endorsement changes and leave the rest alone."
             : treatyLimits
               ? "Each line becomes a clause in the treaty. Cover and per-risk "
-                + "limits are also checked on every reinsurance bordereau — "
-                + "a row that breaks one shows on its Exceptions."
+                + "limits are also checked on every reinsurance bordereau."
               : "Each line becomes a clause in the contract and a check "
                 + "that runs on every file the broker sends."} />
         </div>
@@ -1482,12 +1481,7 @@ export default function ContractNew() {
                   + (values.inception_dt && values.expiry_dt ? 1 : 0))}{" "}
             checks
           </span>
-          <InfoTip text={"One for each limit above that a spreadsheet can be "
-            + "measured against, plus one from the dates — a risk that "
-            + "starts outside the contract term is not covered by it. "
-            + "Because you typed these numbers rather than us reading "
-            + "them out of somebody else's PDF, every one of them can be "
-            + "checked automatically."} />
+          <InfoTip text={"One check for each limit above that a bordereau can be measured against, plus one for the dates: a risk starting outside the contract term is not covered."} />
         </div>
         </>
         )}
@@ -1657,7 +1651,7 @@ export default function ContractNew() {
         <>
           <div className="fh">
             The calculation basis — change what moved
-            <InfoTip text="Each term you change becomes a dated term from this endorsement's effective date: statements for later periods use it, earlier ones keep what they were worked out with." />
+            <InfoTip text="Each term you change applies from this endorsement's effective date. Earlier statements keep the terms they were worked out with." />
           </div>
           <div className="hint" style={{ marginBottom: 10 }}>
             Applies from {endorseFrom || "the endorsement's effective date (set it on “What this endorsement says”)"}.
@@ -1842,14 +1836,8 @@ export default function ContractNew() {
                 <h2>
                   {kind === "endorse" ? "Endorse a Contract" : "Create a Contract"}
                   <InfoTip text={kind === "endorse"
-                    ? "Change some terms of a contract that is already running. "
-                      + "Kavachio writes the endorsement, attaches it beside the "
-                      + "wording, and moves the checks — nothing is attached "
-                      + "until you press the button."
-                    : "Answer these questions once. Kavachio writes the "
-                      + "document, you read it through, then it goes out for "
-                      + "signature — and nothing is sent to anybody until that "
-                      + "last step."} />
+                    ? "Change some terms of a running contract. Kavachio writes the endorsement and updates the checks. Nothing is attached until you press the button."
+                    : "Answer these questions once. Kavachio writes the document, you read it through, then it goes out for signature. Nothing is sent before that."} />
                 </h2>
               </div>
               <div className="actions">
@@ -1945,9 +1933,7 @@ export default function ContractNew() {
                     ? "Kavachio reads its terms and who holds it from the document. "
                       + "It is saved as a draft and goes to the reinsurers to approve, "
                       + "then both sides sign."
-                    : "Kavachio reads the terms out of it and builds "
-                      + "what checks it can — but a contract written from its own "
-                      + "terms never has a clause the checks cannot read."} />
+                    : "Kavachio reads the terms from the PDF and builds what checks it can. A contract written here can have every clause checked."} />
                 </p>
                 )}
                 </div>
@@ -1963,12 +1949,7 @@ export default function ContractNew() {
               <div className="t">
                 <h2>
                   Write the Wording
-                  <InfoTip text={"Kavachio has written the wording from your "
-                    + "terms. The shaded bits are live values, not typed text — "
-                    + "click one to change it without leaving this page, or "
-                    + "change it on Terms; either way every sentence quoting it "
-                    + "updates, and so does the check behind it. Anything you "
-                    + "type yourself stays exactly as you typed it."} />
+                  <InfoTip text={"Kavachio wrote this from your terms. Shaded bits are live values: change one and every sentence and check using it updates.\nText you type yourself stays as typed."} />
                 </h2>
                 <p>
                   {values.name || "This contract"}
@@ -2038,10 +2019,8 @@ export default function ContractNew() {
                   </button>
                   <div className="sub" style={{ textAlign: "center" }}>
                     What these do
-                    <InfoTip text={"“Refresh from my terms” rewrites the "
-                      + "clauses your terms drive and keeps what you typed."
-                      + "\n\n“Start the wording again” throws away your edits "
-                      + "and rewrites every section from the terms."} />
+                    <InfoTip text={"“Refresh from my terms”: rewrites the clauses your terms drive, keeps what you typed."
+                      + "\n\n“Start the wording again”: throws away your edits and rewrites everything."} />
                   </div>
                 </>
               }
@@ -2092,12 +2071,7 @@ export default function ContractNew() {
                     <span className="muted" style={{ fontSize: 11.5,
                           alignSelf: "center", marginRight: 2 }}>
                       Drop in a live value
-                      <InfoTip text={"A chip is tied to the term you set in "
-                        + "step 1. Click one to change it — here, on Terms, and "
-                        + "in the check behind it, all at once — or change it "
-                        + "on Terms and every sentence quoting it follows. "
-                        + "Either way the contract and the checks say the same "
-                        + "thing."} />
+                      <InfoTip text={"Each chip is a term from step 1. Click one to change it in the wording, on Terms and in its check at once."} />
                     </span>
                     {Object.keys(preview?.tokens ?? {}).map(t => (
                       <button
@@ -2282,10 +2256,7 @@ export default function ContractNew() {
               <div className="t">
                 <h2>
                   Set up the signing
-                  <InfoTip text={"Choose what each side has to fill in when "
-                    + "they sign. None of these buttons makes the contract "
-                    + "active — it becomes active when both sides have signed it, "
-                    + "on its own signature page."} />
+                  <InfoTip text={"Choose what each side fills in when they sign. The contract becomes active only once both sides have signed it."} />
                 </h2>
                 {/* Kept on screen, not in the (i): see the note above this step
                     — a carrier who thinks a link went out waits for a reply
@@ -2491,13 +2462,8 @@ export default function ContractNew() {
                       />
                       <div className="hint">
                         How placing works
-                        <InfoTip text={"Drop a block anywhere — the wording "
-                          + "moves down to make room for it, so it never covers "
-                          + "a clause.\n\nOne block per side here — nobody is "
-                          + "named to sign until the contract exists. Name them "
-                          + "afterwards on the contract's own signature page, "
-                          + "and each person gets a block of their own to place "
-                          + "next to these."} />
+                        <InfoTip text={"Drop a block anywhere; the wording moves down so it never covers a clause."
+                          + "\n\nOne block per side for now. Name the signers later on the contract's signature page; each gets their own block."} />
                       </div>
                     </>
                   )}

@@ -683,7 +683,7 @@ export default function ProgramCalendar({
               </div>
             ) : (
               <div className="field">
-                <label>Due on day of month <InfoTip text="The day of the following month the bordereau is due. Set it to 10 and the January bordereau is due on 10 February. Months too short for the day you pick use their last day instead." /></label>
+                <label>Due on day of month <InfoTip text="Day of the next month the bordereau is due: 10 means January's is due on 10 February. Shorter months use their last day." /></label>
                 <input type="number" min={1} max={31} value={form.due_day_of_month}
                   onChange={e => setForm(f => ({
                     ...f,
@@ -703,7 +703,7 @@ export default function ProgramCalendar({
                 onChange={e => setForm(f => ({ ...f, soon_window_days: Number(e.target.value) }))} />
             </div>
             <div className="field">
-              <label>Delinquent after this many days late <InfoTip text="A missing file is Overdue the day after its due date, and Delinquent once it is this many days late. A dispute raised by the broker pauses it until you decide." /></label>
+              <label>Delinquent after this many days late <InfoTip text="A missing file is Overdue the day after its due date, and Delinquent once this many days late. A broker's dispute pauses it until you decide." /></label>
               <input type="number" min={1} max={365} value={form.delinquent_after_days}
                 onChange={e => setForm(f => ({ ...f, delinquent_after_days: Number(e.target.value) }))} />
             </div>

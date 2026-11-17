@@ -1258,16 +1258,29 @@ def link_statement_query(token: str, sid: int, body: AnswerIn, request: Request,
 #  The dashboard
 # =============================================================================
 
-def dashboard_counts(s, tid: int, period: Optional[str] = None) -> dict:
+def dashboard_counts(s, tid: int, period: Optional[str] = None,
+                     program_id: Optional[int] = None) -> dict:
     """Ceded statements by state, for the Home dashboard. Superseded versions
     are history and are not counted.
 
     `period` is the dashboard's Monthly Activity pick — '2027-03', '2027', or
     None for every period. A statement counts when its own period (a month,
-    quarter or year) overlaps it."""
-    rows = (s.query(CededBordereau)
-            .filter(CededBordereau.tenant_id == tid,
-                    CededBordereau.status != "superseded").all())
+    quarter or year) overlaps it.
+
+    `program_id` is the dashboard's programme pick: only the statements of the
+    treaties that protect that programme (TreatyProgramme, or the treaty's own
+    programme — as the reinsurance dashboard reads protection)."""
+    q = (s.query(CededBordereau)
+         .filter(CededBordereau.tenant_id == tid,
+                 CededBordereau.status != "superseded"))
+    if program_id is not None:
+        from db import TreatyProgramme
+        treaties = ({c for (c,) in s.query(TreatyProgramme.contract_id)
+                     .filter(TreatyProgramme.program_id == program_id)}
+                    | {c for (c,) in s.query(Contract.id)
+                       .filter(Contract.tenant_id == tid, Contract.program_id == program_id)})
+        q = q.filter(CededBordereau.contract_id.in_(treaties or {-1}))
+    rows = q.all()
     pick = ce.period_bounds(period) if period else None
     if pick:
         def overlaps(p_: str) -> bool:

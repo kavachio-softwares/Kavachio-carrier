@@ -822,6 +822,49 @@ def test_board_groups_by_due_month_and_counts_only_real_obligations():
     assert board["counts"]["never"] == 1
 
 
+def test_board_filters_narrow_the_tables_but_never_the_counts():
+    import submission_calendar_service as svc
+    from submission_calendar_service import BoardFilters
+    s = _mem_session()
+    p, brokers, _sched = _seed_with_brokers(s, n=2)
+    svc.mark_received(s, p.id, received_on=date(2026, 2, 5), export_id=1,
+                      period="2026-01", broker_party_id=brokers[0].id)
+    s.commit()
+    today = date(2026, 3, 1)
+    whole = svc.calendar_board(s, 1, month="2026-02", today=today)
+    assert "late_rows" not in whole and whole["rows_total"] == 2
+
+    late = svc.calendar_board(s, 1, month="2026-02", today=today,
+                              filters=BoardFilters(statuses=frozenset({"overdue"})))
+    assert [r["broker_party_id"] for r in late["rows"]] == [brokers[1].id]
+    # The headline counts are the whole month's whatever the table shows.
+    assert late["counts"] == whole["counts"] and late["rows_total"] == 2
+
+    # Filtered to the on-time file, the late one is still there to remind on.
+    on_time = svc.calendar_board(s, 1, month="2026-02", today=today,
+                                 filters=BoardFilters(statuses=frozenset({"on_time"})))
+    assert [r["broker_party_id"] for r in on_time["rows"]] == [brokers[0].id]
+    assert [r["broker_party_id"] for r in on_time["late_rows"]] == [brokers[1].id]
+
+    one = svc.calendar_board(s, 1, month="2026-02", today=today,
+                             filters=BoardFilters(broker_id=brokers[0].id))
+    assert {r["broker_party_id"] for r in one["rows"]} == {brokers[0].id}
+    assert [b["broker_party_id"] for b in one["schedules"][0]["brokers"]] == [brokers[0].id]
+
+    # Search matches any part of a name, any case; a miss empties both tables.
+    hit = svc.calendar_board(s, 1, month="2026-02", today=today,
+                             filters=BoardFilters(q=p.name[1:4].upper()))
+    assert len(hit["rows"]) == 2 and len(hit["schedules"]) == 1
+    miss = svc.calendar_board(s, 1, month="2026-02", today=today,
+                              filters=BoardFilters(q="no such name"))
+    assert miss["rows"] == [] and miss["schedules"] == [] and miss["schedules_total"] == 1
+
+    assert svc.calendar_board(s, 1, month="2026-02", today=today, filters=BoardFilters(
+        frequencies=frozenset({"quarterly"})))["schedules"] == []
+    assert len(svc.calendar_board(s, 1, month="2026-02", today=today, filters=BoardFilters(
+        frequencies=frozenset({"monthly"})))["schedules"]) == 1
+
+
 def test_board_shows_a_programme_with_no_broker_as_owing_nothing():
     import submission_calendar_service as svc
     s = _mem_session()

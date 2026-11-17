@@ -15,12 +15,13 @@
 // Everything renders inside `.proto` — the badge / tile / card / note classes
 // are all defined as `.proto .x` in proto.css, and without the wrapper this
 // markup renders as unstyled text.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle, CalendarDays, Send, X } from "lucide-react";
 import {
   chase, getBoard, getPlatformBoard, getVersions,
-  type BoardResponse, type BoardRow, type BoardSchedule, type BrokerContact,
+  type BoardFilters, type BoardResponse, type BoardRow, type BoardSchedule,
+  type BoardStage, type BrokerContact, type CaseState,
   type CalendarStatus, type ScheduleBroker, type SubmissionVersionRow,
 } from "../api/calendar";
 import { isKavachioAdmin } from "../auth";
@@ -30,6 +31,8 @@ import { InfoTip } from "../components/InfoTip";
 import { ExportFileViewer } from "../components/ExportFileViewer";
 import { CaseModal, caseBadge } from "../components/CaseModal";
 import { Pagination } from "../components/Pagination";
+import { ListFilterBar } from "../components/ListFilterBar";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { flowUrl } from "../components/ProgrammeStepper";
 import { ContractHeading, SupersededTag } from "../components/ContractTag";
 
@@ -116,6 +119,30 @@ const LIST: React.CSSProperties = {
 };
 const LI: React.CSSProperties = { listStyle: "disc", marginBottom: 4 };
 
+// The filters' choices. Arrival statuses read as the badges do; cases as the
+// Late-file cases strip; frequencies as the Reporting Frequency column; the
+// stages are named after the Action button each one shows (NextStep).
+const STATUS_CHOICES = (["overdue", "never_arrived", "received_late", "on_time",
+  "due_today", "due_soon", "scheduled"] as CalendarStatus[])
+  .map(v => ({ value: v, label: STATUS_META[v].label }));
+const CASE_CHOICES: { value: CaseState | "none"; label: string }[] = [
+  { value: "overdue", label: "Overdue" }, { value: "delinquent", label: "Delinquent" },
+  { value: "in_dispute", label: "In Dispute" }, { value: "extended", label: "More time" },
+  { value: "resolved", label: "Resolved" }, { value: "none", label: "No case" },
+];
+const FREQUENCY_CHOICES = [
+  { value: "weekly", label: "Every week" }, { value: "monthly", label: "Every month" },
+  { value: "quarterly", label: "Every three months" },
+  { value: "half_yearly", label: "Every six months" }, { value: "yearly", label: "Once a year" },
+  { value: "not_set", label: "Not set" },
+];
+const STAGE_CHOICES: { value: BoardStage; label: string }[] = [
+  { value: "no_broker", label: "Add Broker" }, { value: "no_contract", label: "Add Contract" },
+  { value: "contract_unsigned", label: "Finish Contract" },
+  { value: "setup_missing", label: "Set Up Bordereau" },
+  { value: "ready", label: "Edit Deadlines" },
+];
+
 export default function BordereauCalendar() {
   // The Kavachio admin has no carrier of their own, so they get every
   // carrier's board in one — the same numbers the platform dashboard's
@@ -160,22 +187,64 @@ export default function BordereauCalendar() {
   // Programmes whose full broker list is open — a long one shows the first few.
   const [openBrokers, setOpenBrokers] = useState<Set<number>>(new Set());
 
+  // The tables' filters, applied on the server. Search, programme and broker
+  // are shared by both tabs; arrival status and case are the month's, and
+  // frequency and next step the programme list's. They never change the
+  // headline counts above the tabs.
+  const [q, setQ] = useState("");
+  const dq = useDebouncedValue(q, 300);
+  const [fProgram, setFProgram] = useState("");
+  const [fBroker, setFBroker] = useState("");
+  const [fStatus, setFStatus] = useState<CalendarStatus | "">("");
+  const [fCase, setFCase] = useState<CaseState | "none" | "">("");
+  const [fFrequency, setFFrequency] = useState("");
+  const [fStage, setFStage] = useState<BoardStage | "">("");
+  const filters = useMemo<BoardFilters>(() => ({
+    q: dq, program: fProgram ? Number(fProgram) : undefined,
+    broker: fBroker ? Number(fBroker) : undefined,
+    status: fStatus, case: fCase, frequency: fFrequency, stage: fStage,
+  }), [dq, fProgram, fBroker, fStatus, fCase, fFrequency, fStage]);
+  const monthFiltered = !!(dq.trim() || fProgram || fBroker || fStatus || fCase);
+  const schedFiltered = !!(dq.trim() || fProgram || fBroker || fFrequency || fStage);
+  function clearFilters() {
+    setQ(""); setFProgram(""); setFBroker(""); setFStatus(""); setFCase("");
+    setFFrequency(""); setFStage("");
+  }
+  // The programme and broker choices — asked for once, with the first load.
+  const [choices, setChoices] = useState<BoardResponse["filter_options"] | null>(null);
+  const haveChoices = useRef(false);
+  // The month on screen, for a reload a filter change triggers.
+  const monthRef = useRef<string | undefined>(undefined);
+  // Only the newest request may land: a slow answer to an older filter must
+  // not overwrite a newer one.
+  const seq = useRef(0);
+
   const load = useCallback(async (m?: string) => {
-    setLoading(true); setErr(null); setMonthPage(1);
+    const mine = ++seq.current;
+    setLoading(true); setErr(null); setMonthPage(1); setSchedPage(1);
     try {
+      const f = { ...filters, options: !haveChoices.current };
       const data = await (platform
-        ? getPlatformBoard(m, { carrier: scopeCarrier, broker: scopeBroker })
-        : getBoard(m));
+        ? getPlatformBoard(m, { carrier: scopeCarrier, broker: scopeBroker, filters: f })
+        : getBoard(m, { filters: f }));
+      if (mine !== seq.current) return;
       setBoard(data);
       setMonth(data.month);
+      monthRef.current = data.month;
+      if (data.filter_options) {
+        haveChoices.current = true;
+        setChoices(data.filter_options);
+      }
     } catch (e: any) {
+      if (mine !== seq.current) return;
       setErr(e?.response?.data?.detail ?? e?.message ?? "Could not load the calendar.");
     } finally {
-      setLoading(false);
+      if (mine === seq.current) setLoading(false);
     }
-  }, [platform, scopeCarrier, scopeBroker]);
+  }, [platform, scopeCarrier, scopeBroker, filters]);
 
-  useEffect(() => { load(startMonth); }, [load, startMonth]);
+  // First load, and again whenever a filter changes — on the month on screen.
+  useEffect(() => { load(monthRef.current ?? startMonth); }, [load, startMonth]);
 
   const rows = board?.rows ?? [];
   const counts = board?.counts;
@@ -191,8 +260,11 @@ export default function BordereauCalendar() {
   // Who is actually late, for the header button. Unattributed rows are excluded
   // for the same reason they are excluded from the counts: there is nobody to
   // chase on a programme with no broker.
+  // While a filter is on, the server sends the month's late files separately:
+  // the button covers all of them, not just the ones the table shows.
   const overdue = useMemo(
-    () => rows.filter(r => !r.unassigned && chaseable(r)), [rows]);
+    () => (board?.late_rows ?? rows).filter(r => !r.unassigned && chaseable(r)),
+    [board?.late_rows, rows]);
 
   // CHASING ASKS FIRST. A chase is a message about somebody being late, so the
   // screen names who it is about and who would hear about it before anything is
@@ -243,9 +315,7 @@ export default function BordereauCalendar() {
             <h2>
               {platform ? "Bordereau Calendar — All Carriers" : "Bordereau Calendar"}
               <InfoTip text={platform
-                ? "What every carrier is owed this month, across the whole "
-                  + "platform. Read-only here — chasing a late file is each "
-                  + "carrier's own call, made from their own calendar."
+                ? "What every carrier is owed this month. Read-only here — each carrier chases late files from its own calendar."
                 : "What each broker owes you and when, what has actually "
                   + "arrived, and what you have sent on."} />
             </h2>
@@ -268,6 +338,32 @@ export default function BordereauCalendar() {
 
         {err && <div className="note warn" style={{ marginBottom: 16 }}>{err}</div>}
         {msg && <div className="note" style={{ marginBottom: 16 }}>{msg}</div>}
+
+        {/* ONE block for the month: the month picked in its header drives the
+            counts, the late-file cases and the month-wise table below it, the
+            same way the dashboard's Activity block works. The header sticks
+            while the block scrolls. */}
+        <section aria-label="Month" style={{ border: "1px solid var(--p-border-2)", borderRadius: 16,
+                      background: "var(--p-surface-3)", padding: "0 18px 18px" }}>
+          <div style={{ position: "sticky", top: 0, zIndex: 5, background: "var(--p-surface-3)",
+                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                        flexWrap: "wrap", gap: 12, padding: "16px 0 14px", marginBottom: 16,
+                        borderBottom: "1px solid var(--p-border-2)", borderRadius: "16px 16px 0 0" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <CalendarDays style={{ width: 18, height: 18, color: "var(--p-faint)" }} />
+              <h3 style={{ margin: 0, fontSize: 16 }}>{fmtMonth(month)}</h3>
+              <InfoTip text={"Everything in this block is for the month picked here: the counts, "
+                + "the late-file cases and the month-wise calendar. The All Programmes list "
+                + "shows every programme's deadlines, whatever the month."} />
+            </div>
+            <select className="fbar-select" aria-label="Month" value={month ?? ""}
+              onChange={e => load(e.target.value)}
+              disabled={loading || (board?.months?.length ?? 0) === 0}>
+              {(board?.months ?? []).map(m =>
+                <option key={m} value={m}>{fmtMonth(m)}</option>)}
+              {(board?.months?.length ?? 0) === 0 && <option value="">No deadlines yet</option>}
+            </select>
+          </div>
 
         {/* ---- the headline counts: what was due, and the four ways it
              stood — on time, late, overdue (still waited for) and never
@@ -335,14 +431,14 @@ export default function BordereauCalendar() {
             <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--p-muted)",
               display: "flex", alignItems: "center", gap: 5 }}>
               Late-file cases
-              <InfoTip text={"What is being done about each missing file due this month. Overdue the "
-                + "day after the due date; Delinquent once it is the programme's set number of days "
-                + "late (15 unless changed); In Dispute while the broker contests it and you decide; "
-                + "More time when you agreed a new date; Resolved when the file came, you accepted "
-                + "the dispute, or you marked it as no file needed."} />
+              <InfoTip text={"What has happened since a file due this month went missing. A file that is just late is counted in the Overdue box above.\n"
+                + "Delinquent = past the programme's late limit (15 days unless changed); In Dispute = broker contests it; "
+                + "More time = new date agreed; Resolved = file came, dispute accepted or no file needed."} />
             </span>
+            {/* No "Overdue" chip: a case that is only overdue is the file the
+                Overdue box above already counts, so it would show one number twice. */}
             {([
-              ["overdue", "Overdue", "b-crit"], ["delinquent", "Delinquent", "b-crit"],
+              ["delinquent", "Delinquent", "b-crit"],
               ["in_dispute", "In Dispute", "b-warn"], ["extended", "More time", "b-info"],
               ["resolved", "Resolved", "b-ok"],
             ] as const).map(([k, label, cls]) => (
@@ -355,10 +451,12 @@ export default function BordereauCalendar() {
 
         <div className="tabs" style={{ alignItems: "center" }}>
           <button className={tab === "month" ? "on" : ""} onClick={() => setTab("month")}>
-            Month-wise Calendar ({worstFirst.length})
+            Month-wise Calendar ({monthFiltered && board?.rows_total != null
+              ? `${worstFirst.length} of ${board.rows_total}` : worstFirst.length})
           </button>
           <button className={tab === "deadlines" ? "on" : ""} onClick={() => setTab("deadlines")}>
-            All Programmes Calendar ({schedules.length})
+            All Programmes Calendar ({schedFiltered && board?.schedules_total != null
+              ? `${schedules.length} of ${board.schedules_total}` : schedules.length})
           </button>
           <InfoTip text={tab === "month"
             ? "One row for every file a broker owes in the month you pick: when it is "
@@ -369,23 +467,34 @@ export default function BordereauCalendar() {
 
         {/* ---- one row per file somebody owes this month ------------------ */}
         {tab === "month" && (
-        <div className="card" style={{ marginBottom: 18 }}>
+        <div className="card">
           <div className="card-h">
             <CalendarDays className="ci" />
-            <h3>{fmtMonth(month)}</h3>
+            <h3>Files due in {fmtMonth(month)}</h3>
             <span className="sub">
               one row for every file somebody owes you, by the date it is due
             </span>
-            <div className="right">
-              <select className="fbar-select" value={month ?? ""}
-                onChange={e => load(e.target.value)}
-                disabled={loading || (board?.months?.length ?? 0) === 0}>
-                {(board?.months ?? []).map(m =>
-                  <option key={m} value={m}>{fmtMonth(m)}</option>)}
-                {(board?.months?.length ?? 0) === 0 && <option value="">No deadlines yet</option>}
-              </select>
-            </div>
           </div>
+
+          <ListFilterBar
+            search={{ value: q, onChange: setQ,
+                      placeholder: platform ? "Search carrier, programme, broker or contract"
+                                            : "Search programme, broker or contract" }}
+            selects={[
+              { key: "programme", ariaLabel: "Programme", value: fProgram, onChange: setFProgram,
+                options: [{ value: "", label: "All programmes" },
+                  ...(choices?.programmes ?? []).map(p => ({ value: String(p.id), label: p.name }))] },
+              { key: "broker", ariaLabel: "Broker", value: fBroker, onChange: setFBroker,
+                options: [{ value: "", label: "All brokers" },
+                  ...(choices?.brokers ?? []).map(b => ({ value: String(b.id), label: b.name }))] },
+              { key: "status", ariaLabel: "Arrival status", value: fStatus,
+                onChange: v => setFStatus(v as CalendarStatus | ""),
+                options: [{ value: "", label: "All arrival statuses" }, ...STATUS_CHOICES] },
+              { key: "case", ariaLabel: "Case", value: fCase,
+                onChange: v => setFCase(v as CaseState | "none" | ""),
+                options: [{ value: "", label: "All cases" }, ...CASE_CHOICES] },
+            ]}
+            onClear={clearFilters} active={monthFiltered} />
 
           <div className="tbl-wrap">
             <table>
@@ -405,8 +514,13 @@ export default function BordereauCalendar() {
                 {!loading && worstFirst.length === 0 && (
                   <tr><td colSpan={platform ? 11 : 10} style={{ padding: "18px 12px", textAlign: "center" }}
                     className="muted">
-                    Nothing is due in this month.{" "}
-                    <Link className="linkish" to="/programs">Set a programme's frequency →</Link>
+                    {monthFiltered ? (<>
+                      No file due this month matches these filters.{" "}
+                      <span className="linkish" onClick={clearFilters}>Clear filters</span>
+                    </>) : (<>
+                      Nothing is due in this month.{" "}
+                      <Link className="linkish" to="/programs">Set a programme's frequency →</Link>
+                    </>)}
                   </td></tr>
                 )}
                 {!loading && monthRows.map(r => {
@@ -559,9 +673,7 @@ export default function BordereauCalendar() {
             borderTop: "1px solid var(--p-border)", borderRadius: 0,
             display: "flex", alignItems: "center", gap: 6 }}>
             <b>A programme with no broker owes you nothing.</b>
-            <InfoTip text={"It shows a blank row rather than an overdue one, because "
-              + "there is nobody to be late. It stays in the list so you can see it "
-              + "is idle instead of forgetting it exists."} />
+            <InfoTip text={"It shows a blank row, not an overdue one, as nobody can be late. It stays listed so you can see it is idle."} />
           </div>
         </div>
         )}
@@ -574,6 +686,26 @@ export default function BordereauCalendar() {
             <h3>All Programmes</h3>
             <span className="sub">how often each programme's bordereau is due</span>
           </div>
+
+          <ListFilterBar
+            search={{ value: q, onChange: setQ,
+                      placeholder: platform ? "Search carrier, programme, broker or contract"
+                                            : "Search programme, broker or contract" }}
+            selects={[
+              { key: "programme", ariaLabel: "Programme", value: fProgram, onChange: setFProgram,
+                options: [{ value: "", label: "All programmes" },
+                  ...(choices?.programmes ?? []).map(p => ({ value: String(p.id), label: p.name }))] },
+              { key: "broker", ariaLabel: "Broker", value: fBroker, onChange: setFBroker,
+                options: [{ value: "", label: "All brokers" },
+                  ...(choices?.brokers ?? []).map(b => ({ value: String(b.id), label: b.name }))] },
+              { key: "frequency", ariaLabel: "Reporting frequency", value: fFrequency,
+                onChange: setFFrequency,
+                options: [{ value: "", label: "All frequencies" }, ...FREQUENCY_CHOICES] },
+              { key: "stage", ariaLabel: "Action", value: fStage,
+                onChange: v => setFStage(v as BoardStage | ""),
+                options: [{ value: "", label: "All actions" }, ...STAGE_CHOICES] },
+            ]}
+            onClear={clearFilters} active={schedFiltered} />
           <div className="tbl-wrap">
             <table>
               <thead>
@@ -586,9 +718,18 @@ export default function BordereauCalendar() {
                   </th><th>Action</th></tr>
               </thead>
               <tbody>
-                {schedules.length === 0 && (
+                {loading && schedules.length === 0 && (
                   <tr><td colSpan={platform ? 9 : 8} className="muted"
-                    style={{ padding: "14px 12px" }}>No programmes yet.</td></tr>
+                    style={{ padding: "14px 12px", textAlign: "center" }}>Loading…</td></tr>
+                )}
+                {!loading && schedules.length === 0 && (
+                  <tr><td colSpan={platform ? 9 : 8} className="muted"
+                    style={{ padding: "14px 12px" }}>
+                    {schedFiltered ? (<>
+                      No programme matches these filters.{" "}
+                      <span className="linkish" onClick={clearFilters}>Clear filters</span>
+                    </>) : "No programmes yet."}
+                  </td></tr>
                 )}
                 {schedRows.map(sch => {
                   const brokers = sch.brokers ?? [];
@@ -688,6 +829,7 @@ export default function BordereauCalendar() {
             onPageChange={setSchedPage} noun="programmes" />
         </div>
         )}
+        </section>
       </div>
 
       {openRow && (

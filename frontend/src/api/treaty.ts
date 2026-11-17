@@ -737,9 +737,10 @@ export type ReinsuranceDashboard = {
 
 /** `period` ('2027-03', '2027') narrows the ceded counts to that month or
  *  year — the dashboard's Monthly Activity pick. Omitted: every period. */
-export const getReinsuranceDashboard = (period?: string) =>
+export const getReinsuranceDashboard = (period?: string, programId?: number) =>
   api.get<ReinsuranceDashboard>("/reinsurance/dashboard",
-    { silent: true, params: period ? { period } : undefined })
+    { silent: true, params: { ...(period ? { period } : {}),
+                              ...(programId != null ? { program_id: programId } : {}) } })
     .then(r => r.data);
 
 // ── a treaty signed outside Kavachio ─────────────────────────────────────────

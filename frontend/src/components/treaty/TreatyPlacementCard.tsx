@@ -86,7 +86,8 @@ export default function TreatyPlacementCard({ contractId, canAct, onChanged }: {
       <div className="card-h" style={{ flexWrap: "wrap", gap: 8 }}>
         <Users size={16} className="ci" />
         <h3>Placement &amp; signatures</h3>
-        <InfoTip text="A master treaty: one treaty and one shared wording, placed with several reinsurers. Each writes its own share of each layer and signs for itself — on its private link, or on paper and recorded here against its signed line slip. The lead reinsurer's signature, with yours, puts the treaty in force; the others bind their own lines." />
+        <InfoTip text={"One treaty and wording shared by several reinsurers. Each signs for its own share, on its private link or on paper recorded here.\n"
+          + "Your signature and the lead reinsurer's put the treaty in force."} />
         <span className="right" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <span className={`badge ${WRITTEN_TONE[pl.written_status]}`}><span className="d" />{pl.written_label}</span>
           <span className={`badge ${SIGNED_TONE[pl.signed_status]}`}><span className="d" />{pl.signed_label}</span>

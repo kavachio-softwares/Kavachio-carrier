@@ -131,11 +131,9 @@ export default function Brokers() {
             <h2>
               Brokers
               <InfoTip text={(seat === "user"
-                  ? "The broker companies you invited, and how far each one reaches. "
-                  : "The broker organisations that produce into your programmes. ")
-                + "Open a broker to see its contracts and people across "
-                + "every programme. Put a broker on a programme from that "
-                + "programme's page."} />
+                  ? "The broker companies you invited. "
+                  : "The brokers that send into your programmes. ")
+                + "Open one to see its contracts and people; add a broker to a programme from that programme's page."} />
             </h2>
           </div>
           <div className="actions">{invite}</div>

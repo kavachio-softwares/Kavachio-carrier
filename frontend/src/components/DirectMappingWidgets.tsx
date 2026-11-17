@@ -1074,10 +1074,8 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
               Margin for this contract
             </label>
             <span className="tip-inline inline-flex">
-              <InfoTip text={"One margin for every rule of this contract that can have one — limits, "
-                + "totals and formulas, from the contract or generic. A value within this share of "
-                + "its limit or expected figure still passes; 0 means exact. A rule given its own "
-                + "margin keeps it until you press \u201cUse contract margin\u201d on that rule."} />
+              <InfoTip text={"One margin for this contract's limit, total and formula checks. A value within this % of its limit or expected figure passes; 0 means exact.\n"
+                + "Rules given their own margin keep it."} />
             </span>
             <input id={`contract-margin-${contractId}`} type="number" step="0.1" min="0" max="100"
               value={marginText} disabled={readOnly || marginBusy} autoFocus={!readOnly}

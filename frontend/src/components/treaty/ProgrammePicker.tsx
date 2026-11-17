@@ -56,7 +56,7 @@ export function ProgrammePicker({ options, value, onChange }: {
               <th className="l">Broker contracts</th>
               <th className="l">
                 Other treaties on it
-                <InfoTip text="These treaties protect the same programme. Each makes its own statements from the same bordereaux, on its own setup — choosing a programme here does not affect them." />
+                <InfoTip text="Other treaties on the same programme. Each makes its own statements on its own setup; choosing a programme here does not affect them." />
               </th>
             </tr>
           </thead>

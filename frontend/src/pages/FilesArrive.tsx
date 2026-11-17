@@ -815,9 +815,7 @@ function NotifyPanel({ route }: { route: IntakeRoute }) {
     <div style={{ marginTop: 18 }}>
       <div className="sub-h">
         Notify These Emails
-        <InfoTip text={"Who is told each file's result — exceptions, the secure link to fix them, "
-          + "and delivery — on top of the reply on this channel. Leave empty to use the sender's "
-          + "address (email channel) or the broker's own login."} />
+        <InfoTip text={"Who gets each file's result: exceptions, the link to fix them, and delivery. Leave empty to use the sender's address (email) or the broker's login."} />
       </div>
       <input className="inp" style={{ width: "100%" }} value={text} disabled={busy || saved === null}
         placeholder="ops@broker.com, bordereaux@broker.com"
@@ -1417,9 +1415,7 @@ function SftpServerSection({ sf, put, processedDir, testing, result, canTest, on
       <div style={{ display: "flex", alignItems: "center" }}>
         <button type="button" className="btn" disabled={!canTest || testing} onClick={onTest}>
           {testing ? "Testing…" : "Test Connection"}</button>
-        <InfoTip text={"Kavachio signs in, looks in the folder and records the server's "
-          + "fingerprint. Create is available once the test succeeds; changing the server, "
-          + "login or folder means testing again."} />
+        <InfoTip text={"Kavachio signs in, checks the folder and records the server's fingerprint. Create needs a passing test; test again after changing server, login or folder."} />
       </div>
 
       {result && (result.ok ? (

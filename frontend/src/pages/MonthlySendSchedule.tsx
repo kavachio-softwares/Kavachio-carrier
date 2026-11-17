@@ -155,7 +155,7 @@ export default function MonthlySendSchedule() {
                 <div className="card-h">
                   <CalendarDays className="ci" />
                   <h3>When to send</h3>
-                  <InfoTip text="Working days are Monday to Friday. The numbers are taken when the report is sent and kept with it, so everyone gets the same figures and a sent report never changes. If the app was down that day, it goes out at the next daily run that week." />
+                  <InfoTip text="Working days are Monday to Friday. Figures are fixed when the report is sent, so a sent report never changes. A missed day goes out at the next run that week." />
                 </div>
                 <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: 12 }}>
                   {check(draft.auto_send, () => set({ auto_send: !draft.auto_send }),

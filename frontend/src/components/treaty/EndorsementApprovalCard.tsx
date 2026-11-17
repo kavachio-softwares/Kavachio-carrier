@@ -75,9 +75,7 @@ export function EndorsementApprovalCard({ contractId, rec, onChange }: {
         <CheckCircle2 size={16} className="ci" />
         <h3>
           Reinsurers&rsquo; approval and signatures
-          <InfoTip text={"Every reinsurer on the treaty approves the endorsement, then you sign "
-            + "it, then every reinsurer signs it. Only then is it used on the reinsurance "
-            + "bordereau. Until then its terms show on the Calculation basis as waiting."} />
+          <InfoTip text="Every reinsurer approves, you sign, then every reinsurer signs. Only then does the endorsement apply to the reinsurance bordereau." />
         </h3>
         <span className={`badge ${BADGE[a.status]}`}><span className="d" />{a.label}</span>
         <div className="right" style={{ display: "flex", gap: 6 }}>

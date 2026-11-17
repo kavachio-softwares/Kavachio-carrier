@@ -9,8 +9,9 @@ export type SelectFilter = {
 };
 
 export type DateRangeFilter = {
-  /** Which date the range filters on, shown before the two boxes
-   *  ("Added between"). Without it a reader cannot tell. */
+  /** Which date the range filters on, shown above the two boxes and named
+   *  after the column it filters ("Processed between"). Without it a reader
+   *  cannot tell. */
   label?: string;
   from: string;
   onFromChange: (v: string) => void;
@@ -37,7 +38,10 @@ export function ListFilterBar({
   active: boolean;
 }) {
   return (
-    <div className="card-h" style={{ gap: 14, flexWrap: "wrap" }}>
+    // flex-end: a captioned date range is taller, so the row lines up on the
+    // bottom of its controls.
+    <div className="card-h" style={{ gap: 14, flexWrap: "wrap",
+                                     alignItems: dateRange?.label ? "flex-end" : undefined }}>
       {search && (
         <div className="search">
           <Search className="ic" />
@@ -52,16 +56,20 @@ export function ListFilterBar({
         </select>
       ))}
       {dateRange && (
-        <div className="fbar-daterange">
-          {dateRange.label && <span className="fbar-dlabel">{dateRange.label}</span>}
-          <input type="date" className="fbar-date" title="From"
-            aria-label={dateRange.label ? `${dateRange.label}: from` : "From date"}
-            value={dateRange.from} onChange={e => dateRange.onFromChange(e.target.value)} />
-          <span className="sub">–</span>
-          <input type="date" className="fbar-date" title="To"
-            aria-label={dateRange.label ? `${dateRange.label}: to` : "To date"}
-            value={dateRange.to} onChange={e => dateRange.onToChange(e.target.value)} />
-        </div>
+        <label className="fbar-field" style={{ minWidth: 0 }}>
+          {dateRange.label && <span className="sub">{dateRange.label}</span>}
+          <span className="fbar-daterange">
+            <input type="date" className="fbar-date" title="From"
+              aria-label={dateRange.label ? `${dateRange.label}: from` : "From date"}
+              value={dateRange.from} max={dateRange.to || undefined}
+              onChange={e => dateRange.onFromChange(e.target.value)} />
+            <span className="sub">–</span>
+            <input type="date" className="fbar-date" title="To"
+              aria-label={dateRange.label ? `${dateRange.label}: to` : "To date"}
+              value={dateRange.to} min={dateRange.from || undefined}
+              onChange={e => dateRange.onToChange(e.target.value)} />
+          </span>
+        </label>
       )}
       {active && (
         <div className="right">

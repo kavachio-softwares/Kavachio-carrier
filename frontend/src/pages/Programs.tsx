@@ -207,7 +207,7 @@ export default function Programs() {
             <div className="card" style={{ overflow: "visible", marginBottom: 14, padding: "14px 20px" }}>
               {/* One row, every control the same height (fbar-even in
                   proto.css). The search takes whatever width is left. */}
-              <div className="fbar-even">
+              <div className="fbar-even" style={{ alignItems: "flex-end" }}>
                 <div className="search">
                   <Search className="ic" />
                   <input placeholder="Search by programme or broker…" value={q}
@@ -220,13 +220,17 @@ export default function Programs() {
                       onClick={() => setStep(f.v)}>{f.label}</button>
                   ))}
                 </div>
-                <div className="fbar-daterange">
-                  <input type="date" className="fbar-date" aria-label="Created from date"
-                    value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
-                  <span className="sub">–</span>
-                  <input type="date" className="fbar-date" aria-label="Created to date"
-                    value={dateTo} onChange={e => setDateTo(e.target.value)} />
-                </div>
+                {/* The date each programme was created (under its name). */}
+                <label className="fbar-field" style={{ minWidth: 0 }}>
+                  <span className="sub">Created between</span>
+                  <span className="fbar-daterange">
+                    <input type="date" className="fbar-date" aria-label="Created from date"
+                      value={dateFrom} max={dateTo || undefined} onChange={e => setDateFrom(e.target.value)} />
+                    <span className="sub">–</span>
+                    <input type="date" className="fbar-date" aria-label="Created to date"
+                      value={dateTo} min={dateFrom || undefined} onChange={e => setDateTo(e.target.value)} />
+                  </span>
+                </label>
                 {/* Always in the row, only hidden, so the controls beside it do
                     not jump when a filter is first set. */}
                 <button type="button" className="fbar-clear" onClick={clearFilters}

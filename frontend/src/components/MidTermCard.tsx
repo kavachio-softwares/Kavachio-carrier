@@ -177,9 +177,7 @@ export function MidTermCard({ rec, onRecord, onNotice }: {
                 ? `${o.rule_name} ${a.rules?.closing.find(c => c.rule_id === o.replaces)?.value ?? ""} until ${a.boundary?.old_until}, ${o.value} from ${o.from}`
                 : `new ${o.rule_name} ${o.value} from ${o.from}`).join("; ")}
               {typeof a.checks_unchanged === "number" && ` · ${a.checks_unchanged} other checks unchanged`}
-              <InfoTip text="Files keep being checked on the current terms until this change is
-                agreed and signed by both sides. Then each row is checked by the version in force
-                on its transaction effective date." />
+              <InfoTip text="Files are checked on the current terms until both sides sign this change. After that, each row uses the terms in force on its effective date." />
             </div>
           )}
           {a.change_request && (
@@ -350,9 +348,7 @@ export function MidTermCard({ rec, onRecord, onNotice }: {
           {!!h.applied?.recheck?.length && !isBrokerSeat() && (
             <div style={{ marginTop: 6 }}>
               <b>Files to re-check</b>{" "}
-              <InfoTip text="Checked before this change went live, for a period that runs past its
-                date. Open each one and re-check it to apply the dated checks — Kavachio never
-                re-runs a file by itself." />
+              <InfoTip text="Files checked before this change, for periods that run past its date. Open each one and re-check it; this is never done automatically." />
               <ul style={{ margin: "2px 0 0", paddingLeft: 18, fontSize: 12.5 }}>
                 {h.applied.recheck.map(f => (
                   <li key={f.export_id}>

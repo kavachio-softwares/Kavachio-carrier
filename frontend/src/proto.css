@@ -90,6 +90,12 @@
 .proto-side .nav{padding:14px 12px;overflow-y:auto;flex:1;min-height:0}
 .proto-side .group{margin:16px 10px 8px;font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:#5C6678;font-weight:700;display:flex;align-items:center;gap:8px}
 .proto-side .group::after{content:"";flex:1;height:1px;background:var(--p-side-line)}
+/* A section heading that opens and closes its links (Layout.tsx). The chevron
+   sits after the rule, at the right-hand end. */
+.proto-side .group-btn{width:calc(100% - 20px);background:none;border:0;padding:4px 0;font-family:inherit;cursor:pointer;text-align:left;border-radius:4px;transition:color .12s}
+.proto-side .group-btn:hover{color:var(--p-side-bright)}
+.proto-side .group-btn:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}
+.proto-side .group-chev{order:1;flex:0 0 auto;transition:transform .15s}
 .proto-side a.item{display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:var(--p-r-sm);color:var(--p-side-ink);font-size:13.5px;font-weight:500;margin-bottom:2px;position:relative;transition:background .12s,color .12s;text-decoration:none}
 .proto-side a.item:hover{background:rgba(255,255,255,.05);color:var(--p-side-bright)}
 .proto-side a.item.active{background:rgba(7,114,130,.16);color:#fff;font-weight:600}
@@ -128,6 +134,8 @@
 .proto-side.collapsed .wscard:hover{background:transparent;box-shadow:none}
 .proto-side.collapsed .wscard-meta,.proto-side.collapsed .wscard-go{display:none}
 .proto-side.collapsed .group{margin:14px 16px;gap:0;font-size:0;letter-spacing:0}
+.proto-side.collapsed .group-btn{width:auto;cursor:default}
+.proto-side.collapsed .group-chev{display:none}
 .proto-side.collapsed a.item{justify-content:center;gap:0;padding:11px 0}
 .proto-side.collapsed .item-label{display:none}
 .proto-side.collapsed .side-user{justify-content:center;gap:0;padding:8px 0}
@@ -395,19 +403,35 @@
 .info-tip > .ic{width:14px;height:14px;cursor:help}
 .info-tip-bubble{
   position:fixed;
-  width:230px;background:#0E1320;color:#fff;font-size:12px;font-weight:500;line-height:1.5;
-  padding:9px 11px;border-radius:8px;box-shadow:0 18px 44px -12px rgba(8,12,22,.5);
-  white-space:pre-line;z-index:9999;pointer-events:none;animation:info-tip-rise .12s ease;
+  /* Sizes to its text — short notes stay compact, longer ones wrap at 340px
+     (BUBBLE_MAX in InfoTip.tsx) instead of a tall 230px column. */
+  width:max-content;max-width:min(340px, calc(100vw - 16px));
+  background:#0E1320;color:#fff;font-size:12.5px;font-weight:500;line-height:1.55;
+  padding:10px 13px;border-radius:8px;box-shadow:0 18px 44px -12px rgba(8,12,22,.5);
+  text-align:left;overflow-wrap:break-word;
+  z-index:9999;pointer-events:none;animation:info-tip-rise .12s ease;
 }
 .info-tip-bubble[data-placement="above"]::after{
-  content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);
+  content:"";position:absolute;top:100%;left:var(--tip-arrow,50%);transform:translateX(-50%);
   border:5px solid transparent;border-top-color:#0E1320;
 }
 .info-tip-bubble[data-placement="below"]::after{
-  content:"";position:absolute;bottom:100%;left:50%;transform:translateX(-50%);
+  content:"";position:absolute;bottom:100%;left:var(--tip-arrow,50%);transform:translateX(-50%);
   border:5px solid transparent;border-bottom-color:#0E1320;
 }
 @keyframes info-tip-rise{from{opacity:0}to{opacity:1}}
+/* Tooltip text laid out by components/tipText.tsx: one sentence per
+   paragraph with a gap, a bold lead, the "Click …" action set apart last.
+   Literal colours: the bubble is portaled outside .proto, and the Tailwind
+   bubble (ui/InfoTip) is navy — both dark, so the same light tones work. */
+.tip-body{display:flex;flex-direction:column;gap:6px;white-space:normal}
+.tip-body > span{display:block}
+.tip-lead{font-weight:650;color:#fff}
+.tip-text{font-weight:400;color:rgba(255,255,255,.84)}
+.tip-bullet{font-weight:400;color:rgba(255,255,255,.84);position:relative;padding-left:13px}
+.tip-bullet::before{content:"";position:absolute;left:2px;top:.62em;width:5px;height:5px;border-radius:50%;background:rgba(255,255,255,.55)}
+.tip-rule{height:1px;background:rgba(255,255,255,.14);margin:2px 0}
+.tip-action{font-weight:500;color:#9CC9FF}
 
 /* forms */
 .proto .field{margin-bottom:16px}

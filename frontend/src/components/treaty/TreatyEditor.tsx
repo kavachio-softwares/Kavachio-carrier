@@ -270,10 +270,7 @@ export function TreatyEditor({
             <div className="fh">
               {spec.multi_layer ? "Layers and who holds them" : "Who holds it"}
               <span style={{ color: "var(--p-crit-ink)" }}>*</span>
-              <InfoTip text={"At least one reinsurer is required. "
-                + "Each reinsurer's share is a percentage of the layer. "
-                + "A layer is placed when its shares reach 100%. Reinsurers are "
-                + "not on Kavachio, so these are your record of their signed lines."} />
+              <InfoTip text="Add at least one reinsurer. Each share is a percentage of the layer; a layer is placed when its shares reach 100%." />
             </div>
             {err("layers") && <div className="note warn" style={{ marginBottom: 10 }}>{err("layers")}</div>}
             {layers.map((lay, i) => {

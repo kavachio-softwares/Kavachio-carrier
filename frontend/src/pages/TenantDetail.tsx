@@ -665,7 +665,7 @@ export default function TenantDetail() {
           <div className="card">
             <ListFilterBar
               search={{ value: runQ, onChange: setRunQ, placeholder: "Search program or file…" }}
-              dateRange={{ label: "Received between", from: runDateFrom, onFromChange: setRunDateFrom, to: runDateTo, onToChange: setRunDateTo }}
+              dateRange={{ label: "Processed between", from: runDateFrom, onFromChange: setRunDateFrom, to: runDateTo, onToChange: setRunDateTo }}
               onClear={clearRunFilters}
               active={runFiltersActive}
             />

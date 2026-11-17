@@ -1923,6 +1923,13 @@ def calendar_list(mga: Optional[str] = None, program_id: Optional[int] = None,
 @router.get("/calendar/board")
 def calendar_board_view(mga: Optional[str] = None, month: Optional[str] = None,
                         carrier: Optional[int] = None, broker: Optional[int] = None,
+                        program_id: Optional[int] = None,
+                        q: Optional[str] = Query(None, max_length=100),
+                        filter_program: Optional[int] = None,
+                        filter_broker: Optional[int] = None,
+                        status: Optional[str] = None, case: Optional[str] = None,
+                        frequency: Optional[str] = None, stage: Optional[str] = None,
+                        options: bool = False,
                         principal: Principal = Depends(current_principal)):
     """The carrier's Bordereau Calendar for one due-month (requirement 17.2).
 
@@ -1935,10 +1942,45 @@ def calendar_board_view(mga: Optional[str] = None, month: Optional[str] = None,
     `carrier` (tenant id) and/or one `broker` (party id), the same two filters
     as the platform dashboard. Anyone tenant-bound is pinned to their own
     tenant as before; `carrier`/`broker` are meaningless for them and ignored.
+
+    The screen's filters narrow the two tables only (BoardFilters), never the
+    headline counts: `q` (programme / broker / contract name), `filter_program`,
+    `filter_broker`, and comma-separated `status` and `case` for the month's
+    rows, `frequency` and `stage` for the programme list. `options=true` adds
+    the programme and broker choices for those dropdowns.
+
+    A filtered request re-reads the board without healing or sweeping the
+    calendar first: the unfiltered load that opened the screen just did, and a
+    filter change should not write.
     """
     from submission_calendar_service import (
-        calendar_board, sweep_overdue, heal_calendars,
+        calendar_board, sweep_overdue, heal_calendars, board_filter_options,
+        BoardFilters, BOARD_STAGES, _FREQ_LABEL,
     )
+    from submission_case import OPEN as CASE_OPEN, RESOLVED as CASE_RESOLVED
+
+    def _picks(raw: Optional[str], allowed, what: str) -> frozenset:
+        vals = frozenset(v.strip() for v in (raw or "").split(",") if v.strip())
+        bad = vals - set(allowed)
+        if bad:
+            raise HTTPException(400, f"unknown {what}: {', '.join(sorted(bad))}")
+        return vals
+
+    filters = BoardFilters(
+        q=q or "", program_id=filter_program, broker_id=filter_broker,
+        statuses=_picks(status, ("scheduled", "due_soon", "due_today", "overdue",
+                                 "never_arrived", "on_time", "received_late"), "status"),
+        cases=_picks(case, (*CASE_OPEN, CASE_RESOLVED, "none"), "case"),
+        frequencies=_picks(frequency, (*_FREQ_LABEL, "not_set"), "frequency"),
+        stages=_picks(stage, BOARD_STAGES, "stage"))
+    refresh = not (filters.narrows_rows or filters.narrows_schedules)
+
+    def _board(s, tid, **kw) -> dict:
+        out = calendar_board(s, tid, month=month, filters=filters, **kw)
+        if options:
+            out["filter_options"] = board_filter_options(s, tid)
+        return out
+
     with SessionLocal() as s:
         if principal.is_platform_admin and not mga:
             tid = carrier
@@ -1948,24 +1990,26 @@ def calendar_board_view(mga: Optional[str] = None, month: Optional[str] = None,
                 # (sweep_scheduler.py); redoing that DB-wide on every
                 # dashboard click would be needless load for a view nobody
                 # can act from anyway (platform admin is read-only here).
-                if tid is not None:
+                if tid is not None and refresh:
                     heal_calendars(s, tenant_id=tid)
                     sweep_overdue(s, tenant_id=tid)
                     s.commit()
             except Exception:   # never let the reminder path break the view
                 s.rollback()
-            return calendar_board(s, tid, month=month, broker_id=broker)
+            return _board(s, tid, broker_id=broker)
         tid = resolve_tenant_id(s, principal, mga)
-        try:
-            # Calendars built under older rules — no broker on their rows, or
-            # deadlines still running past a contract that has ended — are brought
-            # up to date on view, the same way the sweep below runs.
-            heal_calendars(s, tenant_id=tid)
-            sweep_overdue(s, tenant_id=tid)
-            s.commit()
-        except Exception:      # never let the reminder path break the view
-            s.rollback()
-        return calendar_board(s, tid, month=month)
+        if refresh:
+            try:
+                # Calendars built under older rules — no broker on their rows, or
+                # deadlines still running past a contract that has ended — are
+                # brought up to date on view, the same way the sweep below runs.
+                heal_calendars(s, tenant_id=tid)
+                sweep_overdue(s, tenant_id=tid)
+                s.commit()
+            except Exception:      # never let the reminder path break the view
+                s.rollback()
+        # `program_id`: the dashboard's programme pick — one programme's board.
+        return _board(s, tid, program_ids=[program_id] if program_id is not None else None)
 
 
 @router.get("/calendar/{expected_id}/versions")
@@ -5114,6 +5158,92 @@ def program_contract_activate(program_id: int, contract_id: int,
 CONTRACT_EXPIRING_SOON_DAYS = 30
 
 
+def _dashboard_window(period: Optional[str]) -> tuple[Optional[date], Optional[date]]:
+    """The carrier dashboard's ONE period pick as its first and last day:
+    'YYYY-MM' a month, 'YYYY' a year, 'all' (or nothing) every day — the same
+    three the calendar board takes. Every card under the pick counts a file by
+    the DB's own date of it (func.date), as the Bordereau Status chart and its
+    day list always have, so a file sits in the same month on every card."""
+    import calendar as _cal
+    if not period or period == "all":
+        return None, None
+    m = _re_sb.fullmatch(r"(\d{4})(?:-(\d{2}))?", period)
+    if not m or (m.group(2) and not 1 <= int(m.group(2)) <= 12):
+        raise HTTPException(400, "period must be YYYY-MM, YYYY or all")
+    y = int(m.group(1))
+    if m.group(2):
+        mo = int(m.group(2))
+        return date(y, mo, 1), date(y, mo, _cal.monthrange(y, mo)[1])
+    return date(y, 1, 1), date(y, 12, 31)
+
+
+def _in_window(col, start: Optional[date], end: Optional[date]):
+    """SQL filters putting `col`'s date inside the window (none for 'all')."""
+    out = []
+    if start is not None:
+        out.append(func.date(col) >= start)
+    if end is not None:
+        out.append(func.date(col) <= end)
+    return out
+
+
+@router.get("/dashboard/bordereau-status")
+def dashboard_bordereau_status(mga: str, period: Optional[str] = None,
+                               program_id: Optional[int] = None,
+                               principal: Principal = Depends(current_principal)):
+    """The Bordereau Status chart for the dashboard's period pick: clean and
+    flagged files, and exceptions resolved, counted the way /dashboard/stats'
+    seven-day series counts them (every status other than 'clean' is flagged;
+    fix / approve / dismiss / reject settle an exception).
+
+    One bar per day for a month, per month for a year, per year for all years.
+    `program_id` narrows it to one programme — the Programme Overview's pick.
+    """
+    start, end = _dashboard_window(period)
+    today = datetime.utcnow().date()
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        runs_q = (s.query(func.date(OutputExport.created_at), OutputExport.status,
+                          func.count(OutputExport.id))
+                  .filter(OutputExport.tenant_id == tid,
+                          *_in_window(OutputExport.created_at, start, end)))
+        dec_q = (s.query(func.date(ExceptionDecisionLog.decided_at),
+                         func.count(ExceptionDecisionLog.id))
+                 .filter(ExceptionDecisionLog.tenant_id == tid,
+                         ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss", "reject")),
+                         *_in_window(ExceptionDecisionLog.decided_at, start, end)))
+        if program_id is not None:
+            runs_q = runs_q.filter(OutputExport.program_id == program_id)
+            dec_q = dec_q.filter(ExceptionDecisionLog.program_id == program_id)
+        runs = runs_q.group_by(func.date(OutputExport.created_at), OutputExport.status).all()
+        decided = dec_q.group_by(func.date(ExceptionDecisionLog.decided_at)).all()
+
+    # The bucket a day falls in: the day itself, its month, or its year.
+    unit = "day" if period and len(period) == 7 else "month" if period and len(period) == 4 else "year"
+    key = (lambda d: d.isoformat()) if unit == "day" else \
+          (lambda d: d.strftime("%Y-%m")) if unit == "month" else (lambda d: str(d.year))
+    as_date = lambda d: d if isinstance(d, date) else date.fromisoformat(str(d))
+
+    if unit == "day":
+        keys = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
+    elif unit == "month":
+        keys = [f"{start.year}-{m:02d}" for m in range(1, 13)]
+    else:
+        years = [as_date(d).year for d, *_ in runs] + [as_date(d).year for d, _ in decided]
+        first = min(years) if years else today.year
+        keys = [str(y) for y in range(first, max(today.year, max(years, default=first)) + 1)]
+    by = {k: {"key": k, "clean": 0, "flagged": 0, "resolved": 0} for k in keys}
+    for d, status, c in runs:
+        b = by.get(key(as_date(d)))
+        if b is not None:
+            b["clean" if status == "clean" else "flagged"] += c
+    for d, c in decided:
+        b = by.get(key(as_date(d)))
+        if b is not None:
+            b["resolved"] += c
+    return {"period": period or "all", "unit": unit, "items": [by[k] for k in keys]}
+
+
 @router.get("/dashboard/stats")
 def dashboard_stats(mga: str, principal: Principal = Depends(current_principal)):
     """Aggregates for the home dashboard."""
@@ -5843,6 +5973,7 @@ def dashboard_broker_performance(mga: str,
                                  days: int = Query(30, ge=7, le=90),
                                  limit: int = Query(5, ge=1, le=20),
                                  program_id: Optional[int] = None,
+                                 period: Optional[str] = None,
                                  principal: Principal = Depends(current_principal)):
     """How each broker company is working, and how far its issues have been
     resolved — the most recently active `limit` brokers of this carrier.
@@ -5881,8 +6012,17 @@ def dashboard_broker_performance(mga: str,
 
     `program_id` narrows the card to one programme's files — the Programme
     Overview's drill-down from a programme to its brokers.
+
+    `period` (YYYY-MM, YYYY or all) is the dashboard's one period pick and
+    replaces `days`: the files counted are the ones run in it, by the same date
+    every other card under the pick uses (_dashboard_window).
     """
     since = datetime.utcnow() - timedelta(days=days)   # stored times are utcnow
+    start, end = _dashboard_window(period) if period else (None, None)
+
+    def _when(col):
+        return _in_window(col, start, end) if period else [col >= since]
+
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
         # Which brokers to report is read off the runs themselves — a broker is
@@ -5895,7 +6035,7 @@ def dashboard_broker_performance(mga: str,
                              OutputExport.status, OutputExport.created_at)
                      .filter(OutputExport.tenant_id == tid,
                              OutputExport.broker_party_id.isnot(None),
-                             OutputExport.created_at >= since))
+                             *_when(OutputExport.created_at)))
         if program_id is not None:
             exports_q = exports_q.filter(OutputExport.program_id == program_id)
         exports = (exports_q
@@ -5914,7 +6054,7 @@ def dashboard_broker_performance(mga: str,
         # No "latest file" is singled out any more: outstanding work cannot be
         # hidden by a later good run when every file in the window is counted.
 
-        ranked = sorted(per.items(), key=lambda kv: kv[1]["last_run_at"] or since,
+        ranked = sorted(per.items(), key=lambda kv: kv[1]["last_run_at"] or datetime.min,
                         reverse=True)[:limit]
         names = {p.id: (p.legal_name or p.dba_name or "—") for p in
                  s.query(Party).filter(Party.id.in_([bid for bid, _ in ranked] or [0])).all()}
@@ -5928,7 +6068,7 @@ def dashboard_broker_performance(mga: str,
             ids_q = s.query(OutputExport.id).filter(
                 OutputExport.tenant_id == tid,
                 OutputExport.broker_party_id == broker_id,
-                OutputExport.created_at >= since,
+                *_when(OutputExport.created_at),
                 OutputExport.id.in_(live or {-1}))
             if program_id is not None:
                 ids_q = ids_q.filter(OutputExport.program_id == program_id)
@@ -5958,14 +6098,42 @@ def dashboard_broker_performance(mga: str,
                 "last_run_at": _iso_utc(b["last_run_at"]),
                 "work": _work(bid),
             })
-        return {"days": days, "items": items, "active_total": len(per)}
+
+        # With a programme picked, its brokers that sent nothing in the window
+        # are listed too, after the ones that did — "no file received" under a
+        # broker's name says who is quiet, where an empty card said nothing.
+        # The same brokers the Programme Overview counts (the calendar's
+        # active links), with when each last sent a file on this programme.
+        if program_id is not None and len(items) < limit:
+            from submission_calendar_service import active_broker_ids
+            idle = [b for b in active_broker_ids(s, program_id) if b not in per]
+            idle = idle[:limit - len(items)]
+            if idle:
+                idle_names = {p.id: (p.legal_name or p.dba_name or "—") for p in
+                              s.query(Party).filter(Party.id.in_(idle)).all()}
+                last_sent = dict(
+                    s.query(OutputExport.broker_party_id, func.max(OutputExport.created_at))
+                    .filter(OutputExport.tenant_id == tid,
+                            OutputExport.program_id == program_id,
+                            OutputExport.broker_party_id.in_(idle))
+                    .group_by(OutputExport.broker_party_id).all())
+                for bid in idle:
+                    items.append({
+                        "id": bid, "name": idle_names.get(bid, "—"),
+                        "runs": 0, "clean": 0, "flagged": 0, "not_checked": 0,
+                        "last_run_at": _iso_utc(last_sent.get(bid)),
+                        "no_files": True,
+                        "work": {"files": 0, "rows": 0, "exceptions": 0,
+                                 "resolved": 0, "open": 0},
+                    })
+        return {"days": days, "period": period, "items": items, "active_total": len(per)}
 
 
 # What a programme is waiting on, most urgent first — the order the Programme
 # Overview lists them and the one status each row shows. Each names its cause,
 # so the badge says what is wrong rather than how worried to be.
 PROGRAMME_STATUS_ORDER = ("files_missing", "waiting_on_you", "exceptions_open",
-                          "contract_ending", "on_track", "setup_missing")
+                          "contract_ended", "contract_ending", "on_track", "setup_missing")
 
 
 @router.get("/dashboard/programme-overview")
@@ -5973,6 +6141,7 @@ def dashboard_programme_overview(
         mga: str,
         month: Optional[str] = None,
         days: int = Query(30, ge=7, le=90),
+        period: Optional[str] = None,
         principal: Principal = Depends(require_carrier_admin("see the programme overview"))):
     """One row per programme — the top of the hierarchy (programme → broker →
     contract → bordereau) — so the dashboard starts where the business does.
@@ -5998,14 +6167,23 @@ def dashboard_programme_overview(
       clean              of those files, the share with nothing flagged
 
     Status — the first that applies, in PROGRAMME_STATUS_ORDER:
-      setup_missing    no broker, or none with a live setup: its files cannot be
-                       checked, so nothing else is judged (listed last)
       files_missing    a bordereau is overdue or never arrived, any month
       waiting_on_you   a dispute, a held file or a contract to sign
       exceptions_open  a file still has open exceptions for the broker to fix
+      contract_ended   every contract on it has passed its end date — the
+                       calendar's own cover end (`program_cover_ends`), so no
+                       further bordereau falls due until it is renewed
       contract_ending  a contract ends within CONTRACT_EXPIRING_SOON_DAYS
+      setup_missing    no broker, or none with a live setup: its files cannot be
+                       checked yet — but they are still owed, so the calendar
+                       figures and the causes above still show
       on_track         nothing waiting
     Every cause that applies is returned in `statuses`, the first in `status`.
+
+    `period` (YYYY-MM, YYYY or all) is the dashboard's one period pick. When
+    sent it sets both windows: the bordereaux due in it (the calendar takes the
+    same three picks) and the files checked in it — in place of `month` and
+    `days`. "Files missing" stays every month: a missing file is still owed.
 
     Read only — unlike /calendar/board it does not heal or sweep the calendar.
     """
@@ -6014,13 +6192,18 @@ def dashboard_programme_overview(
     import fix_performance as fp
     import open_problems as op
     from exception_tally import current_export_ids, export_tally
-    from submission_calendar_service import calendar_board
+    from submission_calendar_service import calendar_board, program_cover_ends
 
     today = datetime.utcnow().date()
-    month = month or today.strftime("%Y-%m")
-    if not re.fullmatch(r"\d{4}-\d{2}", month):
-        raise HTTPException(400, "month must be YYYY-MM")
-    since = datetime.utcnow() - timedelta(days=days)
+    if period:
+        start, end = _dashboard_window(period)    # 400s on a bad pick
+        month = period
+        checked_when = _in_window(OutputExport.created_at, start, end)
+    else:
+        month = month or today.strftime("%Y-%m")
+        if not re.fullmatch(r"\d{4}-\d{2}", month):
+            raise HTTPException(400, "month must be YYYY-MM")
+        checked_when = [OutputExport.created_at >= datetime.utcnow() - timedelta(days=days)]
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
         board = calendar_board(s, tid, month=month)
@@ -6033,7 +6216,7 @@ def dashboard_programme_overview(
                 "brokers": len(brokers),
                 "brokers_without_setup": [b["broker_name"] for b in brokers
                                           if not b.get("setup_live")],
-                "contracts": 0, "contract_ends_soon": None,
+                "contracts": 0, "contract_ends_soon": None, "contract_ended": None,
                 "due": 0, "received": 0, "late": 0, "overdue": 0, "never": 0,
                 "files_missing": 0, "missing_from": {},
                 "files": 0, "clean_files": 0,
@@ -6071,13 +6254,20 @@ def dashboard_programme_overview(
                 if p["contract_ends_soon"] is None or ends < p["contract_ends_soon"]:
                     p["contract_ends_soon"] = ends
 
+        # Ended: the latest end date across the programme's contracts — the
+        # same date the Bordereau Calendar stops at — has passed, so nothing
+        # more falls due and "Nothing due" would hide why.
+        for pid, end in program_cover_ends(s, list(progs)).items():
+            if pid in progs and end < today:
+                progs[pid]["contract_ended"] = end.isoformat()
+
         # Exceptions: every live file in the window, one at a time (the
         # exceptions column runs to megabytes), as Broker Performance does.
         live = current_export_ids(s, tenant_id=tid)
         ids = [i for (i,) in s.query(OutputExport.id).filter(
             OutputExport.tenant_id == tid,
             OutputExport.program_id.in_(list(progs) or [-1]),
-            OutputExport.created_at >= since,
+            *checked_when,
             OutputExport.id.in_(live or {-1})).all()]
         for eid in ids:
             r = s.get(OutputExport, eid)
@@ -6126,11 +6316,16 @@ def dashboard_programme_overview(
             ("files_missing", p["files_missing"] > 0),
             ("waiting_on_you", p["waiting_on_you"] > 0),
             ("exceptions_open", p["exceptions_open"] > 0),
+            ("contract_ended", bool(p["contract_ended"])),
             ("contract_ending", bool(p["contract_ends_soon"])),
+            ("setup_missing", no_setup),
         ) if on]
-        status = "setup_missing" if no_setup else (statuses[0] if statuses else "on_track")
+        # A missing setup stops files being CHECKED, not being owed: a bordereau
+        # still falls due on the calendar, so it is one cause among the others
+        # (the least urgent) rather than one that hides them.
+        status = statuses[0] if statuses else "on_track"
 
-        # The next steps: one per cause, in status order, at most two — so a
+        # The next steps: one per cause, in status order, at most three — so a
         # programme with files missing AND exceptions open offers both ways in.
         # `link` is a screen path.
         w = p["worst_file"]
@@ -6140,32 +6335,36 @@ def dashboard_programme_overview(
         elif no_setup or p["brokers_without_setup"]:
             steps.append({"text": f"Finish the Bordereau Setup for {p['brokers_without_setup'][0]}",
                           "link": f"/programs/{pid}/setup?tab=broker&stage=4"})
-        if not no_setup:
-            for k in statuses:
-                if k == "files_missing":
-                    bid, n = max(p["missing_from"].items(), key=lambda kv: kv[1])
-                    steps.append({"text": f"Chase {_name(bid)} — {n} {'file' if n == 1 else 'files'} missing",
-                                  "link": "/bordereau-calendar"})
-                elif k == "waiting_on_you":
-                    n = p["waiting_on_you"]
-                    steps.append({"text": f"{n} {'item is' if n == 1 else 'items are'} waiting on you",
-                                  "link": f"/open-problems?program={pid}"})
-                elif k == "exceptions_open" and w:
-                    # Straight to that file's exception screen, the way the
-                    # dashboard's other file links open it.
-                    steps.append({"text": f"{_name(w['broker_party_id'])} to fix — open the file "
-                                          f"with {w['open']} {'exception' if w['open'] == 1 else 'exceptions'}",
-                                  "link": f"/uploads/{w['upload_id'] or w['export_id']}/exceptions"
-                                          f"?download={w['export_id']}&from=home"})
-                elif k == "contract_ending":
-                    steps.append({"text": "A contract ends soon — start the renewal",
-                                  "link": "/contracts?type=insurer_broker"})
-        steps = steps[:2]
+        # Each cause's own step (setup_missing's is the one above).
+        for k in statuses:
+            if k == "files_missing":
+                bid, n = max(p["missing_from"].items(), key=lambda kv: kv[1])
+                steps.append({"text": f"Chase {_name(bid)} — {n} {'file' if n == 1 else 'files'} missing",
+                              "link": "/bordereau-calendar"})
+            elif k == "waiting_on_you":
+                n = p["waiting_on_you"]
+                steps.append({"text": f"{n} {'item is' if n == 1 else 'items are'} waiting on you",
+                              "link": f"/open-problems?program={pid}"})
+            elif k == "exceptions_open" and w:
+                # Straight to that file's exception screen, the way the
+                # dashboard's other file links open it.
+                steps.append({"text": f"{_name(w['broker_party_id'])} to fix — open the file "
+                                      f"with {w['open']} {'exception' if w['open'] == 1 else 'exceptions'}",
+                              "link": f"/uploads/{w['upload_id'] or w['export_id']}/exceptions"
+                                      f"?download={w['export_id']}&from=home"})
+            elif k == "contract_ended":
+                steps.append({"text": "Renew the contract",
+                              "link": "/contracts?type=insurer_broker"})
+            elif k == "contract_ending":
+                steps.append({"text": "A contract ends soon — start the renewal",
+                              "link": "/contracts?type=insurer_broker"})
+        steps = steps[:3]
 
         items.append({
             "program_id": pid, "name": p["name"], "status": status, "statuses": statuses,
             "brokers": p["brokers"], "brokers_without_setup": len(p["brokers_without_setup"]),
             "contracts": p["contracts"], "contract_ends_soon": p["contract_ends_soon"],
+            "contract_ended": p["contract_ended"],
             "due": p["due"], "received": p["received"], "late": p["late"],
             "overdue": p["overdue"], "never": p["never"], "files_missing": p["files_missing"],
             "files": p["files"], "clean_files": p["clean_files"],
@@ -6178,7 +6377,8 @@ def dashboard_programme_overview(
         })
     items.sort(key=lambda r: (PROGRAMME_STATUS_ORDER.index(r["status"]),
                               -r["files_missing"], -r["exceptions_open"], (r["name"] or "").lower()))
-    return {"month": month, "days": days, "expiring_days": CONTRACT_EXPIRING_SOON_DAYS,
+    return {"month": month, "days": days, "period": period,
+            "expiring_days": CONTRACT_EXPIRING_SOON_DAYS,
             "items": items,
             "status_counts": {k: sum(1 for r in items if r["status"] == k)
                               for k in PROGRAMME_STATUS_ORDER}}
@@ -7368,6 +7568,7 @@ def platform_runs_on_day(day: date = Query(..., description="YYYY-MM-DD, in `tz`
 @router.get("/dashboard/runs-on-day")
 def carrier_runs_on_day(day: date = Query(..., description="YYYY-MM-DD"),
                         mga: Optional[str] = None,
+                        program_id: Optional[int] = None,
                         principal: Principal = Depends(current_principal)):
     """The files behind one bar of the carrier dashboard's Bordereau Status
     chart. Same day and same split as that chart (/dashboard/stats'
@@ -7378,6 +7579,9 @@ def carrier_runs_on_day(day: date = Query(..., description="YYYY-MM-DD"),
         q = (_day_runs_query(s)
              .filter(OutputExport.tenant_id == tid,
                      func.date(OutputExport.created_at) == day))
+        # The dashboard's programme pick, so the list matches its bar.
+        if program_id is not None:
+            q = q.filter(OutputExport.program_id == program_id)
         return _day_runs_payload(
             s, q.order_by(OutputExport.created_at, OutputExport.id).all(), day, None,
             lambda st: "clean" if st == "clean" else "flagged")

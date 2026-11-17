@@ -211,7 +211,7 @@ export default function DataQuality({ filters, onLists }: TabProps) {
           <div className="card-h">
             <BarChart3 className="ci" />
             <h3>Policies by transaction type</h3>
-            <InfoTip text="Read from each file's Transaction Type column. Not classified = blank, “UNK”, or a code the system does not know. A policy with more than one type is counted under each. Files with no policy number column are counted by row." />
+            <InfoTip text={"From each file's Transaction Type column. Not classified = blank, “UNK” or an unknown code.\nA policy with several types counts under each; files with no policy number count by row."} />
             <div className="right">
               <span className="sub">
                 {v ? (byPolicies ? plural(v.policies ?? 0, "policy", "policies") : plural(v.rows, "row")) : ""}

@@ -261,7 +261,48 @@ export type BoardResponse = {
   case_counts: Record<CaseState, number>;
   programme_count: number;
   schedules: BoardSchedule[];
+  /** Before the table filters: the month's rows and the programmes. */
+  rows_total?: number;
+  schedules_total?: number;
+  /** Sent only while a row filter is on: the month's late files in full —
+   *  what "Remind on late files" covers, whatever the table shows. */
+  late_rows?: BoardRow[];
+  /** With `options: true`: the choices for the programme / broker filters. */
+  filter_options?: {
+    programmes: { id: number; name: string }[];
+    brokers: { id: number; name: string }[];
+  };
 };
+
+/** How a broker on a programme stands — the deadlines table's Action column. */
+export type BoardStage = "no_broker" | "no_contract" | "contract_unsigned" | "setup_missing" | "ready";
+
+/** The Bordereau Calendar's table filters, applied on the server. They narrow
+ *  the two tables only; the headline counts stay the whole month's. Empty
+ *  means "any". */
+export type BoardFilters = {
+  q?: string;
+  program?: number;
+  broker?: number;
+  status?: CalendarStatus | "";
+  case?: CaseState | "none" | "";
+  frequency?: string;
+  stage?: BoardStage | "";
+  /** Also send the programme / broker choices. */
+  options?: boolean;
+};
+
+/** Query params for BoardFilters — empty values left out. */
+function filterParams(f?: BoardFilters) {
+  if (!f) return {};
+  return {
+    q: f.q?.trim() || undefined,
+    filter_program: f.program, filter_broker: f.broker,
+    status: f.status || undefined, case: f.case || undefined,
+    frequency: f.frequency || undefined, stage: f.stage || undefined,
+    options: f.options || undefined,
+  };
+}
 
 export type SubmissionVersionRow = {
   id: number;
@@ -299,11 +340,15 @@ export type SubmissionVersionRow = {
  *  board; a tenant-bound caller is pinned server-side regardless. */
 export async function getBoard(month?: string, opts?: {
   carrier?: number; broker?: number;
+  /** One programme's board — the dashboard's programme pick. */
+  program?: number;
+  filters?: BoardFilters;
 }): Promise<BoardResponse> {
   const { data } = await api.get<BoardResponse>("/calendar/board", {
     params: {
       mga: currentMga(), ...(month ? { month } : {}),
-      carrier: opts?.carrier, broker: opts?.broker,
+      carrier: opts?.carrier, broker: opts?.broker, program_id: opts?.program,
+      ...filterParams(opts?.filters),
     },
   });
   return data;
@@ -315,11 +360,13 @@ export async function getBoard(month?: string, opts?: {
  *  for the data-mapping queue). */
 export async function getPlatformBoard(month?: string, opts?: {
   carrier?: number; broker?: number;
+  filters?: BoardFilters;
 }): Promise<BoardResponse> {
   const { data } = await api.get<BoardResponse>("/calendar/board", {
     params: {
       ...(month ? { month } : {}),
       carrier: opts?.carrier, broker: opts?.broker,
+      ...filterParams(opts?.filters),
     },
   });
   return data;

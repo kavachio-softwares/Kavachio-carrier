@@ -447,9 +447,7 @@ export default function ProgramManagement() {
               <div className="tile kd-in">
                 <div className="k">
                   Active Programs
-                  <InfoTip text={"Programs writing business for this carrier, added within the "
-                    + `selected window (${rangeMeta.label.toLowerCase()}). Choose All Time for the `
-                    + "full live book. Runoff and not-yet-live programs are never counted."} />
+                  <InfoTip text={`Live programs added in the selected window (${rangeMeta.label.toLowerCase()}). Choose All Time for the whole book.`} />
                 </div>
                 <div className="v">{nf(newInRange)}</div>
                 {/* The window is the reader's to choose, so the footer states the
@@ -476,8 +474,7 @@ export default function ProgramManagement() {
               <div className="tile kd-in">
                 <div className="k">
                   Programs Under Review
-                  <InfoTip text={`Active programs whose contract term ends within the next ${d.horizon_days} days, `
-                    + "or has already passed — the continue / reprice / terminate decisions coming due."} />
+                  <InfoTip text={`Active programs whose contract term ends within ${d.horizon_days} days or has already ended — time to renew, reprice or end them.`} />
                 </div>
                 <div className="v">{nf(d.programs_under_review)}</div>
                 <div className="foot">term ends within {d.horizon_days} days</div>
@@ -486,9 +483,7 @@ export default function ProgramManagement() {
               <div className={`tile kd-in${(od?.programs ?? 0) > 0 ? " alert" : ""}`}>
                 <div className="k">
                   Overdue Bordereaux
-                  <InfoTip text={"Programs with at least one bordereau past its due date and not yet received. "
-                    + "The sub-figure is the total number of late submissions, so a program missing several "
-                    + "still reads as one problem to chase."} />
+                  <InfoTip text={"Programs with at least one bordereau past its due date and not yet received.\nThe link below counts every late bordereau."} />
                 </div>
                 <div className="v" style={{ color: (od?.programs ?? 0) > 0 ? C.crit : undefined }}>
                   {d.calendar_configured ? nf(od?.programs) : "—"}
@@ -511,8 +506,7 @@ export default function ProgramManagement() {
               <div className="tile kd-in">
                 <div className="k">
                   Overdue Audits
-                  <InfoTip text={"Underwriting audits past their due date. Kavachio does not track UW audit "
-                    + "schedules yet, so this card has no source data — it is shown for completeness."} />
+                  <InfoTip text="Underwriting audits past their due date. Kavachio does not track these yet." />
                 </div>
                 <div className="v" style={{ color: C.faint }}>—</div>
                 <div className="foot">Not tracked yet</div>
