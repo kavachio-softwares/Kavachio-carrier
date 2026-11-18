@@ -225,3 +225,14 @@ def test_period_names_read_as_words():
     assert dd.period_name("2026-10") == "October 2026"
     assert dd.period_name("2026-Q3") == "Q3 2026"
     assert dd.period_name("2026") == "2026"
+
+
+def test_a_week_or_dates_picked_list_the_files_checked_on_those_days(files):
+    files.exports = [export(1, "2027-03", [full_row("P1")]),
+                     export(2, "2027-03", [full_row("P2")])]
+    files.runs = [_run(10, 1, "2027-03-02"), _run(11, 2, "2027-03-09")]
+    out = _search(source="monthly", month="2027-03-08..2027-03-14", measure="files")
+    assert _policies(out) == {"P2"} and out["drill"]["period_name"] == "8 – 14 Mar 2027"
+    with pytest.raises(HTTPException) as e:
+        dd.resolve(None, CARRIER, source="monthly", month="2027-03-14..2027-03-08", measure="files")
+    assert e.value.status_code == 400

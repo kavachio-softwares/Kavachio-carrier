@@ -1,8 +1,9 @@
 // MOPR 42.2 — the Monthly Report's own buttons, beside the tabs so they show on
-// every tab (it is one report): download the month as a PDF or Excel file, open
-// Send & Schedule (its tag says whether the report goes out by itself, and
-// when), and send it now. What happened after a click is handed up as a note,
-// so the page can show it under the tabs.
+// every tab (it is one report): download the period picked — a month, or a
+// day, a week or dates — as a PDF or Excel file, open Send & Schedule (its tag
+// says whether the report goes out by itself, and when: always monthly), and
+// send the period picked now. What happened after a click is handed up as a
+// note, so the page can show it under the tabs.
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { CalendarClock, ChevronDown, Download, FileSpreadsheet, FileText } from "lucide-react";
@@ -11,7 +12,9 @@ import {
   type DeliverySettings, type DeliveryView,
 } from "../api/reports";
 import { Modal } from "../components/ui/Modal";
-import { fmtDay, fmtMonth, ordinal, plural } from "../utils/reportFormat";
+import {
+  fmtDay, ordinal, periodRunning, periodTitle, plural, titleInSentence, upFirst,
+} from "../utils/reportFormat";
 import type { ReportFilters } from "./MonthlyReport";
 
 export type ActionNote = { tone: "ok" | "warn"; text: string } | null;
@@ -40,7 +43,10 @@ export default function MonthlyReportActions({ filters, onNote }: {
   filters: ReportFilters;
   onNote: (note: ActionNote) => void;
 }) {
-  const { month, programId, brokerId } = filters;
+  const { cadence, period, programId, brokerId } = filters;
+  // "October 2026", "9 – 15 Nov 2026", "17 Nov 2026"…
+  const title = periodTitle(cadence, period);
+  const named = titleInSentence(cadence, title);
   const [delivery, setDelivery] = useState<DeliveryView | null>(null);
   const [menu, setMenu] = useState(false);
   const [fileBusy, setFileBusy] = useState<"pdf" | "excel" | null>(null);
@@ -68,7 +74,7 @@ export default function MonthlyReportActions({ filters, onNote }: {
   async function download(format: "pdf" | "excel") {
     setMenu(false); setFileBusy(format); onNote(null);
     try {
-      await downloadMonthlyReport({ month, format, program_id: programId, broker_party_id: brokerId });
+      await downloadMonthlyReport({ cadence, period, format, program_id: programId, broker_party_id: brokerId });
     } catch {
       onNote({ tone: "warn", text: "Could not make the file. Try again." });
     } finally {
@@ -79,12 +85,12 @@ export default function MonthlyReportActions({ filters, onNote }: {
   async function sendNow() {
     setSending(true); onNote(null);
     try {
-      const r = await sendMonthlyReport({ month });
+      const r = await sendMonthlyReport({ cadence, period });
       const sent = r.recipients.filter(x => x.delivered).map(nameAndEmail).join(", ");
       const missed = r.recipients.filter(x => !x.delivered).map(nameAndEmail).join(", ");
       onNote(r.failed === 0
-        ? { tone: "ok", text: `The ${fmtMonth(r.month)} report was sent to ${sent}.` }
-        : { tone: "warn", text: (r.delivered ? `The ${fmtMonth(r.month)} report was sent to ${sent}. ` : "")
+        ? { tone: "ok", text: `The ${named} report was sent to ${sent}.` }
+        : { tone: "warn", text: (r.delivered ? `The ${named} report was sent to ${sent}. ` : "")
             + `It could not be delivered to ${missed}.` });
       getDelivery().then(setDelivery).catch(() => undefined);
     } catch (e: any) {
@@ -104,7 +110,9 @@ export default function MonthlyReportActions({ filters, onNote }: {
     : "Not sent automatically yet.";
   const filtered = programId != null || brokerId != null;
   // Stored times are UTC, and so is the month the report counts to.
-  const running = month >= new Date().toISOString().slice(0, 7);
+  const running = cadence === "month"
+    ? period >= new Date().toISOString().slice(0, 7)
+    : periodRunning(cadence, period);
 
   return (
     <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginLeft: "auto" }}>
@@ -144,7 +152,7 @@ export default function MonthlyReportActions({ filters, onNote }: {
         Send now →
       </button>
 
-      <Modal open={confirm} size="md" title={`Send the ${fmtMonth(month)} report now?`}
+      <Modal open={confirm} size="md" title={`Send the ${named} report now?`}
         onClose={() => { if (!sending) setConfirm(false); }}
         footer={
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
@@ -176,7 +184,7 @@ export default function MonthlyReportActions({ filters, onNote }: {
         {(filtered || running) && (
           <div className="note warn" style={{ marginTop: 16 }}>
             {filtered && <div>It covers the whole carrier, not only the programme or broker picked.</div>}
-            {running && <div>{fmtMonth(month)} is not over yet, so the numbers count to today.</div>}
+            {running && <div>{upFirst(named)} is not over yet, so the numbers count to today.</div>}
           </div>
         )}
       </Modal>

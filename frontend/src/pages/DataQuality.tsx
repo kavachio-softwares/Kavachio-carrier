@@ -8,17 +8,21 @@
 //   40.1  what the checks found: passed, failed, could not run, and the errors
 //
 // Layout as agreed in the Monthly Report proposal: a one-line summary of the
-// month, four tiles each beside last month, transaction types beside the
-// checks, and the checks that failed most. The split by broker and programme
-// is not shown here (it stays in the API and in the Monthly Report's PDF /
-// Excel). The month, programme and broker are picked above the tabs
-// (MonthlyReport).
+// period, four tiles each beside the period before, transaction types beside
+// the checks, and the checks that failed most. The split by broker and
+// programme is not shown here (it stays in the API and in the Monthly Report's
+// PDF / Excel). The period — a day, a week, a month or dates picked —
+// programme and broker are picked above the tabs (MonthlyReport); the files
+// counted are the ones first checked in that period.
 import { useEffect, useState } from "react";
 import { AlertTriangle, BarChart3, LineChart, ListChecks, ShieldCheck } from "lucide-react";
 import { getDataQuality, type DataQualityReport, type TxnGroup } from "../api/reports";
 import { Delta } from "../components/Delta";
 import { InfoTip } from "../components/InfoTip";
-import { fmtMonth, fmtMonthName, num, pct, plural, share, shiftMonth } from "../utils/reportFormat";
+import {
+  fmtMonthName, inPeriod, num, pct, PERIOD_WORD, periodTitle, plural, share, type ReportCadence, upFirst,
+  VS_WORDS,
+} from "../utils/reportFormat";
 import type { TabProps } from "./MonthlyReport";
 
 // One colour per transaction type, told apart by lightness as well as hue.
@@ -40,12 +44,13 @@ const dot = (colour: string, round = true) => (
 );
 
 /** "In October 2026, 5 files (3,390 rows) came in from 2 brokers. …" */
-function summaryLine(d: DataQualityReport, filtered: boolean): string {
+function summaryLine(d: DataQualityReport, filtered: boolean, cadence: ReportCadence): string {
   const v = d.volumes, q = d.quality, h = d.no_human_help;
-  const month = fmtMonth(d.month);
+  const when = inPeriod(cadence, periodTitle(cadence, d.month));
   if (v.files === 0) {
-    return `No files were checked in ${month}${filtered ? " for this selection" : ""}. `
-      + "This report counts files checked since it was switched on — earlier months stay empty.";
+    return `No files were checked ${when}${filtered ? " for this selection" : ""}. `
+      + "This report counts files checked since it was switched on — earlier "
+      + `${cadence === "month" ? "months" : "dates"} stay empty.`;
   }
   const from = v.brokers > 0 ? ` from ${plural(v.brokers, "broker")}` : "";
   const clean = `${num(h.files)} of ${num(v.files)} ${v.files === 1 ? "was" : "were"} clean first time.`;
@@ -53,48 +58,47 @@ function summaryLine(d: DataQualityReport, filtered: boolean): string {
   const errors = q.errors === 0 ? "No errors were found."
     : `${plural(q.errors, "error")} ${q.errors === 1 ? "was" : "were"} found`
       + (top ? ` — most of them “${top}”.` : ".");
-  return `In ${month}, ${plural(v.files, "file")} (${plural(v.rows, "row")}) came in${from}. `
+  return `${upFirst(when)}, ${plural(v.files, "file")} (${plural(v.rows, "row")}) came in${from}. `
     + `${clean} ${errors}`;
 }
 
-/** "▲ 5 pts vs September (45%)" under a tile — nothing when last month is empty. */
-function VsLastMonth({ now, then, shown, month, kind, better }: {
-  now: number | null | undefined; then: number | null | undefined; shown: string; month: string;
+/** "▲ 5 pts vs September (45%)" under a tile — nothing when the period before is empty. */
+function VsLastMonth({ now, then, shown, label, kind, better }: {
+  now: number | null | undefined; then: number | null | undefined; shown: string; label: string;
   kind: "count" | "share" | "points"; better: "up" | "down" | "none";
 }) {
   if (then == null) return null;
   return (
     <div className="foot" style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-      <Delta now={now} then={then} kind={kind} better={better} /> vs {fmtMonthName(month)} ({shown})
+      <Delta now={now} then={then} kind={kind} better={better} /> vs {label} ({shown})
     </div>
   );
 }
 
 export default function DataQuality({ filters, onLists }: TabProps) {
-  const { month, programId, brokerId } = filters;
-  const before = shiftMonth(month, -1);
+  const { cadence, period, programId, brokerId } = filters;
   const [data, setData] = useState<DataQualityReport | null>(null);
-  // Last month, for the line under each tile.
-  const [prev, setPrev] = useState<DataQualityReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
     setLoading(true); setErr(null);
-    const ask = (m: string) => getDataQuality({ month: m, program_id: programId, broker_party_id: brokerId });
-    Promise.all([ask(month), ask(before).catch(() => null)])
-      .then(([d, p]) => { if (live) { setData(d); setPrev(p); onLists(d); } })
+    // One call: the period, and the period it is compared with (`previous`).
+    getDataQuality({ cadence, period, program_id: programId, broker_party_id: brokerId })
+      .then(d => { if (live) { setData(d); onLists(d); } })
       .catch(e => { if (live) setErr(e?.response?.data?.detail ?? "Could not load the report."); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
-  }, [month, before, programId, brokerId, onLists]);
+  }, [cadence, period, programId, brokerId, onLists]);
 
   const v = data?.volumes;
   const q = data?.quality;
   const h = data?.no_human_help;
-  // Last month counts only when it had files at all.
-  const pv = prev && prev.volumes.files > 0 ? prev : null;
+  // The period before counts only when it had files at all.
+  const pv = data?.previous && data.previous.volumes.files > 0 ? data.previous : null;
+  // "September", or "last week", "the same day last week", "the period before".
+  const before = cadence === "month" && pv ? fmtMonthName(pv.period) : VS_WORDS[cadence];
   const types = v?.transaction_types ?? [];
   // Shares of the transaction types: of the policies when files carry a
   // policy column, of the rows otherwise.
@@ -126,10 +130,10 @@ export default function DataQuality({ filters, onLists }: TabProps) {
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: ".04em", textTransform: "uppercase",
                         color: "var(--p-info-ink)" }}>
-            {fmtMonth(month)} at a glance
+            {periodTitle(cadence, period)} at a glance
           </div>
           <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.55, color: "var(--p-ink)" }}>
-            {loading || !data ? "Loading…" : summaryLine(data, filtered)}
+            {loading || !data ? "Loading…" : summaryLine(data, filtered, cadence)}
           </p>
         </div>
       </div>
@@ -139,7 +143,7 @@ export default function DataQuality({ filters, onLists }: TabProps) {
         <div className="tile">
           <div className="k">
             Files handled
-            <InfoTip text="Every file processed this month, counted once. A re-generate, self-check or preview is not a new file." />
+            <InfoTip text={`Every file processed this ${PERIOD_WORD[cadence]}, counted once. A re-generate, self-check or preview is not a new file.`} />
           </div>
           <div className="v">{loading ? "…" : num(v?.files)}</div>
           <div className="foot">
@@ -148,7 +152,7 @@ export default function DataQuality({ filters, onLists }: TabProps) {
               : " "}
           </div>
           <VsLastMonth now={v?.files} then={pv?.volumes.files} shown={num(pv?.volumes.files)}
-            month={before} kind="count" better="none" />
+            label={before} kind="count" better="none" />
         </div>
         <div className="tile">
           <div className="k">
@@ -158,7 +162,7 @@ export default function DataQuality({ filters, onLists }: TabProps) {
           <div className="v">{loading ? "…" : num(v?.rows)}</div>
           <div className="foot">{v?.policies != null ? plural(v.policies, "policy", "policies") : " "}</div>
           <VsLastMonth now={v?.rows} then={pv?.volumes.rows} shown={num(pv?.volumes.rows)}
-            month={before} kind="share" better="none" />
+            label={before} kind="share" better="none" />
         </div>
         <div className="tile">
           <div className="k">
@@ -173,7 +177,7 @@ export default function DataQuality({ filters, onLists }: TabProps) {
             {h && v ? <>Rows with no errors: <b style={{ color: "var(--p-ink)" }}>{num(h.rows)} of {num(v.rows)}</b> ({pct(h.rows_pct)})</> : " "}
           </div>
           <VsLastMonth now={h?.files_pct} then={pv?.no_human_help.files_pct}
-            shown={pct(pv?.no_human_help.files_pct)} month={before} kind="points" better="up" />
+            shown={pct(pv?.no_human_help.files_pct)} label={before} kind="points" better="up" />
         </div>
         <div className="tile" style={(q?.errors ?? 0) > 0 ? { borderColor: "#F3D2D7" } : undefined}>
           <div className="k">
@@ -201,7 +205,7 @@ export default function DataQuality({ filters, onLists }: TabProps) {
             ) : " "}
           </div>
           <VsLastMonth now={q?.errors} then={pv?.quality.errors} shown={num(pv?.quality.errors)}
-            month={before} kind="share" better="down" />
+            label={before} kind="share" better="down" />
         </div>
       </div>
 
@@ -319,7 +323,7 @@ export default function DataQuality({ filters, onLists }: TabProps) {
             </thead>
             <tbody>
               {(q?.top_failing_checks ?? []).length === 0 && (
-                <tr><td colSpan={6} className="muted" style={{ textAlign: "center" }}>No check failed this month.</td></tr>
+                <tr><td colSpan={6} className="muted" style={{ textAlign: "center" }}>No check failed this {PERIOD_WORD[cadence]}.</td></tr>
               )}
               {(q?.top_failing_checks ?? []).map((c, i) => {
                 const sev = c.severity ? SEVERITY[c.severity] : null;

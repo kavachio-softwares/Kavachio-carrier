@@ -5618,27 +5618,72 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         }
 
 
+def _report_window(cadence: Optional[str], period: Optional[str],
+                   month: Optional[str]) -> Optional[dict]:
+    """The period a Monthly Report tab asked for — a day, a week, a month or
+    dates picked (monthly_report.window) — or None for a call with `month`
+    alone, which every report made before the period switch and still works."""
+    import check_record
+    import monthly_report
+    if not cadence:
+        return None
+    if cadence == "month":
+        period = period or month
+        if period:
+            try:
+                check_record.month_bounds(period)
+            except (ValueError, TypeError):
+                raise HTTPException(400, "month must be YYYY-MM")
+    return monthly_report.window(cadence, period, datetime.utcnow().date())
+
+
+def _window_words(w: dict) -> dict:
+    """What a report says about its period: which kind, which one, in words."""
+    import monthly_report
+    return {"cadence": w["cadence"], "period": w["period"],
+            "title": monthly_report.period_title(w["cadence"], w["period"])}
+
+
 @router.get("/reports/data-quality")
 def report_data_quality(mga: str, month: Optional[str] = None,
                         program_id: Optional[int] = None,
                         broker_party_id: Optional[int] = None,
+                        cadence: Optional[str] = None, period: Optional[str] = None,
                         principal: Principal = Depends(current_principal)):
     """MOPR 40.2 / 40.3 — one month's data quality and volumes, read from the
     shared check record (check_record.summary): files and rows handled,
     policies split new / renewed / cancelled, checks passed and failed, errors
     found, and how many files passed with no human help.
 
-    `month` is YYYY-MM (default: this month), by the day a file was checked."""
+    `month` is YYYY-MM (default: this month), by the day a file was checked.
+    With `cadence` (day | week | month | custom) and `period`, the period
+    picked instead (monthly_report.window), plus `previous`: the same numbers
+    for the period it is compared with."""
     import check_record
-    month = month or datetime.utcnow().strftime("%Y-%m")
-    try:
-        start, end = check_record.month_bounds(month)
-    except (ValueError, TypeError):
-        raise HTTPException(400, "month must be YYYY-MM")
+    import monthly_report
+    w = _report_window(cadence, period, month)
+    if w is None:
+        month = month or datetime.utcnow().strftime("%Y-%m")
+        try:
+            start, end = check_record.month_bounds(month)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "month must be YYYY-MM")
+    else:
+        month, start, end = w["period"], monthly_report._at(w["start"]), monthly_report._at(w["end"])
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
         out = check_record.summary(s, tid, start, end, program_id=program_id,
                                    broker_party_id=broker_party_id)
+        if w is not None:
+            p = w["previous"]
+            before = check_record.summary(s, tid, monthly_report._at(p["start"]),
+                                          monthly_report._at(p["end"]), program_id=program_id,
+                                          broker_party_id=broker_party_id)
+            out.update(_window_words(w))
+            out["previous"] = {"period": p["period"],
+                               "title": monthly_report.period_title(w["cadence"], p["period"]),
+                               "volumes": before["volumes"], "quality": before["quality"],
+                               "no_human_help": before["no_human_help"]}
         # Names for the two breakdowns, and for the filters.
         broker_ids = {r["id"] for r in out["by_broker"] if r["id"]}
         prog_ids = {r["id"] for r in out["by_programme"] if r["id"]}
@@ -5686,6 +5731,7 @@ def report_exception_resolution(mga: str, month: Optional[str] = None,
                                 page: int = Query(1, ge=1),
                                 page_size: int = Query(10, ge=1, le=100),
                                 severity: Optional[str] = None,
+                                cadence: Optional[str] = None, period: Optional[str] = None,
                                 principal: Principal = Depends(current_principal)):
     """MOPR 41 — how fast the problems the checks found were fixed in a month
     (41.1), against the carrier's target (41.2), and the age and owner of every
@@ -5693,14 +5739,20 @@ def report_exception_resolution(mga: str, month: Optional[str] = None,
 
     `month` is YYYY-MM (default: this month), by the day a problem was fixed;
     the open list is always as of now. `page` / `page_size` page that list,
-    `severity` narrows it."""
+    `severity` narrows it. With `cadence` and `period`, the period picked
+    instead (monthly_report.window)."""
     import check_record
     import fix_performance as fp
-    month = month or datetime.utcnow().strftime("%Y-%m")
-    try:
-        start, end = check_record.month_bounds(month)
-    except (ValueError, TypeError):
-        raise HTTPException(400, "month must be YYYY-MM")
+    import monthly_report
+    w = _report_window(cadence, period, month)
+    if w is None:
+        month = month or datetime.utcnow().strftime("%Y-%m")
+        try:
+            start, end = check_record.month_bounds(month)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "month must be YYYY-MM")
+    else:
+        month, start, end = w["period"], monthly_report._at(w["start"]), monthly_report._at(w["end"])
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
         out = fp.summary(s, tid, start, end, program_id=program_id,
@@ -5722,50 +5774,76 @@ def report_exception_resolution(mga: str, month: Optional[str] = None,
             r["owner"] = brokers.get(b) if b else "Carrier"
         out.update(_report_filter_lists(s, tid))
         out["month"] = month
+        if w is not None:
+            out.update(_window_words(w))
         return out
+
+
+def _monthly_pack(s, tid: int, month: Optional[str], cadence: Optional[str],
+                  period: Optional[str], program_id: Optional[int],
+                  broker_party_id: Optional[int], *, for_file: bool = False) -> dict:
+    """The pack a Monthly Report call asked for: `month` alone as it always was,
+    or with `cadence` + `period` a day, a week, a month or dates picked. A file
+    also carries what only the files show (monthly_report.add_file_detail)."""
+    import monthly_report
+    if not cadence:
+        month = month or datetime.utcnow().strftime("%Y-%m")
+    w = _report_window(cadence or "month", period, month)
+    pack = monthly_report.pack_for(s, tid, w["cadence"], w["period"], program_id=program_id,
+                                   broker_party_id=broker_party_id)
+    if for_file:
+        monthly_report.add_file_detail(s, tid, pack, program_id=program_id,
+                                       broker_party_id=broker_party_id)
+    return monthly_report.name_rows(s, pack)
 
 
 @router.get("/reports/monthly")
 def report_monthly(mga: str, month: Optional[str] = None,
                    program_id: Optional[int] = None,
                    broker_party_id: Optional[int] = None,
+                   cadence: Optional[str] = None, period: Optional[str] = None,
                    principal: Principal = Depends(current_principal)):
     """MOPR 42 — the monthly pack: timeliness, volumes, data quality and fixes
-    for one month, beside last month and the same month last year, the last six
-    months, and one line per broker and programme. See monthly_report.py.
+    for one month, beside last month and the same month last year, and one line
+    per broker and programme. See monthly_report.py.
 
-    `month` is YYYY-MM (default: this month)."""
-    import check_record
-    import monthly_report
-    month = month or datetime.utcnow().strftime("%Y-%m")
-    try:
-        check_record.month_bounds(month)
-    except (ValueError, TypeError):
-        raise HTTPException(400, "month must be YYYY-MM")
+    `month` is YYYY-MM (default: this month). With `cadence` (day | week |
+    month | custom) and `period`, the period picked (monthly_report.pack_for)."""
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
-        out = monthly_report.name_rows(s, monthly_report.pack(
-            s, tid, month, program_id=program_id, broker_party_id=broker_party_id))
+        out = _monthly_pack(s, tid, month, cadence, period, program_id, broker_party_id)
         out.update(_report_filter_lists(s, tid))
         return out
 
 
-def _monthly_delivery_view(s, tid: int) -> dict:
+def _monthly_delivery_view(s, tid: int, page: Optional[int] = None,
+                           page_size: int = 10) -> dict:
     """MOPR 42.2 — the Send & Schedule screen: the settings, who receives the
-    report (the carrier's own logins), when it next goes, and what has been sent."""
+    report (the carrier's own logins), when it next goes, and what has been sent.
+    Paging is opt-in: with `page`, `sends` is that page of every report sent
+    and `sends_total` counts them all; without it, the newest 24 as before."""
     import report_delivery as rd
     cfg = rd.settings(s, tid)
     nxt = (rd.next_send(cfg["send_day"], datetime.utcnow().date(), rd.sent_months(s, tid))
            if cfg["auto_send"] else None)
-    return {"settings": cfg, "recipients": rd.people(s, tid), "next": nxt,
-            "sends": rd.history(s, tid), "send_days": list(rd.SEND_DAYS)}
+    out = {"settings": cfg, "recipients": rd.people(s, tid), "next": nxt,
+           "send_days": list(rd.SEND_DAYS)}
+    if page is None:
+        out["sends"] = rd.history(s, tid)
+        return out
+    page, page_size = max(page, 1), max(1, min(page_size, 100))
+    out.update(sends=rd.history(s, tid, limit=page_size, offset=(page - 1) * page_size),
+               sends_total=rd.count_sends(s, tid), page=page, page_size=page_size)
+    return out
 
 
 @router.get("/reports/monthly/delivery")
-def report_monthly_delivery(mga: str, principal: Principal = Depends(current_principal)):
+def report_monthly_delivery(mga: str, page: Optional[int] = None, page_size: int = 10,
+                            principal: Principal = Depends(current_principal)):
     """MOPR 42.2 — how the Monthly Report is sent, and what has been sent."""
     with SessionLocal() as s:
-        return _monthly_delivery_view(s, resolve_tenant_id(s, principal, mga))
+        return _monthly_delivery_view(s, resolve_tenant_id(s, principal, mga),
+                                      page=page, page_size=page_size)
 
 
 class MonthlyDeliveryBody(BaseModel):
@@ -5802,33 +5880,43 @@ def save_monthly_delivery(body: MonthlyDeliveryBody, mga: str,
 
 class MonthlySendBody(BaseModel):
     month: Optional[str] = None
+    # A day, a week or dates picked instead of a month (monthly_report.window).
+    cadence: Optional[str] = None
+    period: Optional[str] = None
 
 
 @router.post("/reports/monthly/send")
 def send_monthly_report(body: MonthlySendBody, mga: str,
                         principal: Principal = Depends(require_carrier_admin("send the monthly report"))):
     """MOPR 42.2 — send a month's report now (default: last month) to the
-    carrier's own logins."""
+    carrier's own logins. With `cadence` + `period`, that period's report."""
     import check_record
     import monthly_report
     import report_delivery as rd
     from audit import actor_columns
-    month = body.month or monthly_report.shift(datetime.utcnow().strftime("%Y-%m"), -1)
-    try:
-        check_record.month_bounds(month)
-    except (ValueError, TypeError):
-        raise HTTPException(400, "month must be YYYY-MM")
+    cadence = body.cadence or "month"
+    if cadence == "month":
+        month = (body.period or body.month
+                 or monthly_report.shift(datetime.utcnow().strftime("%Y-%m"), -1))
+        try:
+            check_record.month_bounds(month)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "month must be YYYY-MM")
+    else:
+        month = monthly_report.window(cadence, body.period, datetime.utcnow().date())["period"]
     kind = "now"
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
         try:
-            r = rd.send(s, tid, month, kind=kind, user_id=principal.user_id)
+            r = rd.send(s, tid, month, kind=kind, user_id=principal.user_id, cadence=cadence)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        details = {"month": month, "kind": kind, "delivered": r["delivered"],
+                   "failed": r["failed"]}
+        if cadence != "month":
+            details.update(cadence=cadence, period=r["title"])
         s.add(ActivityEvent(tenant_id=tid, actor=_actor(principal), action="monthly_report_sent",
-                            target=f"monthly_report:{month}",
-                            details={"month": month, "kind": kind, "delivered": r["delivered"],
-                                     "failed": r["failed"]},
+                            target=f"monthly_report:{month}", details=details,
                             **actor_columns(principal)))
         s.commit()
         return r
@@ -5844,20 +5932,15 @@ def _report_file_response(name: str, data: bytes, mime: str):
 def monthly_report_file(mga: str, month: Optional[str] = None, format: str = "pdf",
                         program_id: Optional[int] = None,
                         broker_party_id: Optional[int] = None,
+                        cadence: Optional[str] = None, period: Optional[str] = None,
                         principal: Principal = Depends(current_principal)):
-    """MOPR 42.2 — the month as on screen, as a PDF or Excel file."""
-    import check_record
-    import monthly_report
+    """MOPR 42.2 — the month (or, with `cadence` + `period`, the day, week or
+    dates picked) as on screen, as a PDF or Excel file."""
     import report_delivery as rd
-    month = month or datetime.utcnow().strftime("%Y-%m")
-    try:
-        check_record.month_bounds(month)
-    except (ValueError, TypeError):
-        raise HTTPException(400, "month must be YYYY-MM")
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
-        pack = monthly_report.name_rows(s, monthly_report.pack(
-            s, tid, month, program_id=program_id, broker_party_id=broker_party_id))
+        pack = _monthly_pack(s, tid, month, cadence, period, program_id, broker_party_id,
+                             for_file=True)
         scope = []
         if program_id:
             p = s.query(Program).filter(Program.id == program_id, Program.tenant_id == tid).first()

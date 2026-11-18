@@ -15,7 +15,11 @@ import {
   type DeliverySettings, type DeliveryView, type SentReport,
 } from "../api/reports";
 import { InfoTip } from "../components/InfoTip";
-import { fmtDay, fmtMonth, ordinal, plural } from "../utils/reportFormat";
+import { Pagination } from "../components/Pagination";
+import { fmtDay, fmtMonth, ordinal, periodTitle, plural } from "../utils/reportFormat";
+
+// Reports sent per page — the same page size as the other lists.
+const SENT_PAGE = 10;
 
 const KIND_WORDS: Record<SentReport["kind"], string> = {
   scheduled: "Automatic", now: "Sent by hand", test: "Test",
@@ -47,15 +51,27 @@ export default function MonthlySendSchedule() {
   const [msg, setMsg] = useState<{ tone: "ok" | "warn"; text: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const [sentPage, setSentPage] = useState(1);
+
   function take(v: DeliveryView) {
     setView(v);
     setDraft(v.settings);
   }
 
   useEffect(() => {
-    getDelivery().then(take)
+    getDelivery({ page: 1, page_size: SENT_PAGE }).then(take)
       .catch(e => setErr(e?.response?.data?.detail ?? "Could not load Send & Schedule."));
   }, []);
+
+  // Another page moves only the history — never the settings being edited.
+  function showSentPage(p: number) {
+    setSentPage(p);
+    getDelivery({ page: p, page_size: SENT_PAGE })
+      .then(v => setView(prev => (prev
+        ? { ...prev, sends: v.sends, sends_total: v.sends_total, page: v.page, page_size: v.page_size }
+        : v)))
+      .catch(() => setMsg({ tone: "warn", text: "Could not load that page of reports sent." }));
+  }
 
   const dirty = useMemo(() => !!view && !!draft && JSON.stringify(view.settings) !== JSON.stringify(draft),
     [view, draft]);
@@ -66,7 +82,12 @@ export default function MonthlySendSchedule() {
     if (!draft) return;
     setBusy(true); setMsg(null);
     try {
-      take(await saveDelivery(draft));
+      const v = await saveDelivery(draft);
+      // Saving changes the settings, not what has been sent: keep the page shown.
+      setView(prev => (prev
+        ? { ...v, sends: prev.sends, sends_total: prev.sends_total, page: prev.page, page_size: prev.page_size }
+        : v));
+      setDraft(v.settings);
       setMsg({ tone: "ok", text: "Saved. The change is kept in Audit Logs." });
     } catch (e: any) {
       setMsg({ tone: "warn", text: e?.response?.data?.detail ?? "Could not save." });
@@ -209,7 +230,7 @@ export default function MonthlySendSchedule() {
                 <table>
                   <thead>
                     <tr>
-                      <th className="l">Report month</th><th className="l">Sent on</th><th className="l">How</th>
+                      <th className="l">Report for</th><th className="l">Sent on</th><th className="l">How</th>
                       <th className="r">Sent to</th><th className="l">File</th><th className="l">Status</th>
                       <th className="r">Download</th>
                     </tr>
@@ -220,7 +241,10 @@ export default function MonthlySendSchedule() {
                     )}
                     {view.sends.map(s => (
                       <tr key={s.id}>
-                        <td className="l" style={{ fontWeight: 600 }}>{fmtMonth(s.month)}</td>
+                        {/* A month, or a day, a week or dates sent by hand. */}
+                        <td className="l" style={{ fontWeight: 600 }}>
+                          {s.cadence && s.cadence !== "month" ? periodTitle(s.cadence, s.month) : fmtMonth(s.month)}
+                        </td>
                         <td className="l">{fmtDay(s.sent_at)}</td>
                         <td className="l muted">{KIND_WORDS[s.kind]}</td>
                         <td className="r">{plural(s.people, "person", "people")}</td>
@@ -239,6 +263,10 @@ export default function MonthlySendSchedule() {
                   </tbody>
                 </table>
               </div>
+              <Pagination page={sentPage} pageSize={SENT_PAGE}
+                pageCount={Math.max(1, Math.ceil((view.sends_total ?? view.sends.length) / SENT_PAGE))}
+                totalItems={view.sends_total ?? view.sends.length}
+                onPageChange={showSentPage} noun="reports" />
             </div>
           </>
         )}

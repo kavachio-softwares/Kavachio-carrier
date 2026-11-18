@@ -259,6 +259,41 @@ def _groups(open_: list[dict]) -> list[dict]:
                                                g["check"] or ""))
 
 
+def open_now(probs: list[dict], target: int, now: datetime) -> dict:
+    """41.3 for the Monthly Report's files: every problem still open at `now` —
+    how many, how many past the target, how old (AGE_BANDS), per broker and
+    programme (who has to act), and one row per file and check, all of them
+    (`summary` pages these for the screen). Counted as `summary` counts them."""
+    open_ = [dict(p) for p in probs if not p["fixed_at"]]
+    for p in open_:
+        p["age_days"] = _days(now - p["found_at"]) if p["found_at"] else 0.0
+        p["past_target"] = p["age_days"] > target
+    bands = []
+    for key, words, lo, hi in AGE_BANDS:
+        n = sum(1 for p in open_
+                if int(p["age_days"]) >= lo and (hi is None or int(p["age_days"]) <= hi))
+        bands.append({"key": key, "label": words, "problems": n, "past_target": lo > target})
+    owners: dict[tuple, dict] = {}
+    for p in open_:
+        k = (p["broker_party_id"], p["program_id"])
+        g = owners.setdefault(k, {"broker_party_id": k[0], "program_id": k[1],
+                                  "open": 0, "past_target": 0, "oldest_days": 0.0})
+        g["open"] += 1
+        g["past_target"] += 1 if p["past_target"] else 0
+        g["oldest_days"] = max(g["oldest_days"], p["age_days"])
+    for g in owners.values():
+        g["oldest_days"] = _round(g["oldest_days"])
+    return {
+        "as_at": now.date().isoformat(), "target_days": target,
+        "problems": len(open_),
+        "past_target": sum(1 for p in open_ if p["past_target"]),
+        "oldest_days": _round(max((p["age_days"] for p in open_), default=None)),
+        "by_age": bands,
+        "by_owner": sorted(owners.values(), key=lambda g: (-g["past_target"], -g["open"])),
+        "groups": _groups(open_),
+    }
+
+
 def summary(s, tenant_id: int, start: datetime, end: datetime, *,
             program_id: Optional[int] = None, broker_party_id: Optional[int] = None,
             now: Optional[datetime] = None, page: int = 1, page_size: int = 10,

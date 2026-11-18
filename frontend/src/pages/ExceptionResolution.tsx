@@ -20,7 +20,10 @@ import {
 } from "../api/reports";
 import { InfoTip } from "../components/InfoTip";
 import { Pagination } from "../components/Pagination";
-import { fmtAge, fmtMonth, fmtMonthName, fmtTook, num, pct, plural, share } from "../utils/reportFormat";
+import {
+  fmtAge, fmtMonthName, fmtTook, inPeriod, num, pct, PERIOD_WORD, periodTitle, plural,
+  type ReportCadence, share, upFirst,
+} from "../utils/reportFormat";
 import type { TabProps } from "./MonthlyReport";
 
 const PAGE_SIZE = 10;
@@ -42,13 +45,14 @@ function When({ children }: { children: ReactNode }) {
 }
 
 /** "In October 2026, 1,240 problems were fixed, taking 2.3 days on average. …" */
-function summaryLine(d: ExceptionResolutionReport, filtered: boolean): string {
-  const f = d.fixed, o = d.open, month = fmtMonth(d.month);
+function summaryLine(d: ExceptionResolutionReport, filtered: boolean, cadence: ReportCadence): string {
+  const f = d.fixed, o = d.open;
+  const when = inPeriod(cadence, periodTitle(cadence, d.month));
   const fixedPart = f.problems > 0
-    ? `In ${month}, ${plural(f.problems, "problem")} ${f.problems === 1 ? "was" : "were"} fixed, `
+    ? `${upFirst(when)}, ${plural(f.problems, "problem")} ${f.problems === 1 ? "was" : "were"} fixed, `
       + `taking ${fmtTook(f.avg_days)} on average. ${pct(f.within_target_pct)} `
       + `${f.within_target === 1 ? "was" : "were"} fixed within the ${d.target_days}-day target.`
-    : `No problems were fixed in ${month}${filtered ? " for this selection" : ""}.`;
+    : `No problems were fixed ${when}${filtered ? " for this selection" : ""}.`;
   const waitingPart = o.problems > 0
     ? ` ${plural(o.problems, "problem")} ${o.problems === 1 ? "is" : "are"} waiting to be fixed right now`
       + (o.past_target > 0 ? ` — ${num(o.past_target)} of them longer than the target.` : ", none longer than the target.")
@@ -57,7 +61,11 @@ function summaryLine(d: ExceptionResolutionReport, filtered: boolean): string {
 }
 
 /** One row per broker on each programme, most waiting longer than target first. */
-function ByBrokerProgramme({ rows, month }: { rows: FixGroupRow[]; month: string }) {
+function ByBrokerProgramme({ rows, cadence, period }: {
+  rows: FixGroupRow[]; cadence: ReportCadence; period: string;
+}) {
+  // "Fixed in October", or "Fixed in the week of 9 Nov 2026", "Fixed on 17 Nov 2026".
+  const fixedIn = cadence === "month" ? `in ${fmtMonthName(period)}` : inPeriod(cadence, periodTitle(cadence, period));
   const [page, setPage] = useState(1);
   useEffect(() => { setPage(1); }, [rows]);
   const pageCount = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
@@ -76,7 +84,7 @@ function ByBrokerProgramme({ rows, month }: { rows: FixGroupRow[]; month: string
           <thead>
             <tr>
               <th colSpan={2} />
-              <th colSpan={3} style={{ ...split, textAlign: "center" }}>Fixed in {fmtMonthName(month)}</th>
+              <th colSpan={3} style={{ ...split, textAlign: "center" }}>Fixed {fixedIn}</th>
               <th colSpan={3} style={{ ...split, textAlign: "center" }}>Waiting now</th>
             </tr>
             <tr>
@@ -89,7 +97,7 @@ function ByBrokerProgramme({ rows, month }: { rows: FixGroupRow[]; month: string
           </thead>
           <tbody>
             {rows.length === 0 && (
-              <tr><td colSpan={8} className="muted" style={{ textAlign: "center" }}>No problems this month.</td></tr>
+              <tr><td colSpan={8} className="muted" style={{ textAlign: "center" }}>No problems this {PERIOD_WORD[cadence]}.</td></tr>
             )}
             {shown.map(r => (
               <tr key={`${r.broker_party_id}:${r.program_id}`}>
@@ -118,7 +126,7 @@ function ByBrokerProgramme({ rows, month }: { rows: FixGroupRow[]; month: string
 }
 
 export default function ExceptionResolution({ filters, onLists }: TabProps) {
-  const { month, programId, brokerId } = filters;
+  const { cadence, period, programId, brokerId } = filters;
   const [severity, setSeverity] = useState("");
   const [openPage, setOpenPage] = useState(1);
   const [data, setData] = useState<ExceptionResolutionReport | null>(null);
@@ -132,19 +140,19 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
   const [saving, setSaving] = useState(false);
   const [targetMsg, setTargetMsg] = useState<string | null>(null);
 
-  // A new month, filter or severity starts the waiting list from its first page.
-  useEffect(() => { setOpenPage(1); }, [month, programId, brokerId, severity]);
+  // A new period, filter or severity starts the waiting list from its first page.
+  useEffect(() => { setOpenPage(1); }, [cadence, period, programId, brokerId, severity]);
 
   useEffect(() => {
     let live = true;
     setLoading(true); setErr(null);
-    getExceptionResolution({ month, program_id: programId, broker_party_id: brokerId,
+    getExceptionResolution({ cadence, period, program_id: programId, broker_party_id: brokerId,
                              page: openPage, page_size: PAGE_SIZE, severity })
       .then(d => { if (live) { setData(d); onLists(d); setTargetDraft(String(d.target_days)); } })
       .catch(e => { if (live) setErr(e?.response?.data?.detail ?? "Could not load the report."); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
-  }, [month, programId, brokerId, openPage, severity, reload, onLists]);
+  }, [cadence, period, programId, brokerId, openPage, severity, reload, onLists]);
 
   async function saveTarget() {
     const days = Number(targetDraft);
@@ -171,7 +179,10 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
   const target = data?.target_days;
   const filtered = programId != null || brokerId != null;
   const first = loading && !data;
-  const monthName = fmtMonthName(month);
+  const what = PERIOD_WORD[cadence];
+  // The tag on the two tiles for the period picked: "October", or the
+  // period's own name — "Week of 9 Nov 2026", "17 Nov 2026".
+  const monthName = cadence === "month" ? fmtMonthName(period) : periodTitle(cadence, period);
 
   return (
     <>
@@ -189,10 +200,10 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: ".04em", textTransform: "uppercase",
                         color: "var(--p-info-ink)" }}>
-            {fmtMonth(month)} at a glance
+            {periodTitle(cadence, period)} at a glance
           </div>
           <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.55, color: "var(--p-ink)" }}>
-            {first || !data ? "Loading…" : summaryLine(data, filtered)}
+            {first || !data ? "Loading…" : summaryLine(data, filtered, cadence)}
           </p>
         </div>
       </div>
@@ -202,7 +213,7 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         <div className="tile">
           <div className="k">
             Average fix time
-            <InfoTip text="For the problems fixed this month: the time from when each was first found to when it was fixed, on average." />
+            <InfoTip text={`For the problems fixed this ${what}: the time from when each was first found to when it was fixed, on average.`} />
             <When>{monthName}</When>
           </div>
           <div className="v">{first ? "…" : fmtTook(f?.avg_days)}</div>
@@ -210,7 +221,7 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         <div className="tile">
           <div className="k">
             Fixed within target
-            <InfoTip text="Problems fixed this month in no more than the target time. Each change to the target is saved in Audit Logs with the old and new value." />
+            <InfoTip text={`Problems fixed this ${what} in no more than the target time. Each change to the target is saved in Audit Logs with the old and new value.`} />
             <When>{monthName}</When>
           </div>
           <div className="v" style={{ color: "var(--p-ok-ink)" }}>
@@ -300,7 +311,7 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         </div>
       </div>
 
-      <ByBrokerProgramme rows={data?.by_broker_programme ?? []} month={month} />
+      <ByBrokerProgramme rows={data?.by_broker_programme ?? []} cadence={cadence} period={period} />
 
       {/* ---- 41.3: everything waiting, one row per file and problem ------ */}
       <div className="card" style={{ marginBottom: 18 }}>

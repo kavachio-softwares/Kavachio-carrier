@@ -1,5 +1,19 @@
 import { api } from "./client";
 import { currentMga } from "../auth";
+import type { ReportCadence } from "../utils/reportFormat";
+
+/** The period a Monthly Report tab shows: a day, a week, a month or dates
+ *  picked (backend monthly_report.window). `period` is "YYYY-MM" for a month,
+ *  the day, the week's Monday, or "from..to". */
+export interface ReportPeriod {
+  cadence: ReportCadence;
+  period: string;
+}
+
+/** A month also goes as `month`, the way every call sent it before the switch. */
+const periodParams = (p: ReportPeriod) => ({
+  cadence: p.cadence, period: p.period, ...(p.cadence === "month" ? { month: p.period } : {}),
+});
 
 // MOPR 40.2 / 40.3 — one month's data quality and volumes, read from the shared
 // check record (backend check_record.summary).
@@ -48,9 +62,22 @@ export interface BrokerProgrammeRow {
 }
 
 export interface DataQualityReport {
+  /** The period: "YYYY-MM" for a month, else as asked (ReportPeriod.period). */
   month: string;
   from: string;
   to: string;
+  cadence?: ReportCadence;
+  period?: string;
+  /** "October 2026", "Week of 9 Nov 2026"… */
+  title?: string;
+  /** The period it is compared with: last month, last week, the same day last week… */
+  previous?: {
+    period: string;
+    title: string;
+    volumes: DataQualityReport["volumes"];
+    quality: DataQualityReport["quality"];
+    no_human_help: DataQualityReport["no_human_help"];
+  };
   volumes: {
     files: number;
     /** How many brokers and programmes those files came from. */
@@ -95,14 +122,13 @@ export interface DataQualityReport {
   brokers: { id: number; name: string }[];
 }
 
-export async function getDataQuality(params: {
-  month: string;
+export async function getDataQuality(params: ReportPeriod & {
   program_id?: number | null;
   broker_party_id?: number | null;
 }): Promise<DataQualityReport> {
   const { data } = await api.get<DataQualityReport>("/reports/data-quality", {
     params: {
-      mga: currentMga(), month: params.month,
+      mga: currentMga(), ...periodParams(params),
       program_id: params.program_id ?? undefined,
       broker_party_id: params.broker_party_id ?? undefined,
     },
@@ -169,9 +195,13 @@ export interface FixGroupRow {
 }
 
 export interface ExceptionResolutionReport {
+  /** The period: "YYYY-MM" for a month, else as asked (ReportPeriod.period). */
   month: string;
   from: string;
   to: string;
+  cadence?: ReportCadence;
+  period?: string;
+  title?: string;
   target_days: number;
   fixed: {
     problems: number;
@@ -200,8 +230,7 @@ export interface ExceptionResolutionReport {
   brokers: { id: number; name: string }[];
 }
 
-export async function getExceptionResolution(params: {
-  month: string;
+export async function getExceptionResolution(params: ReportPeriod & {
   program_id?: number | null;
   broker_party_id?: number | null;
   page?: number;
@@ -211,7 +240,7 @@ export async function getExceptionResolution(params: {
 }): Promise<ExceptionResolutionReport> {
   const { data } = await api.get<ExceptionResolutionReport>("/reports/exception-resolution", {
     params: {
-      mga: currentMga(), month: params.month,
+      mga: currentMga(), ...periodParams(params),
       program_id: params.program_id ?? undefined,
       broker_party_id: params.broker_party_id ?? undefined,
       page: params.page ?? 1, page_size: params.page_size ?? 10,
@@ -286,27 +315,33 @@ export interface MonthlyBrokerRow {
 }
 
 export interface MonthlyReport {
+  /** The period shown, the one it is compared with, and the same one last year
+   *  (null for a day or dates picked) — keys of `months` and `spans`. */
   month: string;
   last_month: string;
-  last_year: string;
+  last_year: string | null;
+  cadence?: ReportCadence;
+  period?: string;
+  /** Each period's dates (`to` is its last day) and its name. */
+  spans?: Record<string, { from: string; to: string; title: string }>;
   target_days: number;
   as_of: string;
+  /** The first day the carrier's files went through the system; a period that
+   *  ended before it has no records (`has_data` false — "Not available"). */
+  records_began?: string;
   months: Record<string, MonthMeasures>;
-  /** The month and the five before it, newest first. */
-  trend: string[];
   by_broker_programme: MonthlyBrokerRow[];
   programmes: { id: number; name: string }[];
   brokers: { id: number; name: string }[];
 }
 
-export async function getMonthlyReport(params: {
-  month: string;
+export async function getMonthlyReport(params: ReportPeriod & {
   program_id?: number | null;
   broker_party_id?: number | null;
 }): Promise<MonthlyReport> {
   const { data } = await api.get<MonthlyReport>("/reports/monthly", {
     params: {
-      mga: currentMga(), month: params.month,
+      mga: currentMga(), ...periodParams(params),
       program_id: params.program_id ?? undefined,
       broker_party_id: params.broker_party_id ?? undefined,
     },
@@ -336,7 +371,11 @@ export interface DeliverySettings {
 
 export interface SentReport {
   id: number;
+  /** The period: "YYYY-MM" for a month, else as sent (ReportPeriod.period). */
   month: string;
+  cadence?: ReportCadence;
+  /** "October 2026", "Week of 9 Nov 2026"… */
+  title?: string;
   /** scheduled = by itself, now = Send now, test = an early test send (no longer offered). */
   kind: "scheduled" | "now" | "test";
   sent_at: string | null;
@@ -356,13 +395,20 @@ export interface DeliveryView {
   recipients: ReportPerson[];
   /** Null while automatic sending is off. */
   next: { send_on: string; month: string } | null;
+  /** The newest 24, or — when a page is asked for — that page of them all. */
   sends: SentReport[];
+  /** Only with a page: how many reports have been sent in all. */
+  sends_total?: number;
+  page?: number;
+  page_size?: number;
   send_days: number[];
 }
 
-export async function getDelivery(): Promise<DeliveryView> {
+/** Paging is opt-in: Send & Schedule pages the reports sent; the buttons
+ *  beside the Monthly Report's tabs don't need them. */
+export async function getDelivery(paging?: { page: number; page_size?: number }): Promise<DeliveryView> {
   const { data } = await api.get<DeliveryView>("/reports/monthly/delivery",
-    { params: { mga: currentMga() } });
+    { params: { mga: currentMga(), ...(paging ?? {}) } });
   return data;
 }
 
@@ -376,6 +422,8 @@ export async function saveDelivery(body: Partial<DeliverySettings>): Promise<Del
 export interface SendResult {
   id: number;
   month: string;
+  cadence?: ReportCadence;
+  title?: string;
   kind: SentReport["kind"];
   delivered: number;
   failed: number;
@@ -383,9 +431,9 @@ export interface SendResult {
   recipients: { name: string | null; email: string; delivered: boolean }[];
 }
 
-/** Send a month's report now, to the carrier's own logins. */
-export async function sendMonthlyReport(body: { month?: string }): Promise<SendResult> {
-  const { data } = await api.post<SendResult>("/reports/monthly/send", body,
+/** Send a period's report now, to the carrier's own logins. */
+export async function sendMonthlyReport(body: ReportPeriod): Promise<SendResult> {
+  const { data } = await api.post<SendResult>("/reports/monthly/send", periodParams(body),
     { params: { mga: currentMga() } });
   return data;
 }
@@ -402,18 +450,20 @@ async function saveBlob(url: string, params: Record<string, unknown>, filename: 
   setTimeout(() => URL.revokeObjectURL(href), 1000);
 }
 
-/** The month as on screen — same filters — as a PDF or Excel file. */
-export const downloadMonthlyReport = (p: {
-  month: string; format: "pdf" | "excel"; program_id?: number | null; broker_party_id?: number | null;
+/** The period as on screen — same filters — as a PDF or Excel file. */
+export const downloadMonthlyReport = (p: ReportPeriod & {
+  format: "pdf" | "excel"; program_id?: number | null; broker_party_id?: number | null;
 }) => saveBlob("/reports/monthly/file", {
-  mga: currentMga(), month: p.month, format: p.format,
+  mga: currentMga(), ...periodParams(p), format: p.format,
   program_id: p.program_id ?? undefined, broker_party_id: p.broker_party_id ?? undefined,
-}, `Monthly Report ${p.month}.${p.format === "pdf" ? "pdf" : "xlsx"}`);
+}, `Monthly Report ${p.cadence === "week" ? "week of " : ""}${p.period.replace("..", " to ")}`
+   + `.${p.format === "pdf" ? "pdf" : "xlsx"}`);
 
 /** A report as it was sent — the numbers kept with it. */
 export const downloadSentReport = (s: SentReport, format: "pdf" | "excel") =>
   saveBlob(`/reports/monthly/sends/${s.id}/file`, { mga: currentMga(), format },
-    `Monthly Report ${s.month}.${format === "pdf" ? "pdf" : "xlsx"}`);
+    `Monthly Report ${s.cadence === "week" ? "week of " : ""}${s.month.replace("..", " to ")}`
+    + `.${format === "pdf" ? "pdf" : "xlsx"}`);
 
 /** Carrier admin only. Saved in the Audit Logs with the old and new value. */
 export async function setFixTarget(days: number): Promise<{ target_days: number; was: number }> {

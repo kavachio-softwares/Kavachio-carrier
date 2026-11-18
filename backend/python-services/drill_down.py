@@ -45,6 +45,7 @@ MONTHLY = ("files", "rows", "new", "renewed", "cancelled", "errors", "critical",
 MONTHLY_TXN = {"new": "new", "renewed": "renewed", "cancelled": "cancelled"}
 
 _MONTH = re.compile(r"\d{4}-\d{2}")
+_SPAN = re.compile(r"\d{4}-\d{2}-\d{2}\.\.\d{4}-\d{2}-\d{2}")
 
 
 def period_name(label: Optional[str]) -> str:
@@ -103,11 +104,26 @@ def _monthly(s, p, *, month: Optional[str], measure: Optional[str],
     from db import CheckError
     if p.role != "carrier_admin" or p.tenant_id is None:
         raise HTTPException(403, "The Monthly Report is for carriers.")
-    if not month or not _MONTH.fullmatch(month):
-        raise HTTPException(400, "month must be YYYY-MM")
     if measure not in MONTHLY:
         raise HTTPException(400, f"measure must be one of {', '.join(MONTHLY)}")
-    start, end = cr.month_bounds(month)
+    if month and _SPAN.fullmatch(month):
+        # A day, a week or dates picked on the Monthly Report: 'from..to',
+        # both days included — the files first checked on those days.
+        try:
+            a, b = (dt.date.fromisoformat(x) for x in month.split(".."))
+        except ValueError:
+            raise HTTPException(400, "Pick real dates.")
+        if b < a:
+            raise HTTPException(400, "The to date must be on or after the from date.")
+        start = dt.datetime(a.year, a.month, a.day)
+        end = dt.datetime(b.year, b.month, b.day) + dt.timedelta(days=1)
+        import monthly_report as mr
+        name = mr.period_title("custom", month)
+    elif month and _MONTH.fullmatch(month):
+        start, end = cr.month_bounds(month)
+        name = period_name(month)
+    else:
+        raise HTTPException(400, "month must be YYYY-MM")
     files = cr.first_runs(cr.runs_in(s, int(p.tenant_id), start, end, program_id=program_id,
                                      broker_party_id=broker_party_id))
     within: dict = {}
@@ -135,7 +151,7 @@ def _monthly(s, p, *, month: Optional[str], measure: Optional[str],
             for ln in ps._lines_of(s, o, structures.get(o.template_id)):
                 if cr._GROUP_OF.get(cr.txn_type(ln["transaction"])) == want:
                     _add(within, o.id, ps.policy_key(ln["policy"]))
-    return {"source": "monthly", "period": month, "period_name": period_name(month),
+    return {"source": "monthly", "period": month, "period_name": name,
             "files": len(within), "rows": None, "within": within}
 
 

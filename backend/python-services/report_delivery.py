@@ -16,6 +16,10 @@ carrier — by itself on the Nth working day after each month ends, or by hand
           Automatic sending is OFF until the carrier turns it on.
   WHAT    the numbers go out exactly as they are kept (monthly_report_send.pack),
           so a file downloaded again later is the file people received.
+  PERIOD  a month, or — downloaded or sent by hand — a day, a week or dates
+          picked (monthly_report.pack_for): `month` on the send row is then that
+          period and `options.cadence` says which kind. The automatic send stays
+          monthly.
 """
 from __future__ import annotations
 
@@ -196,10 +200,32 @@ def _delta(now, then, kind: str, better: str) -> tuple[str, str]:
     return f"{sign}{size}", tone
 
 
+# A pack for a day, a week or dates picked (monthly_report.pack_for) says so in
+# `cadence`; a month's pack — and every pack kept before it existed — has none.
+VS_WORDS = {"month": "last month", "week": "last week", "day": "the day before",
+            "custom": "the period before"}
+END_WORDS = {"month": "month end", "week": "the end of the week", "day": "the end of the day",
+             "custom": "the end of the period"}
+WHAT_WORDS = {"month": "month", "week": "week", "day": "day", "custom": "period"}
+
+
+def cadence_of(pack: dict) -> str:
+    return pack.get("cadence") or "month"
+
+
+def title_of(pack: dict, key: Optional[str] = None) -> str:
+    """The words for one of the pack's periods (default: its own) —
+    'October 2026', 'Week of 9 Nov 2026', '17 Nov 2026', '1 – 18 Nov 2026'."""
+    key = key or pack["month"]
+    span = (pack.get("spans") or {}).get(key) or {}
+    return span.get("title") or fmt_month(key)
+
+
 def measures(pack: dict) -> list[tuple[str, str, list[dict]]]:
     """The Key numbers, grouped — the same rows and words as the Overview tab."""
     cur = pack["months"].get(pack["month"]) or {}
     unit = " (rows)" if (cur.get("volumes") or {}).get("counted_by") == "rows" else " policies"
+    end = END_WORDS[cadence_of(pack)]
     T = lambda m: m["timeliness"]  # noqa: E731
     V = lambda m: m["volumes"]     # noqa: E731
     Q = lambda m: m["quality"]     # noqa: E731
@@ -247,9 +273,9 @@ def measures(pack: dict) -> list[tuple[str, str, list[dict]]]:
             row(f"Fixed within target ({days})", lambda m: F(m)["within_target_pct"],
                 lambda m: _of(F(m)["within_target"], F(m)["fixed"], F(m)["within_target_pct"]),
                 "points", "up", "pct"),
-            row("Waiting to be fixed at month end", lambda m: F(m)["waiting"],
+            row(f"Waiting to be fixed at {end}", lambda m: F(m)["waiting"],
                 lambda m: _num(F(m)["waiting"]), "share", "down", "count"),
-            row("Waiting longer than target at month end", lambda m: F(m)["waiting_past_target"],
+            row(f"Waiting longer than target at {end}", lambda m: F(m)["waiting_past_target"],
                 lambda m: _num(F(m)["waiting_past_target"]), "count", "down", "count"),
         ]),
     ]
@@ -258,8 +284,9 @@ def measures(pack: dict) -> list[tuple[str, str, list[dict]]]:
 def headline(pack: dict) -> list[tuple[str, str]]:
     """The four numbers at the top of the Overview, for the email."""
     m = pack["months"].get(pack["month"]) or {}
+    c = cadence_of(pack)
     if not m.get("has_data"):
-        return [("This month", "Nothing was due, checked or fixed")]
+        return [(f"This {WHAT_WORDS[c]}", "Nothing was due, checked or fixed")]
     t, q, f = m["timeliness"], m["quality"], m["fixes"]
     return [
         ("Files on time", _of(t["on_time"], t["due_so_far"], t["on_time_pct"])),
@@ -267,15 +294,136 @@ def headline(pack: dict) -> list[tuple[str, str]]:
                                        q["clean_first_time_pct"])),
         ("Errors found", f"{_num(q['errors'])} ({_num(q['critical'])} critical)"),
         ("Average fix time", _took(f["avg_days"])),
-        ("Waiting longer than target at month end", _num(f["waiting_past_target"])),
+        (f"Waiting longer than target at {END_WORDS[c]}", _num(f["waiting_past_target"])),
     ]
 
 
 def _columns(pack: dict) -> list[tuple[str, str, Optional[str]]]:
-    """(heading, month key, compared-with key): the month, last month, last year."""
-    return [(fmt_month(pack["month"]), pack["month"], None),
-            (fmt_month(pack["last_month"]), pack["last_month"], "last month"),
-            (fmt_month(pack["last_year"]), pack["last_year"], "last year")]
+    """(heading, period key, compared-with words): the period, the one before,
+    and — a month or a week — the same one last year."""
+    cols = [(title_of(pack), pack["month"], None),
+            (title_of(pack, pack["last_month"]), pack["last_month"], VS_WORDS[cadence_of(pack)])]
+    if pack.get("last_year"):
+        cols.append((title_of(pack, pack["last_year"]), pack["last_year"], "last year"))
+    return cols
+
+
+# --- the words around the numbers (both files) -----------------------------------
+
+SEV_WORDS = {"critical": "Critical", "warning": "Warning", "info": "Info"}
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{_num(n)} {word if n == 1 else word + 's'}"
+
+
+def _fmt_day(d: date) -> str:
+    """'Wednesday 18 November 2026'."""
+    return f"{d:%A} {d.day} {d:%B %Y}"
+
+
+def _short_day(iso: str) -> str:
+    """'18 Nov 2026'."""
+    d = date.fromisoformat(iso[:10])
+    return f"{d.day} {d:%b %Y}"
+
+
+def _age(days) -> str:
+    if days is None:
+        return "—"
+    return "under 1 day" if days < 1 else _plural(int(days), "day")
+
+
+def _range_of(pack: dict, key: str) -> tuple[date, date]:
+    """The first and last day of one of the pack's periods: its span, or — a
+    month's pack kept before spans existed — the month's own days."""
+    span = (pack.get("spans") or {}).get(key)
+    if span:
+        return date.fromisoformat(span["from"]), date.fromisoformat(span["to"])
+    y, m = (int(x) for x in key.split("-")[:2])
+    return date(y, m, 1), date(y + (m == 12), m % 12 + 1, 1) - timedelta(days=1)
+
+
+def _in_period(cadence: str, title: str) -> str:
+    """'in October 2026', 'on 17 Nov 2026', 'in the week of 9 Nov 2026'."""
+    if cadence == "day":
+        return f"on {title}"
+    if cadence == "week":
+        return f"in the {title[0].lower()}{title[1:]}"
+    return f"in {title}"
+
+
+def covers(pack: dict, running: bool = True) -> str:
+    """'Covers 1 – 31 Oct 2026, compared with 1 – 30 Sep 2026 and 1 – 31 Oct
+    2025.' — the line beside the screen's period picker. `running` False
+    leaves out "Still running…" where the glance above already says it."""
+    import monthly_report as mr
+    c = cadence_of(pack)
+    m = pack["months"].get(pack["month"]) or {}
+    if c == "day":
+        day = date.fromisoformat(pack["month"])
+        if pack["month"] == pack.get("as_of"):
+            return f"Today so far, {_fmt_day(day)}, compared with yesterday."
+        return f"Covers {_fmt_day(day)}, compared with the day before, {_fmt_day(day - timedelta(days=1))}."
+
+    def span(key):
+        a, b = _range_of(pack, key)
+        return mr.period_title("custom", f"{a.isoformat()}..{b.isoformat()}")
+    vs = span(pack["last_month"]) + (f" and {span(pack['last_year'])}" if pack.get("last_year") else "")
+    return (f"Covers {span(pack['month'])}, compared with {vs}."
+            + ("" if m.get("complete", True) or not running
+               else " Still running, so the numbers count to today."))
+
+
+def glance(pack: dict, filtered: bool = False) -> str:
+    """The period in a few sentences — the screen's "at a glance" box."""
+    c = cadence_of(pack)
+    m = pack["months"].get(pack["month"]) or {}
+    p = pack["months"].get(pack["last_month"]) or {}
+    when = _in_period(c, title_of(pack))
+    sel = " for this selection" if filtered else ""
+    if not m.get("has_data"):
+        began = pack.get("records_began")
+        since = f"{_short_day(began)}" if began else "when the records began"
+        return f"There are no records {when}{sel}: this report counts from {since}."
+    before = fmt_month(pack["last_month"]).split(" ")[0] if c == "month" else VS_WORDS[c]
+    t, q, f = m["timeliness"], m["quality"], m["fixes"]
+    parts = []
+    if t["due_so_far"] > 0:
+        was = (f", {before}: {_pct(p['timeliness']['on_time_pct'])}"
+               if p.get("has_data") and p["timeliness"]["on_time_pct"] is not None else "")
+        parts.append(f"{_num(t['on_time'])} of {_plural(t['due_so_far'], 'file')} arrived on time "
+                     f"({_pct(t['on_time_pct'])}{was}).")
+    elif c != "month" and t["due"] == 0:
+        parts.append(f"No files were due {when}.")
+    if m["volumes"]["files"] > 0:
+        if q["errors"] == 0:
+            parts.append("No errors were found.")
+        else:
+            found = f"{_plural(q['errors'], 'error')} {'was' if q['errors'] == 1 else 'were'} found"
+            then = p["quality"]["errors"] if p.get("has_data") else 0
+            ch = _r(100 * (q["errors"] - then) / then) if then > 0 else None
+            if ch is None:
+                parts.append(f"{found}.")
+            elif ch == 0:
+                parts.append(f"{found}, the same as {before}.")
+            else:
+                parts.append(f"{found} — {abs(ch)}% {'fewer' if ch < 0 else 'more'} than {before}.")
+    if f["fixed"] > 0:
+        within = "all" if f["within_target_pct"] == 100 else _pct(f["within_target_pct"])
+        parts.append(f"Problems were fixed in {_took(f['avg_days'])} on average, "
+                     f"{within} within the {pack['target_days']}-day target.")
+    if t["never"] > 0:
+        parts.append(f"{_plural(t['never'], 'file')} never arrived.")
+    if not parts:
+        parts.append(f"Nothing was due, checked or fixed {when}{sel}.")
+    if not m.get("complete", True):
+        parts.append(f"The {WHAT_WORDS[c]} is still running, so these numbers count to today.")
+    return " ".join(parts)
+
+
+# How to read the colours of the "vs" columns — under the Key numbers table.
+COLOUR_KEY = "Green is better, red is worse, grey is only more or less work."
 
 
 # --- the files -------------------------------------------------------------------
@@ -289,7 +437,7 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
     from xml.sax.saxutils import escape
 
     def para(text, style):
@@ -299,7 +447,7 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=14 * mm, rightMargin=14 * mm,
                             topMargin=14 * mm, bottomMargin=14 * mm,
-                            title=f"Monthly Report — {fmt_month(pack['month'])}", author="Kavachio")
+                            title=f"Monthly Report — {title_of(pack)}", author="Kavachio")
     ss = getSampleStyleSheet()
     h1 = ParagraphStyle("h1", parent=ss["Title"], fontName="Helvetica-Bold", fontSize=18,
                         alignment=0, spaceAfter=2)
@@ -312,6 +460,8 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
     cell_r = ParagraphStyle("cellr", parent=cell, alignment=2)
     head_l = ParagraphStyle("headl", parent=cell, fontName="Helvetica-Bold", fontSize=8,
                             textColor=colors.HexColor("#566071"))
+    body = ParagraphStyle("body", parent=ss["Normal"], fontName="Helvetica", fontSize=10, leading=14)
+    small = ParagraphStyle("small", parent=sub, fontSize=8, leading=11)
     teal, line = colors.HexColor("#077282"), colors.HexColor("#E5E8EE")
 
     def table(rows, widths, group_rows=(), tones=(), left=1):
@@ -334,16 +484,23 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
         for (r, c, tone) in tones:
             style.append(("TEXTCOLOR", (c, r), (c, r), colors.HexColor(_TONE[tone])))
         t.setStyle(TableStyle(style))
+        t.hAlign = "LEFT"   # a narrow table lines up with the headings, not the middle
         return t
 
     m = pack["months"].get(pack["month"]) or {}
+    what = WHAT_WORDS[cadence_of(pack)]
     story = [
         para("Kavachio", ParagraphStyle("brand", parent=sub, textColor=teal, fontName="Helvetica-Bold")),
-        para(f"Monthly Report — {fmt_month(pack['month'])}", h1),
+        para(f"Monthly Report — {title_of(pack)}", h1),
         para(" · ".join(x for x in (carrier, scope) if x)
-                  + f" · numbers as at {datetime.fromisoformat(pack['as_of']).strftime('%d %B %Y')}"
-                  + ("" if m.get("complete", True) else " · the month was still running"), sub),
-        Spacer(1, 6),
+                  + f" · numbers as at {datetime.fromisoformat(pack['as_of']).strftime('%d %B %Y')}", sub),
+        Spacer(1, 8),
+        # The period in a few sentences (it says when the period is still
+        # running), and exactly which dates it compares.
+        para(glance(pack, filtered=bool(scope)), body),
+        Spacer(1, 2),
+        para(covers(pack, running=False), sub),
+        Spacer(1, 8),
     ]
     head = headline(pack)
     story.append(table([[para(k, head_l) for k, _ in head], [para(v, cell) for _, v in head]],
@@ -379,6 +536,7 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
         first = doc.width * 0.30
         story.append(table(rows, [first] + [(doc.width - first) / (len(header) - 1)] * (len(header) - 1),
                            group_rows, tones))
+        story.append(para(COLOUR_KEY, small))
 
     story.append(para("By broker and programme", h2))
     rows = [["Broker", "Programme", "Files on time", "Clean first time", "Errors",
@@ -390,27 +548,65 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
                      _of(b["clean_first_time"], b["files"], b["clean_first_time_pct"]),
                      _num(b["errors"]), _took(b["avg_fix_days"]), _num(b["waiting_past_target"])])
     if len(rows) == 1:
-        rows.append(["Nothing this month", "", "", "", "", "", ""])
+        rows.append([f"Nothing this {what}", "", "", "", "", "", ""])
     story.append(table(rows, [doc.width * w for w in (.2, .2, .13, .13, .09, .11, .14)], left=2))
 
-    story.append(para("Last 6 months", h2))
-    rows = [["Month", "Files on time", "Clean first time", "Errors found", "Average fix time",
-             "Waiting longer than target at month end"]]
-    for k in pack["trend"]:
-        x = pack["months"].get(k) or {}
-        if not x.get("has_data"):
-            rows.append([fmt_month(k) + " · no records", "—", "—", "—", "—", "—"])
-            continue
-        rows.append([fmt_month(k), _pct(x["timeliness"]["on_time_pct"]),
-                     _pct(x["quality"]["clean_first_time_pct"]), _num(x["quality"]["errors"]),
-                     _took(x["fixes"]["avg_days"]), _num(x["fixes"]["waiting_past_target"])])
-    story.append(table(rows, [doc.width * w for w in (.22, .14, .14, .14, .14, .22)]))
+    # 40.1 — what the checks found most (the Data Quality tab's list, top 5).
+    top = pack.get("top_checks")
+    if top is not None:
+        story.append(para("Checks that failed most", h2))
+        rows = [["#", "Check", "Severity", "Files", "Errors", "Share of all errors"]]
+        for i, ch in enumerate(top["checks"][:5], 1):
+            rows.append([str(i), para(ch["check"] or "—", cell),
+                         SEV_WORDS.get(ch["severity"] or "", "—"), _num(ch["files"]),
+                         _num(ch["errors"]), _pct(100.0 * ch["errors"] / top["errors"])
+                         if top["errors"] else "—"])
+        if len(rows) == 1:
+            rows.append(["", f"No check failed this {what}.", "", "", "", ""])
+        story.append(table(rows, [doc.width * w for w in (.05, .47, .12, .1, .1, .16)], left=2))
+
+    # 41.3 — every error still open, how old, and who has to act (the
+    # Exception Resolution tab's numbers, as at the day the file was made).
+    w = pack.get("waiting")
+    if w is not None:
+        rows = [["Waiting for", "Errors", "Share"]]
+        tones = []
+        for b in w["by_age"]:
+            late = b["past_target"] and b["problems"] > 0
+            rows.append([b["label"] + (" · past target" if late else ""), _num(b["problems"]),
+                         _pct(100.0 * b["problems"] / w["problems"]) if w["problems"] else "—"])
+            if late:
+                tones.append((len(rows) - 1, 0, "crit"))
+        # The heading, the counts and the age table stay on one page.
+        story.append(KeepTogether([
+            para(f"Errors still waiting, as at {_short_day(w['as_at'])}", h2),
+            para(f"{_num(w['problems'])} waiting · {_num(w['past_target'])} longer than the "
+                 f"{w['target_days']}-day target · longest waiting {_age(w['oldest_days'])}.", sub),
+            Spacer(1, 4),
+            table(rows, [doc.width * x for x in (.24, .1, .1)], tones=tones),
+        ]))
+        story.append(Spacer(1, 8))
+        shown = w["by_owner"][:10]
+        rows = [["Who must act", "Programme", "Waiting", "Longer than target", "Longest waiting"]]
+        tones = []
+        for g in shown:
+            rows.append([para(g.get("owner") or "—", cell), para(g.get("programme_name") or "—", cell),
+                         _num(g["open"]), _num(g["past_target"]), _age(g["oldest_days"])])
+            if g["past_target"]:
+                tones.append((len(rows) - 1, 3, "crit"))
+        if len(rows) == 1:
+            rows.append(["Nothing is waiting to be fixed.", "", "", "", ""])
+        story.append(table(rows, [doc.width * x for x in (.28, .28, .12, .16, .16)],
+                           tones=tones, left=2))
+        if len(w["by_owner"]) > len(shown):
+            story.append(para(f"…and {len(w['by_owner']) - len(shown)} more — every one is in "
+                              "the Excel file.", small))
 
     def _footer(canvas, d):
         canvas.saveState()
         canvas.setFont("Helvetica", 7.5)
         canvas.setFillColor(colors.HexColor("#8B93A2"))
-        canvas.drawString(d.leftMargin, 8 * mm, f"Kavachio · Monthly Report — {fmt_month(pack['month'])}")
+        canvas.drawString(d.leftMargin, 8 * mm, f"Kavachio · Monthly Report — {title_of(pack)}")
         canvas.drawRightString(d.leftMargin + d.width, 8 * mm, f"Page {canvas.getPageNumber()}")
         canvas.restoreState()
 
@@ -422,7 +618,7 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
     """The pack as an Excel workbook — the same report, with numbers you can
     work with: counts as numbers, shares as percentages, times in days."""
     from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
     wb = Workbook()
     ws = wb.active
@@ -453,9 +649,6 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
             return v, '0.0 "days"'
         return v, "#,##0"
 
-    put(ws, 1, 1, f"Monthly Report — {fmt_month(pack['month'])}", font=Font(bold=True, size=14))
-    put(ws, 2, 1, " · ".join(x for x in (carrier, scope) if x)
-        + f" · numbers as at {pack['as_of']}")
     cols = _columns(pack)
     m = pack["months"].get(pack["month"]) or {}
     header = ["Measure"]
@@ -463,6 +656,25 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
         header.append(name)
         if vs:
             header.append(f"vs {vs}")
+    width = len(header)
+    tables: list[tuple] = []   # (sheet, first row, last row, last column) to box
+
+    def banner(sheet, r, text, cols, *, font=None, height=None, center=False):
+        """One line across a table's width: a title, or a sentence that wraps."""
+        x = put(sheet, r, 1, text, font=font)
+        sheet.merge_cells(start_row=r, start_column=1, end_row=r, end_column=cols)
+        x.alignment = Alignment(horizontal="center" if center else "left", wrap_text=True)
+        if height:
+            sheet.row_dimensions[r].height = height
+
+    # The title sits on top of the table, centred across it, as the box's
+    # first line; under it the period in a few sentences and the dates it
+    # compares. A file narrowed to a programme or broker says which.
+    banner(ws, 1, f"Monthly Report — {title_of(pack)}" + (f" · {scope}" if scope else ""), width,
+           font=Font(bold=True, size=14), height=26, center=True)
+    said = glance(pack, filtered=bool(scope))
+    banner(ws, 2, said, width, height=15 * (1 + len(said) // 120))
+    banner(ws, 3, covers(pack, running=False), width, font=Font(color="566071"), height=18)
     r = 4
     for c, h in enumerate(header, 1):
         put(ws, r, c, h, font=bold, fill=grey)
@@ -485,6 +697,9 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
                     else:
                         text, tone = "—", "mut"
                     put(ws, r, c, text, font=tone_font[tone])
+    tables.append((ws, 1, r, width))
+    # How to read the colours, under the table and outside its box.
+    banner(ws, r + 2, COLOUR_KEY, width, font=Font(size=9, color="566071"), height=13)
     ws.column_dimensions["A"].width = 42
     for col in "BCDEF":
         ws.column_dimensions[col].width = 18
@@ -505,31 +720,96 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
             put(wb2, i, c, v, "0%" if c in (5, 8) else ("0.0" if c == 10 else None))
     for col, w in zip("ABCDEFGHIJK", (28, 28, 14, 14, 11, 13, 15, 16, 10, 20, 24)):
         wb2.column_dimensions[col].width = w
+    tables.append((wb2, 1, wb2.max_row, len(heads)))
 
-    wb3 = wb.create_sheet("Last 6 months")
-    heads = ["Month", "Files on time %", "Clean first time %", "Errors found",
-             "Average fix time (days)", "Waiting longer than target at month end"]
-    for c, h in enumerate(heads, 1):
-        put(wb3, 1, c, h, font=bold, fill=grey)
-    for i, k in enumerate(pack["trend"], 2):
-        x = pack["months"].get(k) or {}
-        put(wb3, i, 1, fmt_month(k))
-        if not x.get("has_data"):
-            put(wb3, i, 2, "No records")
-            continue
-        t, q, f = x["timeliness"], x["quality"], x["fixes"]
-        put(wb3, i, 2, t["on_time_pct"] / 100.0 if t["on_time_pct"] is not None else None, "0%")
-        put(wb3, i, 3, q["clean_first_time_pct"] / 100.0 if q["clean_first_time_pct"] is not None else None, "0%")
-        put(wb3, i, 4, q["errors"], "#,##0")
-        put(wb3, i, 5, f["avg_days"], "0.0")
-        put(wb3, i, 6, f["waiting_past_target"], "#,##0")
-    for col, w in zip("ABCDEF", (20, 16, 18, 14, 22, 38)):
-        wb3.column_dimensions[col].width = w
+    # 40.1 — the checks that failed most in the period (top 10).
+    top = pack.get("top_checks")
+    if top is not None:
+        sh = wb.create_sheet("Checks that failed most")
+        heads = ["#", "Check", "Severity", "Files", "Errors", "Share of all errors"]
+        for c, h in enumerate(heads, 1):
+            put(sh, 1, c, h, font=bold, fill=grey)
+        for i, ch in enumerate(top["checks"], 2):
+            put(sh, i, 1, i - 1)
+            put(sh, i, 2, ch["check"])
+            put(sh, i, 3, SEV_WORDS.get(ch["severity"] or "", None))
+            put(sh, i, 4, ch["files"], "#,##0")
+            put(sh, i, 5, ch["errors"], "#,##0")
+            put(sh, i, 6, ch["errors"] / top["errors"] if top["errors"] else None, "0%")
+        if not top["checks"]:
+            put(sh, 2, 2, f"No check failed this {WHAT_WORDS[cadence_of(pack)]}.")
+        for col, w in zip("ABCDEF", (6, 60, 12, 10, 10, 20)):
+            sh.column_dimensions[col].width = w
+        tables.append((sh, 1, sh.max_row, len(heads)))
 
+    # 41.3 — every error still open as at the day the file was made: how old,
+    # and who has to act; then the whole list, one row per file and check.
+    wt = pack.get("waiting")
+    if wt is not None:
+        sh = wb.create_sheet("Errors still waiting")
+        banner(sh, 1, f"As at {_short_day(wt['as_at'])}: {_num(wt['problems'])} waiting, "
+                      f"{_num(wt['past_target'])} longer than the {wt['target_days']}-day target, "
+                      f"longest waiting {_age(wt['oldest_days'])}.", 5, font=bold, height=20)
+        tables.append((sh, 1, 1, 5))
+        heads = ["Waiting for", "Errors", "Share", "Past the target"]
+        for c, h in enumerate(heads, 1):
+            put(sh, 3, c, h, font=bold, fill=grey)
+        for i, b in enumerate(wt["by_age"], 4):
+            put(sh, i, 1, b["label"])
+            put(sh, i, 2, b["problems"], "#,##0")
+            put(sh, i, 3, b["problems"] / wt["problems"] if wt["problems"] else None, "0%")
+            put(sh, i, 4, "Yes" if b["past_target"] else "No",
+                font=tone_font["crit"] if b["past_target"] and b["problems"] else None)
+        tables.append((sh, 3, 3 + len(wt["by_age"]), len(heads)))
+        first = 5 + len(wt["by_age"])
+        heads = ["Who must act", "Programme", "Waiting", "Longer than target", "Longest waiting (days)"]
+        for c, h in enumerate(heads, 1):
+            put(sh, first, c, h, font=bold, fill=grey)
+        for i, g in enumerate(wt["by_owner"], first + 1):
+            put(sh, i, 1, g.get("owner"))
+            put(sh, i, 2, g.get("programme_name"))
+            put(sh, i, 3, g["open"], "#,##0")
+            put(sh, i, 4, g["past_target"], "#,##0", font=tone_font["crit"] if g["past_target"] else None)
+            put(sh, i, 5, g["oldest_days"], "0.0")
+        if not wt["by_owner"]:
+            put(sh, first + 1, 1, "Nothing is waiting to be fixed.")
+        tables.append((sh, first, sh.max_row, len(heads)))
+        for col, w in zip("ABCDE", (34, 34, 12, 20, 24)):
+            sh.column_dimensions[col].width = w
+
+        sh = wb.create_sheet("Waiting list")
+        heads = ["Who must act", "Programme", "Waiting for (days)", "Problem", "Severity",
+                 "Errors", "Longer than target", "File", "Period"]
+        for c, h in enumerate(heads, 1):
+            put(sh, 1, c, h, font=bold, fill=grey)
+        for i, g in enumerate(wt["groups"], 2):
+            vals = [g.get("owner"), g.get("programme_name"), g["oldest_days"], g["check"],
+                    SEV_WORDS.get(g["severity"] or "", None), g["problems"], g["past_target"],
+                    g["file"], g["period"]]
+            for c, v in enumerate(vals, 1):
+                put(sh, i, c, v, "0.0" if c == 3 else ("#,##0" if c in (6, 7) else None))
+        if not wt["groups"]:
+            put(sh, 2, 1, "Nothing is waiting to be fixed.")
+        for col, w in zip("ABCDEFGHI", (30, 30, 18, 48, 12, 10, 18, 40, 12)):
+            sh.column_dimensions[col].width = w
+        tables.append((sh, 1, sh.max_row, len(heads)))
+
+    # Every cell of each table — the Key numbers title lines too — in a bold
+    # (medium) mid-grey box: clearly a border, but not black. Notes under a
+    # table stay outside it.
+    line = Side(style="medium", color="8B93A2")
+    box = Border(left=line, right=line, top=line, bottom=line)
+    for sheet, r1, r2, c2 in tables:
+        for row in sheet.iter_rows(min_row=r1, max_row=r2, max_col=c2):
+            for x in row:
+                x.border = box
+
+    # Middle of the row, keeping a line's own centring and wrapping.
     for sheet in wb.worksheets:
         for row in sheet.iter_rows():
             for x in row:
-                x.alignment = Alignment(vertical="center")
+                x.alignment = Alignment(horizontal=x.alignment.horizontal, vertical="center",
+                                        wrap_text=x.alignment.wrap_text)
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -538,7 +818,10 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
 def files(pack: dict, file_format: str, carrier: str,
           scope: str = "") -> list[tuple[str, bytes, str]]:
     """(filename, data, mime) for each file the format asks for."""
-    name = f"Monthly Report {pack['month']}"
+    c = cadence_of(pack)
+    name = (f"Monthly Report {pack['month']}" if c in ("month", "day")
+            else f"Monthly Report week of {pack['month']}" if c == "week"
+            else f"Monthly Report {pack['month'].replace('..', ' to ')}")
     out = []
     if file_format in ("pdf", "both"):
         out.append((f"{name}.pdf", render_pdf(pack, carrier, scope), PDF_MIME))
@@ -555,9 +838,16 @@ def carrier_name(s, tenant_id: int) -> str:
     return (t.legal_name or (t.tenant_name or "").title() or f"Carrier {tenant_id}") if t else ""
 
 
-def build_pack(s, tenant_id: int, month: str, now: Optional[datetime] = None) -> dict:
+def build_pack(s, tenant_id: int, month: str, now: Optional[datetime] = None,
+               cadence: str = "month") -> dict:
+    """The whole carrier's pack, as the files carry it: the period (`month` is
+    a month, or the day, week or dates picked — monthly_report.pack_for) and
+    what only the files show (add_file_detail)."""
     import monthly_report as mr
-    return mr.name_rows(s, mr.pack(s, tenant_id, month, now=now))
+    now = now or datetime.utcnow()
+    pack = mr.pack_for(s, tenant_id, cadence, month, now=now)
+    mr.add_file_detail(s, tenant_id, pack, now=now)
+    return mr.name_rows(s, pack)
 
 
 def _status(delivered: int, failed: int) -> str:
@@ -568,11 +858,14 @@ def _status(delivered: int, failed: int) -> str:
 
 def send(s, tenant_id: int, month: str, *, kind: str, user_id: Optional[int] = None,
          now: Optional[datetime] = None,
-         mailer: Optional[Callable[..., None]] = None) -> Optional[dict]:
+         mailer: Optional[Callable[..., None]] = None, cadence: str = "month") -> Optional[dict]:
     """Build, email and record one report. `kind`: scheduled | now.
 
     It goes to the carrier's logins (people). A scheduled send claims its month
-    first and returns None when it was already sent. Commits."""
+    first and returns None when it was already sent. Commits.
+    `cadence` day | week | custom sends that period instead (by hand only —
+    the automatic send is monthly); `month` is then the period, as the screen
+    names it ('2026-11-17', the week's Monday, or 'from..to')."""
     from sqlalchemy.exc import IntegrityError
     from db import MonthlyReportSend
     from notifications import NOTIFY_MAIL_ACCOUNT, _app_link, _email_text, notification_email_html
@@ -584,10 +877,14 @@ def send(s, tenant_id: int, month: str, *, kind: str, user_id: Optional[int] = N
     if not to:
         raise ValueError(NO_ONE)
 
+    monthly = cadence == "month"
     row = MonthlyReportSend(tenant_id=tenant_id, month=month, kind=kind,
                             scheduled_key=f"{tenant_id}:{month}" if kind == "scheduled" else None,
                             file_format=cfg["file_format"], delivery=cfg["delivery"],
-                            sent_by_user_id=user_id, created_at=now)
+                            sent_by_user_id=user_id, created_at=now,
+                            # Which kind of period `month` is, from the start,
+                            # so even a send that failed can be named.
+                            options=None if monthly else {"cadence": cadence})
     s.add(row)
     try:
         s.commit()
@@ -597,13 +894,14 @@ def send(s, tenant_id: int, month: str, *, kind: str, user_id: Optional[int] = N
 
     carrier = carrier_name(s, tenant_id)
     # The carrier's name as it was, so a file downloaded again later reads the same.
-    options = {"carrier": carrier}
-    link = _app_link(f"/monthly-report?month={month}")
+    options = {"carrier": carrier} if monthly else {"carrier": carrier, "cadence": cadence}
+    link = _app_link(f"/monthly-report?month={month}" if monthly
+                     else f"/monthly-report?cadence={cadence}&period={month}")
     # A link is only a link when the app's address is configured; otherwise
     # the file goes along so the email is never empty-handed.
     attach = cfg["delivery"] == "attach" or not link
     try:
-        pack = build_pack(s, tenant_id, month, now=now)
+        pack = build_pack(s, tenant_id, month, now=now, cadence=cadence)
         attachments = files(pack, cfg["file_format"], carrier) if attach else []
     except Exception:
         # Nothing has gone out: drop the claim so the next run can try again.
@@ -611,11 +909,12 @@ def send(s, tenant_id: int, month: str, *, kind: str, user_id: Optional[int] = N
         s.delete(s.merge(row))
         s.commit()
         raise
-    title = f"Monthly Report — {fmt_month(month)}"
-    subject = SUBJECT_PREFIX + f"Monthly Report · {fmt_month(month)}"
-    body = (f"The {carrier} Monthly Report for {fmt_month(month)} is attached."
+    named = title_of(pack)
+    title = f"Monthly Report — {named}"
+    subject = SUBJECT_PREFIX + f"Monthly Report · {named}"
+    body = (f"The {carrier} Monthly Report for {named} is attached."
             if attach else
-            f"The {carrier} Monthly Report for {fmt_month(month)} is ready. Sign in to open it.")
+            f"The {carrier} Monthly Report for {named} is ready. Sign in to open it.")
     facts = headline(pack)
 
     results = []
@@ -638,23 +937,53 @@ def send(s, tenant_id: int, month: str, *, kind: str, user_id: Optional[int] = N
     row.failed = len(results) - row.delivered
     row.pack, row.options = pack, options
     s.commit()
-    return {"id": row.id, "month": month, "kind": kind, "delivered": row.delivered,
+    return {"id": row.id, "month": month, "kind": kind, "cadence": cadence, "title": named,
+            "delivered": row.delivered,
             "failed": row.failed, "status": _status(row.delivered, row.failed),
             "recipients": [{k: r[k] for k in ("name", "email", "delivered")} for r in results]}
 
 
-def history(s, tenant_id: int, limit: int = 24) -> list[dict]:
-    """The reports sent, newest first."""
+def _sent_cadence(r) -> str:
+    """Which kind of period a sent report covered: a month unless it says so."""
+    return (r.options or {}).get("cadence") or "month"
+
+
+def _sent_title(r) -> str:
+    """A sent report's period in words, from the numbers kept with it — or, for
+    a send that failed before they were kept, from the period itself."""
+    if r.pack:
+        return title_of(r.pack)
+    c = _sent_cadence(r)
+    if c == "month":
+        return fmt_month(r.month)
+    import monthly_report as mr
+    try:
+        return mr.period_title(c, r.month)
+    except (ValueError, TypeError):
+        return r.month
+
+
+def history(s, tenant_id: int, limit: int = 24, offset: int = 0) -> list[dict]:
+    """The reports sent, newest first — `limit` of them from `offset`, so the
+    Send & Schedule screen can page through every one (count_sends)."""
     from db import MonthlyReportSend
     rows = (s.query(MonthlyReportSend).filter(MonthlyReportSend.tenant_id == tenant_id)
             .order_by(MonthlyReportSend.created_at.desc(), MonthlyReportSend.id.desc())
-            .limit(limit).all())
+            .offset(max(offset, 0)).limit(limit).all())
     return [{"id": r.id, "month": r.month, "kind": r.kind,
+             "cadence": _sent_cadence(r), "title": _sent_title(r),
              "sent_at": r.created_at.isoformat() if r.created_at else None,
              "file_format": r.file_format, "delivery": r.delivery,
              "people": len(r.recipients or []), "delivered": r.delivered, "failed": r.failed,
              "status": _status(r.delivered, r.failed) if r.pack is not None else "failed",
              "has_file": r.pack is not None} for r in rows]
+
+
+def count_sends(s, tenant_id: int) -> int:
+    """How many reports this carrier has been sent, for the history's pages."""
+    from db import MonthlyReportSend
+    return (s.query(MonthlyReportSend)
+            .filter(MonthlyReportSend.tenant_id == tenant_id).count())
 
 
 def sent_months(s, tenant_id: int) -> set[str]:

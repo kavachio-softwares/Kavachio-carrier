@@ -140,7 +140,8 @@ def test_a_month_before_the_records_began_has_no_data_and_a_running_month_is_not
     s.commit()
     out = mr.pack(s, 1, "2026-10", now=NOW)
     assert out["last_month"] == "2026-09" and out["last_year"] == "2025-10"
-    assert out["trend"] == ["2026-10", "2026-09", "2026-08", "2026-07", "2026-06", "2026-05"]
+    # Only the three periods compared are worked out — no six-month trend.
+    assert set(out["months"]) == {"2026-10", "2026-09", "2025-10"} and "trend" not in out
     assert out["months"]["2026-10"]["has_data"] is True
     assert out["months"]["2025-10"]["has_data"] is False
     assert out["months"]["2026-10"]["complete"] is False
@@ -189,3 +190,120 @@ def test_the_open_list_groups_by_file_and_check_and_severity_narrows_only_the_li
     assert o["total"] == 1
     # The counts above the list stay the whole picture.
     assert o["problems"] == 3
+
+
+# --- a day, a week or dates picked (pack_for) ------------------------------------
+
+def test_a_period_covers_the_executive_reports_dates_with_the_monthly_reports_comparisons():
+    import pytest
+    from fastapi import HTTPException
+    today = date(2026, 11, 18)                                   # a Wednesday
+    w = mr.window("week", "2026-11-12", today)                   # any day of the week
+    assert (w["period"], w["start"], w["end"]) == ("2026-11-09", date(2026, 11, 9), date(2026, 11, 16))
+    assert w["previous"]["period"] == "2026-11-02"
+    # The same week last year: the Monday 52 weeks back, so the same weekdays.
+    assert w["last_year"] == {"period": "2025-11-10", "start": date(2025, 11, 10),
+                              "end": date(2025, 11, 17)}
+    d = mr.window("day", "2026-11-17", today)
+    # A day beside the day before, as on the Executive Report, and no last year.
+    assert d["previous"]["period"] == "2026-11-16" and d["last_year"] is None
+    m = mr.window("month", None, today)
+    assert (m["period"], m["previous"]["period"], m["last_year"]["period"]) == (
+        "2026-11", "2026-10", "2025-11")
+    c = mr.window("custom", "2026-11-01..2026-11-10", today)
+    assert c["previous"]["period"] == "2026-10-22..2026-10-31" and c["last_year"] is None
+    for cadence, period in (("day", "2026-11-19"), ("week", "2026-11-23"), ("custom", "2026-11-10..2026-11-19")):
+        with pytest.raises(HTTPException):
+            mr.window(cadence, period, today)
+
+
+def test_a_week_counts_only_what_was_due_checked_and_fixed_in_its_own_dates():
+    s = _mem_session()
+    _due(s, date(2026, 10, 14), received=date(2026, 10, 14))     # this week, on time
+    _due(s, date(2026, 10, 5), received=date(2026, 10, 9), program=9)   # the week before, late
+    run = _file(s, at=datetime(2026, 10, 13), export_id=1, chain="sub:1", errors=2, critical=1)
+    _problem(s, run, fpr="a", found=datetime(2026, 10, 13))
+    _fixed(s, at=datetime(2026, 10, 15), export_id=1)
+    before = _file(s, at=datetime(2026, 10, 6), export_id=2, chain="sub:2", errors=4)
+    _problem(s, before, fpr="b", found=datetime(2026, 10, 6))
+    s.commit()
+
+    p = mr.pack_for(s, 1, "week", "2026-10-14", now=NOW)
+    assert (p["cadence"], p["month"], p["last_month"], p["last_year"]) == (
+        "week", "2026-10-12", "2026-10-05", "2025-10-13")
+    this, prev = p["months"]["2026-10-12"], p["months"]["2026-10-05"]
+    assert (this["timeliness"]["due"], this["timeliness"]["on_time"], this["timeliness"]["late"]) == (1, 1, 0)
+    assert (prev["timeliness"]["due"], prev["timeliness"]["late"]) == (1, 1)
+    assert (this["volumes"]["files"], this["quality"]["errors"]) == (1, 2)
+    assert (prev["volumes"]["files"], prev["quality"]["errors"]) == (1, 4)
+    # Fixed in the week; still waiting at its end: the other week's problem.
+    assert (this["fixes"]["fixed"], this["fixes"]["waiting"]) == (1, 1)
+    assert (prev["fixes"]["fixed"], prev["fixes"]["waiting"]) == (0, 1)
+    assert this["complete"] is True and p["months"]["2025-10-13"]["has_data"] is False
+    assert "trend" not in p
+    assert p["spans"]["2026-10-12"] == {"from": "2026-10-12", "to": "2026-10-18",
+                                        "title": "Week of 12 Oct 2026"}
+    assert [r["files"] for r in p["by_broker_programme"]] == [1]
+
+
+def test_a_day_is_compared_with_the_day_before():
+    s = _mem_session()
+    _file(s, at=datetime(2026, 10, 20, 9), export_id=1, errors=1)   # today
+    _file(s, at=datetime(2026, 10, 19, 9), export_id=2, errors=9)   # yesterday
+    _file(s, at=datetime(2026, 10, 13, 9), export_id=3, errors=5)   # a week ago: not compared
+    s.commit()
+    p = mr.pack_for(s, 1, "day", "2026-10-20", now=NOW)
+    assert (p["month"], p["last_month"], p["last_year"]) == ("2026-10-20", "2026-10-19", None)
+    assert p["months"]["2026-10-20"]["quality"]["errors"] == 1
+    assert p["months"]["2026-10-19"]["quality"]["errors"] == 9
+    assert p["months"]["2026-10-20"]["complete"] is False          # today, so far
+    assert set(p["months"]) == {"2026-10-20", "2026-10-19"}
+
+
+def test_dates_picked_are_compared_with_as_many_days_just_before():
+    s = _mem_session()
+    _file(s, at=datetime(2026, 10, 3), export_id=1, errors=2)
+    _file(s, at=datetime(2026, 9, 25), export_id=2, errors=7)
+    s.commit()
+    p = mr.pack_for(s, 1, "custom", "2026-10-01..2026-10-10", now=NOW)
+    assert (p["last_month"], p["last_year"]) == ("2026-09-21..2026-09-30", None)
+    assert p["months"][p["month"]]["quality"]["errors"] == 2
+    assert p["months"][p["last_month"]]["quality"]["errors"] == 7
+    assert p["spans"][p["month"]]["title"] == "1 – 10 Oct 2026"
+
+
+def test_a_month_through_pack_for_is_the_monthly_pack_as_it_always_was():
+    s = _mem_session()
+    _due(s, date(2026, 10, 5), received=date(2026, 10, 7))
+    _file(s, at=datetime(2026, 10, 6), export_id=1, errors=3)
+    s.commit()
+    old = mr.pack(s, 1, "2026-10", now=NOW)
+    new = mr.pack_for(s, 1, "month", "2026-10", now=NOW)
+    assert {k: v for k, v in new.items() if k not in ("cadence", "period", "spans")} == old
+    assert (new["cadence"], new["period"]) == ("month", "2026-10")
+    assert new["spans"]["2025-10"]["title"] == "October 2025"
+    # No month picked: this month, as the report has always opened.
+    assert mr.pack_for(s, 1, "month", None, now=NOW)["month"] == "2026-10"
+
+
+def test_a_period_before_the_records_began_is_not_available_and_one_after_reads_real_zeros():
+    s = _mem_session()
+    # The calendar goes back to each contract's start, but files only came
+    # through the system from October 2026.
+    _due(s, date(2025, 10, 10), program=9)
+    _due(s, date(2026, 9, 10), program=9)
+    _file(s, at=datetime(2026, 10, 2), export_id=1)
+    s.commit()
+    out = mr.pack(s, 1, "2026-10", now=NOW)
+    assert out["records_began"] == "2026-10-02"
+    assert out["months"]["2025-10"]["has_data"] is False      # due dates, but no records
+    assert out["months"]["2026-09"]["has_data"] is False
+    assert out["months"]["2026-10"]["has_data"] is True
+    # November: nothing checked yet, but the records ran — a real 0, not "Not available".
+    nov = mr.pack(s, 1, "2026-11", now=datetime(2026, 11, 20))["months"]["2026-11"]
+    assert nov["has_data"] is True and nov["volumes"]["files"] == 0
+    # A file received earlier on the calendar moves the start back.
+    _due(s, date(2026, 8, 5), received=date(2026, 8, 20))
+    s.commit()
+    assert mr.records_began(s, 1, NOW.date()) == date(2026, 8, 20)
+    assert mr.pack(s, 1, "2026-10", now=NOW)["months"]["2026-09"]["has_data"] is True
