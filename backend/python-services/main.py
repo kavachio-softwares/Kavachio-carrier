@@ -74,6 +74,8 @@ from policy_routes import router as policy_router
 # in the same processed bordereaux, against earlier periods (financial_summary.py).
 from financial_routes import router as financial_router
 from executive_routes import router as executive_router
+# 36 — Partner Performance: each broker's clean files on time, best and worst.
+from partner_performance_routes import router as partner_performance_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
 from mapper import (
     apply_spec_multi,
@@ -174,6 +176,7 @@ app.include_router(itd_router)
 app.include_router(policy_router)
 app.include_router(financial_router)
 app.include_router(executive_router)
+app.include_router(partner_performance_router)
 
 
 def _mark_deprecated_aliases() -> None:

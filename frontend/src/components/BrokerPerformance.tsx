@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
+import { canAccessPath } from "../access";
 import { InfoTip } from "./InfoTip";
 import { ChartCard } from "./StatCard";
 import type { SelectedProgramme } from "./ProgrammeOverview";
@@ -127,12 +128,19 @@ export default function BrokerPerformance({ mga, programme, period, periodLabel 
             {rows.map(r => <Row key={r.id} r={r} when={when} inWhen={inWhen} />)}
           </div>
 
-          {activeTotal > sent.length && (
+          {(activeTotal > sent.length || canAccessPath("/partner-performance")) && (
             <div style={{ textAlign: "right", marginTop: 14, fontSize: 13 }}>
-              <span style={{ color: "var(--p-faint)" }}>
-                {activeTotal - sent.length} more active {activeTotal - sent.length === 1 ? "broker" : "brokers"} ·{" "}
-              </span>
-              <Link className="linkish" to="/brokers">All brokers →</Link>
+              {activeTotal > sent.length && <>
+                <span style={{ color: "var(--p-faint)" }}>
+                  {activeTotal - sent.length} more active {activeTotal - sent.length === 1 ? "broker" : "brokers"} ·{" "}
+                </span>
+                <Link className="linkish" to="/brokers">All brokers →</Link>
+              </>}
+              {/* 36 — the carrier seat only, as the page itself. */}
+              {canAccessPath("/partner-performance") && <>
+                {activeTotal > sent.length && <span style={{ color: "var(--p-faint)" }}> · </span>}
+                <Link className="linkish" to="/partner-performance">View partner performance →</Link>
+              </>}
             </div>
           )}
         </>

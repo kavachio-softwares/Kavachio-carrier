@@ -68,6 +68,7 @@ import Calendar from "./pages/Calendar";
 import BordereauCalendar from "./pages/BordereauCalendar";
 import MonthlyReport from "./pages/MonthlyReport";
 import ExecutiveReport from "./pages/ExecutiveReport";
+import PartnerPerformance from "./pages/PartnerPerformance";
 import MonthlySendSchedule from "./pages/MonthlySendSchedule";
 import PolicySearch from "./pages/PolicySearch";
 import FinancialSummary from "./pages/FinancialSummary";
@@ -291,6 +292,8 @@ export default function App() {
         {/* Hidden 17 Nov 2026: the page must not open. Uncomment to bring it back. */}
         {/* <Route path="/open-problems" element={<OpenProblems />} /> */}
         <Route path="/executive-report" element={<ExecutiveReport />} />
+        {/* 36 — how often each broker sends a clean file on time, best and worst. */}
+        <Route path="/partner-performance" element={<PartnerPerformance />} />
         {/* How a broker's file reaches you, and everything that has landed —
             one screen with two tabs. The old paths are kept as redirects: they
             are in emails to brokers and in bookmarks, and a link that 404s is a

@@ -247,6 +247,10 @@ export const ROUTE_ACCESS: {
   // the server refuses every other seat too (require_carrier_admin).
   { pattern: "/open-problems", requires: "carrier_admin", only: ["carrier_admin"] },
   { pattern: "/executive-report", requires: "carrier_admin", only: ["carrier_admin"] },
+  // 36 — Partner Performance: every broker of the carrier ranked side by side,
+  // so the carrier seat only (brokers would see each other). The server
+  // refuses broker seats too (partner_performance_routes).
+  { pattern: "/partner-performance", requires: "carrier_admin", only: ["carrier_admin"] },
   // Policy Search (43.1) — the policies inside the processed bordereaux. The
   // carrier sees its whole book, a broker only what it sent; Kavachio is not
   // a party to policy data, so `only` keeps it out by rank. The server refuses

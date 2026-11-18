@@ -555,6 +555,8 @@ function Scorecard({ r }: { r: Report }) {
       <div className="sub" style={{ padding: "8px 16px 12px", display: "flex", gap: 12 }}>
         {part.total > part.rows.length && <span>Showing {part.rows.length} of {part.total}.</span>}
         <Link className="linkish" style={{ marginLeft: "auto" }}
+          to={r.cadence === "month" ? `/partner-performance?period=${r.period}` : "/partner-performance"}>See all brokers ranked →</Link>
+        <Link className="linkish"
           to={r.timeliness.month ? `/bordereau-calendar?month=${r.timeliness.month}` : "/bordereau-calendar"}>All submissions →</Link>
       </div>
     </div>
