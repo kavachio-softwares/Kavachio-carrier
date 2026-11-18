@@ -294,12 +294,28 @@ def open_now(probs: list[dict], target: int, now: datetime) -> dict:
     }
 
 
+def open_at(probs: list[dict], target: int, at: datetime) -> dict:
+    """What was waiting at `at`: found before it and not fixed by then — the
+    Overview's "waiting at month end" rule (monthly_report._fixes), with how
+    old each was then and the same AGE_BANDS. At `now` it is what is open now."""
+    ages = [_days(at - p["found_at"]) for p in probs
+            if p["found_at"] and p["found_at"] < at
+            and (p["fixed_at"] is None or p["fixed_at"] >= at)]
+    bands = []
+    for key, words, lo, hi in AGE_BANDS:
+        n = sum(1 for a in ages if int(a) >= lo and (hi is None or int(a) <= hi))
+        bands.append({"key": key, "label": words, "problems": n, "past_target": lo > target})
+    return {"problems": len(ages), "past_target": sum(1 for a in ages if a > target),
+            "oldest_days": _round(max(ages, default=None)), "by_age": bands}
+
+
 def summary(s, tenant_id: int, start: datetime, end: datetime, *,
             program_id: Optional[int] = None, broker_party_id: Optional[int] = None,
             now: Optional[datetime] = None, page: int = 1, page_size: int = 10,
             severity: Optional[str] = None) -> dict:
     """41.1 how fast the period's problems were fixed, 41.2 against the
-    target, 41.3 what is open NOW — how old, and who has to act.
+    target, 41.3 what is open NOW — how old, and who has to act — and what
+    was waiting when the period ended (`at_end`).
 
     `severity` narrows only the open list (`items` and `groups`); the counts
     above it stay the whole picture."""
@@ -378,6 +394,13 @@ def summary(s, tenant_id: int, start: datetime, end: datetime, *,
         },
         "found_in_period": sum(1 for p in probs
                                if p["found_at"] and start <= p["found_at"] < end),
+        # What was waiting when the period ended — or now, while it is still
+        # running. `open` below stays what is open NOW: the list to act on.
+        "at_end": {
+            **open_at(probs, target, min(end, now)),
+            "running": end > now,
+            "as_at": (now if end > now else end - timedelta(days=1)).date().isoformat(),
+        },
         "open": {
             "problems": len(open_),
             "past_target": len(past),

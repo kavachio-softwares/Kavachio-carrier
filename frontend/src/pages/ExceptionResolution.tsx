@@ -46,17 +46,20 @@ function When({ children }: { children: ReactNode }) {
 
 /** "In October 2026, 1,240 problems were fixed, taking 2.3 days on average. …" */
 function summaryLine(d: ExceptionResolutionReport, filtered: boolean, cadence: ReportCadence): string {
-  const f = d.fixed, o = d.open;
+  const f = d.fixed, o = d.at_end ?? { ...d.open, running: true, as_at: "" };
   const when = inPeriod(cadence, periodTitle(cadence, d.month));
   const fixedPart = f.problems > 0
     ? `${upFirst(when)}, ${plural(f.problems, "problem")} ${f.problems === 1 ? "was" : "were"} fixed, `
       + `taking ${fmtTook(f.avg_days)} on average. ${pct(f.within_target_pct)} `
       + `${f.within_target === 1 ? "was" : "were"} fixed within the ${d.target_days}-day target.`
     : `No problems were fixed ${when}${filtered ? " for this selection" : ""}.`;
+  // Right now while the period is running; else on its last day.
+  const on = o.running ? "right now" : `on ${periodTitle("day", o.as_at)}`;
   const waitingPart = o.problems > 0
-    ? ` ${plural(o.problems, "problem")} ${o.problems === 1 ? "is" : "are"} waiting to be fixed right now`
+    ? ` ${plural(o.problems, "problem")} ${o.running ? (o.problems === 1 ? "is" : "are") : (o.problems === 1 ? "was" : "were")} `
+      + `waiting to be fixed ${on}`
       + (o.past_target > 0 ? ` — ${num(o.past_target)} of them longer than the target.` : ", none longer than the target.")
-    : " Nothing is waiting to be fixed.";
+    : ` Nothing ${o.running ? "is" : "was"} waiting to be fixed${o.running ? "" : ` ${on}`}.`;
   return fixedPart + waitingPart;
 }
 
@@ -175,7 +178,11 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
   }
 
   const f = data?.fixed;
-  const o = data?.open;
+  // The two waiting tiles and the age table: when the period ended, or now
+  // while it is running. The list and "Waiting now" by broker stay now.
+  const o = data?.at_end ?? data?.open;
+  const open = data?.open;
+  const atEnd = data?.at_end && !data.at_end.running ? `At ${periodTitle("day", data.at_end.as_at)}` : "Right now";
   const target = data?.target_days;
   const filtered = programId != null || brokerId != null;
   const first = loading && !data;
@@ -262,19 +269,16 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         <div className="tile">
           <div className="k">
             Waiting to be fixed
-            <InfoTip text="Every problem not fixed yet, whatever month it was found in." />
-            <When>Right now</When>
+            <InfoTip text="Every problem not fixed by the end of the period picked — or now, while it is still running — whatever month it was found in." />
+            <When>{atEnd}</When>
           </div>
           <div className="v">{first ? "…" : num(o?.problems)}</div>
-          <div className="foot">
-            {o && o.problems > 0 ? `From all months · longest waiting: ${fmtAge(o.oldest_days).toLowerCase()}` : " "}
-          </div>
         </div>
         <div className="tile" style={(o?.past_target ?? 0) > 0 ? { borderColor: "#F3D2D7" } : undefined}>
           <div className="k">
             Waiting longer than target
-            <InfoTip text="Problems waiting longer than the target — the ones to chase first." />
-            <When>Right now</When>
+            <InfoTip text="Of those, the ones waiting longer than the target at that time — the ones to chase first." />
+            <When>{atEnd}</When>
           </div>
           <div className="v" style={{ color: (o?.past_target ?? 0) > 0 ? "var(--p-crit-ink)" : undefined }}>
             {first ? "…" : num(o?.past_target)}
@@ -287,8 +291,8 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         <div className="card-h">
           <Hourglass className="ci" />
           <h3>How long problems have been waiting</h3>
-          <InfoTip text="Every problem waiting to be fixed now, by how long ago it was found." />
-          <When>Right now</When>
+          <InfoTip text="Every problem waiting to be fixed at the end of the period picked — or now, while it is still running — by how long it had been waiting." />
+          <When>{atEnd}</When>
         </div>
         <div className="tbl-wrap">
           <table>
@@ -317,7 +321,7 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         <div className="card-h" style={{ flexWrap: "wrap" }}>
           <Hourglass className="ci" />
           <h3>Waiting to be fixed</h3>
-          <InfoTip text="Every problem not fixed yet, one row per file and problem, longest waiting first. Owner = who must act: the file's broker, or the carrier if no broker sent it." />
+          <InfoTip text="Every problem not fixed yet, as of today, one row per file and problem, longest waiting first. Owner = who must act: the file's broker, or the carrier if no broker sent it." />
           <div className="right">
             <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
               <span className="sub">Severity</span>
@@ -340,12 +344,12 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
               </tr>
             </thead>
             <tbody>
-              {(o?.groups ?? []).length === 0 && (
+              {(open?.groups ?? []).length === 0 && (
                 <tr><td colSpan={8} className="muted" style={{ textAlign: "center" }}>
                   {severity ? "Nothing of this severity is waiting." : "Nothing is waiting."}
                 </td></tr>
               )}
-              {(o?.groups ?? []).map((g, i) => {
+              {(open?.groups ?? []).map((g, i) => {
                 const sev = g.severity ? SEVERITY[g.severity] : null;
                 return (
                   <tr key={`${g.export_id}:${g.check}:${i}`}>
@@ -381,9 +385,9 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
             </tbody>
           </table>
         </div>
-        {o && (
-          <Pagination page={o.page} pageCount={Math.max(1, Math.ceil(o.groups_total / o.page_size))}
-            pageSize={o.page_size} totalItems={o.groups_total} onPageChange={setOpenPage} noun="rows" />
+        {open && (
+          <Pagination page={open.page} pageCount={Math.max(1, Math.ceil(open.groups_total / open.page_size))}
+            pageSize={open.page_size} totalItems={open.groups_total} onPageChange={setOpenPage} noun="rows" />
         )}
       </div>
     </>

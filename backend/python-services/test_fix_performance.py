@@ -186,6 +186,25 @@ def test_the_month_measures_fix_time_target_and_what_is_open():
     assert o["items"][0]["past_target"] is True
 
 
+def test_waiting_follows_the_period_picked_and_the_list_stays_now():
+    s = _mem_session()
+    _month(s)
+    # The week of 5–11 Oct, over: on its last day only "d" was waiting (found
+    # 1 Oct, 11 days old then); "a" and "b" were fixed, "e" not found yet.
+    out = fp.summary(s, 1, datetime(2026, 10, 5), datetime(2026, 10, 12), now=NOW)
+    w = out["at_end"]
+    assert (w["running"], w["as_at"]) == (False, "2026-10-11")
+    assert (w["problems"], w["past_target"], w["oldest_days"]) == (1, 1, 11.0)
+    assert {b["key"]: b["problems"] for b in w["by_age"]} == {
+        "0_2": 0, "3_7": 0, "8_30": 1, "31_plus": 0}
+    # The list to act on is still what is open now.
+    assert out["open"]["problems"] == 2
+    # A period still running reads as now, counted the same way.
+    now_ = fp.summary(s, 1, *OCT, now=NOW)["at_end"]
+    assert (now_["running"], now_["as_at"]) == (True, "2026-10-20")
+    assert (now_["problems"], now_["past_target"], now_["oldest_days"]) == (2, 1, 19.5)
+
+
 def test_by_broker_and_programme_puts_the_most_past_target_first():
     s = _mem_session()
     _month(s)

@@ -212,6 +212,16 @@ export interface ExceptionResolutionReport {
     by_how: { key: string; label: string; problems: number }[];
   };
   found_in_period: number;
+  /** What was waiting when the period ended — or now, while it is still
+   *  running (`running`). `as_at` is that day. `open` stays what is open now. */
+  at_end?: {
+    as_at: string;
+    running: boolean;
+    problems: number;
+    past_target: number;
+    oldest_days: number | null;
+    by_age: { key: string; label: string; problems: number; past_target: boolean }[];
+  };
   open: {
     problems: number;
     past_target: number;
