@@ -57,7 +57,7 @@ export interface PolicyDrillParams {
   metric?: string;
   currency?: string;
   open_problems?: "include" | "exclude";
-  // Periodic Report
+  // Operational Report
   month?: string;
   measure?: string;
 }

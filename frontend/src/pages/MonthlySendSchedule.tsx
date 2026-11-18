@@ -1,9 +1,9 @@
-// MOPR 42.2 — Send & Schedule: how the Periodic Report is delivered.
+// MOPR 42.2 — Send & Schedule: how the Operational Report is delivered.
 //
 // Whether it goes out by itself, on which working day after the month ends,
 // and as which file, attached or as a link — plus every report sent,
 // downloadable as it was sent (backend report_delivery.py). Reached from the
-// Periodic Report's tab row; not a tab, because it is set once and rarely
+// Operational Report's tab row; not a tab, because it is set once and rarely
 // touched, and it has no month of its own.
 // The report always goes to the carrier's own logins, in full; nothing is
 // emailed until the carrier turns automatic sending on.
@@ -130,10 +130,10 @@ export default function MonthlySendSchedule() {
         <div className="page-head" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
           <div className="t">
             <h2>Send &amp; Schedule</h2>
-            <p>When the periodic report is emailed to you, and in what form.</p>
+            <p>When the operational report is emailed to you, and in what form.</p>
           </div>
           <div className="actions" style={{ alignItems: "center" }}>
-            <Link to="/monthly-report" className="btn"><ArrowLeft size={14} /> Periodic Report</Link>
+            <Link to="/monthly-report" className="btn"><ArrowLeft size={14} /> Operational Report</Link>
             <button type="button" className="btn pri" onClick={save} disabled={!dirty || busy}>
               {busy ? "Saving…" : "Save changes"}
             </button>

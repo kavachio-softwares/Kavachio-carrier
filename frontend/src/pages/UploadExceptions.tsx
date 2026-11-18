@@ -97,7 +97,7 @@ export default function UploadExceptions() {
     if (fromParam === "direct") return { to: "/direct", label: "Process Bordereau" };
     if (fromParam === "files") return { to: "/files", label: "Files Received" };
     if (fromParam === "calendar") return { to: "/bordereau-calendar", label: "Bordereau Calendar" };
-    if (fromParam === "policies") return { to: "/policies", label: "Policies" };
+    if (fromParam === "policies") return { to: "/policies", label: "Policy Explorer" };
     if (fromParam === "partner") return { to: "/partner-performance", label: "Partner Performance" };
     if (isBrokerSeat()) return { to: "/broker/bordereau", label: "Process Bordereau" };
     // A carrier seat no longer has a Process Bordereau screen to go back to,

@@ -1,6 +1,6 @@
 // The change between two months, as one pill: green when it got better, red
 // when worse, grey when the number only says there was more or less work
-// (files, rows, policies) — Periodic Report, MOPR 42.2.
+// (files, rows, policies) — Operational Report, MOPR 42.2.
 import { fmtTook, num } from "../utils/reportFormat";
 
 /** Which way is better: up, down, or neither (a volume). */

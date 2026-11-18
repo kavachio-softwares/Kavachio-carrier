@@ -669,9 +669,9 @@ export default function Home() {
           </div>
           {(canProcess || canAccessPath("/policies")) && (
             <div className="actions">
-              {/* A shortcut: Policies is also in the sidebar, under Operations. */}
+              {/* A shortcut: Policy Explorer is also in the sidebar, under Operations. */}
               {canAccessPath("/policies") && (
-                <Link className="btn" to="/policies">Search Policies</Link>
+                <Link className="btn" to="/policies">Policy Explorer</Link>
               )}
               {canAccessPath("/financial-summary") && (
                 <Link className="btn" to="/financial-summary">Financial Summary</Link>

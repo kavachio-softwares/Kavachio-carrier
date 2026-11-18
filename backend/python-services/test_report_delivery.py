@@ -1,4 +1,4 @@
-"""MOPR 42.2 — delivering the Monthly Report (report_delivery.py).
+"""MOPR 42.2 — delivering the Operational Report (report_delivery.py).
 
 Run with:  DATABASE_URL=sqlite:// .venv/bin/python -m pytest test_report_delivery.py
 
@@ -119,7 +119,7 @@ def test_send_now_emails_each_person_the_file_and_keeps_the_numbers_as_sent():
     assert (r["delivered"], r["failed"], r["status"]) == (2, 0, "sent")
     assert [m["to"] for m in mail.sent] == ["u1@carrier.test", "u2@carrier.test"]
     names = [a[0] for a in mail.sent[0]["attachments"]]
-    assert names == ["Periodic Report 2026-10.pdf", "Periodic Report 2026-10.xlsx"]
+    assert names == ["Operational Report 2026-10.pdf", "Operational Report 2026-10.xlsx"]
     assert mail.sent[0]["attachments"][0][1].startswith(b"%PDF")
     assert "October 2026" in mail.sent[0]["subject"]
     h = rd.history(s, 1)
@@ -225,8 +225,8 @@ def test_the_excel_file_has_one_sheet_per_part():
     pack = rd.build_pack(s, 1, "2026-10", now=NOW)
     wb = load_workbook(io.BytesIO(rd.render_xlsx(pack, "Test Carrier")))
     assert wb.sheetnames == ["Key numbers", "By broker and programme", "Checks that failed most",
-                             "Errors still waiting", "Waiting list"]
-    assert wb["Key numbers"]["A1"].value == "Periodic Report — October 2026"
+                             "Errors still waiting", "Waiting list", "Column Guide"]
+    assert wb["Key numbers"]["A1"].value == "Operational Report — October 2026"
     # The title is the box's first line, centred across the table; under it
     # the period in words and the dates it compares, then the table. Every
     # line of every table has a border; the notes under it have none.
@@ -287,9 +287,9 @@ def test_a_week_renders_in_both_files_named_for_its_dates():
     pack = rd.build_pack(s, 1, "2026-10-26", now=NOW, cadence="week")
     wb = load_workbook(io.BytesIO(rd.render_xlsx(pack, "Test Carrier")))
     assert wb.sheetnames == ["Key numbers", "By broker and programme", "Checks that failed most",
-                             "Errors still waiting", "Waiting list"]
+                             "Errors still waiting", "Waiting list", "Column Guide"]
     ws = wb["Key numbers"]
-    assert ws["A1"].value == "Periodic Report — Week of 26 Oct 2026"
+    assert ws["A1"].value == "Operational Report — Week of 26 Oct 2026"
     assert ws["A3"].value == "Covers 26 Oct – 1 Nov 2026, compared with 19 – 25 Oct 2026 and 27 Oct – 2 Nov 2025."
     assert [c.value for c in ws[4]][:6] == ["Measure", "Week of 26 Oct 2026", "Week of 19 Oct 2026",
                                             "vs last week", "Week of 27 Oct 2025", "vs last year"]
@@ -297,7 +297,7 @@ def test_a_week_renders_in_both_files_named_for_its_dates():
     assert "Waiting to be fixed at the end of the week" in labels
     assert rd.render_pdf(pack, "Test Carrier").startswith(b"%PDF")
     assert [n for n, _d, _m in rd.files(pack, "both", "Test Carrier")] == [
-        "Periodic Report week of 2026-10-26.pdf", "Periodic Report week of 2026-10-26.xlsx"]
+        "Operational Report week of 2026-10-26.pdf", "Operational Report week of 2026-10-26.xlsx"]
 
 
 def test_a_day_has_no_last_year_column():
@@ -319,7 +319,7 @@ def test_send_now_can_send_a_week_and_the_history_names_it():
     r = rd.send(s, 1, "2026-10-26", kind="now", user_id=1, now=NOW, mailer=mail, cadence="week")
     assert (r["cadence"], r["title"], r["status"]) == ("week", "Week of 26 Oct 2026", "sent")
     assert "Week of 26 Oct 2026" in mail.sent[0]["subject"]
-    assert mail.sent[0]["attachments"][0][0] == "Periodic Report week of 2026-10-26.pdf"
+    assert mail.sent[0]["attachments"][0][0] == "Operational Report week of 2026-10-26.pdf"
     rd.send(s, 1, "2026-10", kind="now", user_id=1, now=NOW, mailer=mail)
     h = rd.history(s, 1)
     assert [(x["month"], x["cadence"], x["title"]) for x in h] == [

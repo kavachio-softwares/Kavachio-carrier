@@ -1,4 +1,4 @@
-// MOPR 42.2 — the Periodic Report's own buttons, beside the tabs so they show on
+// MOPR 42.2 — the Operational Report's own buttons, beside the tabs so they show on
 // every tab (it is one report): download the period picked — a month, or a
 // day, a week or dates — as a PDF or Excel file, open Send & Schedule (its tag
 // says whether the report goes out by itself, and when: always monthly), and

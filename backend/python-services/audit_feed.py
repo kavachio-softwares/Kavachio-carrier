@@ -467,8 +467,8 @@ ACTION_WORDS = {
     # MOPR 41 — the carrier's target for fixing problems (fix_performance.py)
     "fix_target_updated":         "Changed the target time to fix problems",
     # MOPR 42.2 — sending the Monthly Report (report_delivery.py)
-    "monthly_report_settings_updated": "Changed how the periodic report is sent",
-    "monthly_report_sent":        "Sent the periodic report",
+    "monthly_report_settings_updated": "Changed how the operational report is sent",
+    "monthly_report_sent":        "Sent the operational report",
     "executive_report_settings_updated": "Changed how the executive report is sent",
     "executive_report_sent":      "Sent the executive report",
     "executive_report_sends_cleared": "Cleared the sent executive reports list",

@@ -5855,7 +5855,7 @@ class MonthlyDeliveryBody(BaseModel):
 
 @router.put("/reports/monthly/delivery")
 def save_monthly_delivery(body: MonthlyDeliveryBody, mga: str,
-                          principal: Principal = Depends(require_carrier_admin("change how the periodic report is sent"))):
+                          principal: Principal = Depends(require_carrier_admin("change how the operational report is sent"))):
     """MOPR 42.2 — save Send & Schedule. Each change is kept in the Audit Logs
     with the old and new value."""
     import report_delivery as rd
@@ -5893,7 +5893,7 @@ class MonthlySendBody(BaseModel):
 
 @router.post("/reports/monthly/send")
 def send_monthly_report(body: MonthlySendBody, mga: str,
-                        principal: Principal = Depends(require_carrier_admin("send the periodic report"))):
+                        principal: Principal = Depends(require_carrier_admin("send the operational report"))):
     """MOPR 42.2 — send a month's report now (default: last month) to the
     carrier's own logins. With `cadence` + `period`, that period's report."""
     import check_record

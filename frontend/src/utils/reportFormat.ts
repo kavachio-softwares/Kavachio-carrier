@@ -1,4 +1,4 @@
-// How the Periodic Report's three tabs (MOPR 40, 41, 42) write months, numbers
+// How the Operational Report's three tabs (MOPR 40, 41, 42) write months, numbers
 // and times — one place, so the Overview and the detail tabs never disagree.
 
 /** "2026-10" → "October 2026". */
@@ -66,7 +66,7 @@ export function fmtAge(d: number | null | undefined): string {
   return d < 1 ? "Under 1 day" : plural(Math.floor(d), "day");
 }
 
-// --- a day, a week, a month or dates picked (the Periodic Report's switch) ------
+// --- a day, a week, a month or dates picked (the Operational Report's switch) ------
 // The same periods as the Executive Report (backend monthly_report.window): a
 // week is Monday to Sunday, a custom range is "from..to" with both days in.
 

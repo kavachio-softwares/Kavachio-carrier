@@ -153,7 +153,7 @@ export default function RecentRuns() {
           <div className="actions">
             {/* The policies inside these files, searched one by one. */}
             {canAccessPath("/policies") && (
-              <button className="btn" onClick={() => navigate("/policies")}>Search Policies</button>
+              <button className="btn" onClick={() => navigate("/policies")}>Policy Explorer</button>
             )}
             {canAccessPath("/direct") ? (
               <button className="btn" onClick={() => navigate("/direct")}>

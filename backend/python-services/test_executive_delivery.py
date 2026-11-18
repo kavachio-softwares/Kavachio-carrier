@@ -101,7 +101,7 @@ def test_both_files_render_every_section():
     wb = load_workbook(io.BytesIO(xlsx[1]))
     assert wb.sheetnames == ["Headline", "Top programmes by premium", "Top brokers by premium",
                              "Programmes", "Errors by month", "Needs attention",
-                             "Reinsurance statements due"]
+                             "Reinsurance statements due", "Column Guide"]
     assert wb["Reinsurance statements due"]["D3"].value == "Sent on time (2026-10-29)"
     assert wb["Needs attention"]["A2"].value == "Dispute: July file"
     assert wb["Headline"]["A3"].value == ("Open problems, escalations, programmes and reinsurance "
@@ -397,7 +397,7 @@ def test_the_new_sections_reach_both_files_and_the_email():
     assert wb.sheetnames == ["Headline", "Files by status", "Top programmes by premium", "Top brokers by premium",
                              "Programmes", "Errors by month", "Most common errors", "Data quality by broker",
                              "Data quality by programme", "Late submissions", "Contracts sending files",
-                             "Premium cap used", "Needs attention", "Reinsurance statements due"]
+                             "Premium cap used", "Needs attention", "Reinsurance statements due", "Column Guide"]
     assert [c.value for c in wb["Files by status"]["B"]][1:] == ["9", "2", "1"]
     late = wb["Late submissions"]
     assert [c.value for c in late[2]] == ["CRC", "Fleet & Cargo", "September 2026", "2026-10-15", "2026-10-20", "5"]

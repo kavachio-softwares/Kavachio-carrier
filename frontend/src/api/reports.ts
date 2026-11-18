@@ -2,7 +2,7 @@ import { api } from "./client";
 import { currentMga } from "../auth";
 import type { ReportCadence } from "../utils/reportFormat";
 
-/** The period a Periodic Report tab shows: a day, a week, a month or dates
+/** The period a Operational Report tab shows: a day, a week, a month or dates
  *  picked (backend monthly_report.window). `period` is "YYYY-MM" for a month,
  *  the day, the week's Monday, or "from..to". */
 export interface ReportPeriod {
@@ -359,7 +359,7 @@ export async function getMonthlyReport(params: ReportPeriod & {
   return data;
 }
 
-// MOPR 42.2 — sending the Periodic Report (backend report_delivery.py).
+// MOPR 42.2 — sending the Operational Report (backend report_delivery.py).
 
 /** Someone who receives the report: one of the carrier's own logins. */
 export interface ReportPerson {
@@ -416,7 +416,7 @@ export interface DeliveryView {
 }
 
 /** Paging is opt-in: Send & Schedule pages the reports sent; the buttons
- *  beside the Periodic Report's tabs don't need them. */
+ *  beside the Operational Report's tabs don't need them. */
 export async function getDelivery(paging?: { page: number; page_size?: number }): Promise<DeliveryView> {
   const { data } = await api.get<DeliveryView>("/reports/monthly/delivery",
     { params: { mga: currentMga(), ...(paging ?? {}) } });
@@ -475,13 +475,13 @@ export const downloadMonthlyReport = (p: ReportPeriod & {
 }) => saveBlob("/reports/monthly/file", {
   mga: currentMga(), ...periodParams(p), format: p.format,
   program_id: p.program_id ?? undefined, broker_party_id: p.broker_party_id ?? undefined,
-}, `Periodic Report ${p.cadence === "week" ? "week of " : ""}${p.period.replace("..", " to ")}`
+}, `Operational Report ${p.cadence === "week" ? "week of " : ""}${p.period.replace("..", " to ")}`
    + `.${p.format === "pdf" ? "pdf" : "xlsx"}`);
 
 /** A report as it was sent — the numbers kept with it. */
 export const downloadSentReport = (s: SentReport, format: "pdf" | "excel") =>
   saveBlob(`/reports/monthly/sends/${s.id}/file`, { mga: currentMga(), format },
-    `Periodic Report ${s.cadence === "week" ? "week of " : ""}${s.month.replace("..", " to ")}`
+    `Operational Report ${s.cadence === "week" ? "week of " : ""}${s.month.replace("..", " to ")}`
     + `.${format === "pdf" ? "pdf" : "xlsx"}`);
 
 /** Carrier admin only. Saved in the Audit Logs with the old and new value. */

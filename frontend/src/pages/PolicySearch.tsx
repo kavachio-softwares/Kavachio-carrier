@@ -10,7 +10,7 @@
 // (18 Nov 2026) — the files, then the policies inside them. Also opened from
 // the Dashboard and File Submissions. Broker: opened from its Dashboard.
 //
-// 38.1: a number clicked on a report (Financial Summary, Periodic Report) opens
+// 38.1: a number clicked on a report (Financial Summary, Operational Report) opens
 // this page on the policies behind that number only — the report's own
 // selection, worked out on the server (backend drill_down.py). The URL says
 // which number (api/policies drillLink); the other filters still apply on top.
@@ -149,7 +149,7 @@ export default function PolicySearch() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Policies
+            <h2>Policy Explorer
               <InfoTip text={broker
                 ? "Every policy in the bordereaux you have sent, as each file's latest version. One line per policy; open it to see every row behind it."
                 : "Every policy in the bordereaux your brokers have sent, as each file's latest version. One line per policy; open it to see every row behind it."} />

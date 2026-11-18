@@ -274,6 +274,13 @@ def render_pdf(pack: dict, carrier: str) -> bytes:
         fixed = _set_widths(heading)
         story.append(table(rows, [doc.width * w for w in fixed[0]] if fixed else None))
 
+    # 45.2 — what every word on these pages means, in plain English.
+    import export_glossary as gl
+    story.append(CondPageBreak(60 * mm))
+    story.append(para(gl.TITLE, h2))
+    story.append(table(gl.pdf_rows("executive"),
+                       [doc.width * .3, doc.width * .7]))
+
     def _footer(canvas, d):
         canvas.saveState()
         canvas.setFont("Helvetica", 7.5)
@@ -516,6 +523,9 @@ def render_xlsx(pack: dict, carrier: str) -> bytes:
             sh.column_dimensions[get_column_letter(c + 1)].width = min(max(longest + 2, 10),
                                                                         60 if c == 0 else 45)
         sh.freeze_panes = "A2"
+    # 45.2 — what every word in this file means, in plain English.
+    import export_glossary as gl
+    gl.xlsx_sheet(wb, "executive")
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()

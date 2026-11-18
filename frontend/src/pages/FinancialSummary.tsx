@@ -292,7 +292,7 @@ export default function FinancialSummary() {
             </h2>
           </div>
           <div className="actions">
-            <Link className="btn" to="/policies">Search Policies</Link>
+            <Link className="btn" to="/policies">Policy Explorer</Link>
             <Link className="btn" to={broker ? "/broker" : "/home"}>← Dashboard</Link>
           </div>
         </div>

@@ -103,7 +103,7 @@ def _monthly(s, p, *, month: Optional[str], measure: Optional[str],
     import check_record as cr
     from db import CheckError
     if p.role != "carrier_admin" or p.tenant_id is None:
-        raise HTTPException(403, "The Periodic Report is for carriers.")
+        raise HTTPException(403, "The Operational Report is for carriers.")
     if measure not in MONTHLY:
         raise HTTPException(400, f"measure must be one of {', '.join(MONTHLY)}")
     if month and _SPAN.fullmatch(month):
