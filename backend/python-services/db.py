@@ -2988,16 +2988,14 @@ def init_db():
         # the broker, and the old UNIQUE(program_id, period) would block the
         # fan-out. On SQLite that means rebuilding the table, so it has to happen
         # while the column list is still the one on disk.
-        try:
-            if dialect == "postgresql":
-                conn.exec_driver_sql(
-                    "ALTER TABLE expected_submission "
-                    "DROP CONSTRAINT IF EXISTS uq_expected_submission_program_period")
-            else:
-                conn.exec_driver_sql(
-                    "DROP INDEX IF EXISTS uq_expected_submission_program_period")
-        except Exception:
-            pass
+        #
+        # Postgres no longer drops uq_expected_submission_program_period here.
+        # Every database that has started since the first commit (28 Aug 2026)
+        # already dropped it, and create_all never makes it, yet the ALTER took
+        # the table's strongest lock on every start and held it to the end of
+        # this block — a server paused mid-start (Ctrl+Z) froze every reader of
+        # expected_submission on the shared DB. A database older than that,
+        # never started since, needs it dropped once by hand.
         if dialect == "sqlite" and _sqlite_relax_expected_submission_key(conn):
             inspector = inspect(conn)     # rebuilt — every cached shape is stale
         # broker_onboarding_request.program_id must be NULLABLE. A request can
