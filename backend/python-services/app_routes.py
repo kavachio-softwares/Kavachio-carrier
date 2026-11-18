@@ -5883,6 +5883,12 @@ class MonthlySendBody(BaseModel):
     # A day, a week or dates picked instead of a month (monthly_report.window).
     cadence: Optional[str] = None
     period: Optional[str] = None
+    # Send now's popup (the Executive Report's): the logins ticked (the
+    # carrier's own only), other addresses typed, and the file's format.
+    # Left out: every login, in Send & Schedule's format.
+    user_ids: Optional[list[int]] = None
+    emails: Optional[list[str]] = None
+    file_format: Optional[str] = None
 
 
 @router.post("/reports/monthly/send")
@@ -5908,7 +5914,9 @@ def send_monthly_report(body: MonthlySendBody, mga: str,
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
         try:
-            r = rd.send(s, tid, month, kind=kind, user_id=principal.user_id, cadence=cadence)
+            r = rd.send(s, tid, month, kind=kind, user_id=principal.user_id, cadence=cadence,
+                        user_ids=body.user_ids, emails=body.emails,
+                        file_format=body.file_format)
         except ValueError as e:
             raise HTTPException(400, str(e))
         details = {"month": month, "kind": kind, "delivered": r["delivered"],

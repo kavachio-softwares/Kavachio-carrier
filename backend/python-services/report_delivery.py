@@ -854,14 +854,23 @@ def _status(delivered: int, failed: int) -> str:
 
 def send(s, tenant_id: int, month: str, *, kind: str, user_id: Optional[int] = None,
          now: Optional[datetime] = None,
-         mailer: Optional[Callable[..., None]] = None, cadence: str = "month") -> Optional[dict]:
+         mailer: Optional[Callable[..., None]] = None, cadence: str = "month",
+         user_ids: Optional[list] = None, emails: Optional[list] = None,
+         file_format: Optional[str] = None) -> Optional[dict]:
     """Build, email and record one report. `kind`: scheduled | now.
 
     It goes to the carrier's logins (people). A scheduled send claims its month
     first and returns None when it was already sent. Commits.
     `cadence` day | week | custom sends that period instead (by hand only —
     the automatic send is monthly); `month` is then the period, as the screen
-    names it ('2026-11-17', the week's Monday, or 'from..to')."""
+    names it ('2026-11-17', the week's Monday, or 'from..to').
+
+    Send now's popup — the Executive Report's — picks who gets it: the logins
+    ticked (`user_ids`, the carrier's own only: anyone else is ignored) and
+    other addresses typed (`emails`), counted and checked as the Executive
+    Report does (executive_delivery.recipients); and the format
+    (`file_format`), and then the file goes along whatever Send & Schedule
+    says. The automatic send still goes to every login."""
     from sqlalchemy.exc import IntegrityError
     from db import MonthlyReportSend
     from notifications import NOTIFY_MAIL_ACCOUNT, _app_link, _email_text, notification_email_html
@@ -869,14 +878,24 @@ def send(s, tenant_id: int, month: str, *, kind: str, user_id: Optional[int] = N
         from email_utils import send_email as mailer
     now = now or datetime.utcnow()
     cfg = settings(s, tenant_id)
-    to = people(s, tenant_id)
-    if not to:
-        raise ValueError(NO_ONE)
+    if user_ids is None and not emails:
+        to = people(s, tenant_id)
+        if not to:
+            raise ValueError(NO_ONE)
+    else:
+        import executive_delivery as xd
+        # Names any typed address that is not one (ValueError).
+        to = xd.recipients(s, tenant_id, user_ids, emails)
+        if not to:
+            raise ValueError("Tick a login or type an email address to send the report to.")
+    if file_format is not None and file_format not in FORMATS:
+        raise ValueError("The file must be PDF, Excel or both.")
+    fmt = file_format or cfg["file_format"]
 
     monthly = cadence == "month"
     row = MonthlyReportSend(tenant_id=tenant_id, month=month, kind=kind,
                             scheduled_key=f"{tenant_id}:{month}" if kind == "scheduled" else None,
-                            file_format=cfg["file_format"], delivery=cfg["delivery"],
+                            file_format=fmt, delivery="attach" if file_format else cfg["delivery"],
                             sent_by_user_id=user_id, created_at=now,
                             # Which kind of period `month` is, from the start,
                             # so even a send that failed can be named.
@@ -895,10 +914,10 @@ def send(s, tenant_id: int, month: str, *, kind: str, user_id: Optional[int] = N
                      else f"/monthly-report?cadence={cadence}&period={month}")
     # A link is only a link when the app's address is configured; otherwise
     # the file goes along so the email is never empty-handed.
-    attach = cfg["delivery"] == "attach" or not link
+    attach = bool(file_format) or cfg["delivery"] == "attach" or not link
     try:
         pack = build_pack(s, tenant_id, month, now=now, cadence=cadence)
-        attachments = files(pack, cfg["file_format"], carrier) if attach else []
+        attachments = files(pack, fmt, carrier) if attach else []
     except Exception:
         # Nothing has gone out: drop the claim so the next run can try again.
         s.rollback()

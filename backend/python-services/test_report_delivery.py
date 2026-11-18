@@ -119,11 +119,38 @@ def test_send_now_emails_each_person_the_file_and_keeps_the_numbers_as_sent():
     assert (r["delivered"], r["failed"], r["status"]) == (2, 0, "sent")
     assert [m["to"] for m in mail.sent] == ["u1@carrier.test", "u2@carrier.test"]
     names = [a[0] for a in mail.sent[0]["attachments"]]
-    assert names == ["Monthly Report 2026-10.pdf", "Monthly Report 2026-10.xlsx"]
+    assert names == ["Periodic Report 2026-10.pdf", "Periodic Report 2026-10.xlsx"]
     assert mail.sent[0]["attachments"][0][1].startswith(b"%PDF")
     assert "October 2026" in mail.sent[0]["subject"]
     h = rd.history(s, 1)
     assert h[0]["month"] == "2026-10" and h[0]["has_file"] is True and h[0]["people"] == 2
+
+
+def test_send_now_goes_to_who_is_picked_in_the_format_picked(monkeypatch):
+    import notifications
+    # Send & Schedule says "a link, as PDF"; the popup picks Excel, so it goes along.
+    monkeypatch.setattr(notifications, "_app_link", lambda path: f"https://app.test{path}")
+    s = _mem_session()
+    _user(s, 1)
+    _user(s, 2)
+    _user(s, 3, tenant=2)                      # another carrier's login
+    rd.save_settings(s, 1, {"delivery": "link", "file_format": "pdf"}, user_id=1)
+    s.commit()
+    mail = Mailer()
+    # The logins ticked (never another carrier's) and other addresses typed,
+    # each address once — as the Executive Report's popup sends.
+    r = rd.send(s, 1, "2026-10", kind="now", now=NOW, mailer=mail, user_ids=[2, 3],
+                emails=["cfo@carrier.test", "U2@carrier.test"], file_format="excel")
+    assert [m["to"] for m in mail.sent] == ["u2@carrier.test", "cfo@carrier.test"]
+    assert r["delivered"] == 2
+    assert [a[0] for a in mail.sent[0]["attachments"]] == ["Periodic Report 2026-10.xlsx"]
+    assert rd.history(s, 1)[0]["people"] == 2
+    with pytest.raises(ValueError, match="Tick a login or type an email address"):
+        rd.send(s, 1, "2026-10", kind="now", now=NOW, mailer=mail, user_ids=[3])
+    with pytest.raises(ValueError, match="not email addresses: nobody"):
+        rd.send(s, 1, "2026-10", kind="now", now=NOW, mailer=mail, user_ids=[], emails=["nobody"])
+    with pytest.raises(ValueError, match="PDF, Excel or both"):
+        rd.send(s, 1, "2026-10", kind="now", now=NOW, mailer=mail, file_format="word")
 
 
 def test_reports_sent_can_be_paged_through_newest_first():
@@ -199,7 +226,7 @@ def test_the_excel_file_has_one_sheet_per_part():
     wb = load_workbook(io.BytesIO(rd.render_xlsx(pack, "Test Carrier")))
     assert wb.sheetnames == ["Key numbers", "By broker and programme", "Checks that failed most",
                              "Errors still waiting", "Waiting list"]
-    assert wb["Key numbers"]["A1"].value == "Monthly Report — October 2026"
+    assert wb["Key numbers"]["A1"].value == "Periodic Report — October 2026"
     # The title is the box's first line, centred across the table; under it
     # the period in words and the dates it compares, then the table. Every
     # line of every table has a border; the notes under it have none.
@@ -262,7 +289,7 @@ def test_a_week_renders_in_both_files_named_for_its_dates():
     assert wb.sheetnames == ["Key numbers", "By broker and programme", "Checks that failed most",
                              "Errors still waiting", "Waiting list"]
     ws = wb["Key numbers"]
-    assert ws["A1"].value == "Monthly Report — Week of 26 Oct 2026"
+    assert ws["A1"].value == "Periodic Report — Week of 26 Oct 2026"
     assert ws["A3"].value == "Covers 26 Oct – 1 Nov 2026, compared with 19 – 25 Oct 2026 and 27 Oct – 2 Nov 2025."
     assert [c.value for c in ws[4]][:6] == ["Measure", "Week of 26 Oct 2026", "Week of 19 Oct 2026",
                                             "vs last week", "Week of 27 Oct 2025", "vs last year"]
@@ -270,7 +297,7 @@ def test_a_week_renders_in_both_files_named_for_its_dates():
     assert "Waiting to be fixed at the end of the week" in labels
     assert rd.render_pdf(pack, "Test Carrier").startswith(b"%PDF")
     assert [n for n, _d, _m in rd.files(pack, "both", "Test Carrier")] == [
-        "Monthly Report week of 2026-10-26.pdf", "Monthly Report week of 2026-10-26.xlsx"]
+        "Periodic Report week of 2026-10-26.pdf", "Periodic Report week of 2026-10-26.xlsx"]
 
 
 def test_a_day_has_no_last_year_column():
@@ -292,7 +319,7 @@ def test_send_now_can_send_a_week_and_the_history_names_it():
     r = rd.send(s, 1, "2026-10-26", kind="now", user_id=1, now=NOW, mailer=mail, cadence="week")
     assert (r["cadence"], r["title"], r["status"]) == ("week", "Week of 26 Oct 2026", "sent")
     assert "Week of 26 Oct 2026" in mail.sent[0]["subject"]
-    assert mail.sent[0]["attachments"][0][0] == "Monthly Report week of 2026-10-26.pdf"
+    assert mail.sent[0]["attachments"][0][0] == "Periodic Report week of 2026-10-26.pdf"
     rd.send(s, 1, "2026-10", kind="now", user_id=1, now=NOW, mailer=mail)
     h = rd.history(s, 1)
     assert [(x["month"], x["cadence"], x["title"]) for x in h] == [

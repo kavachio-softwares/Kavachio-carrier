@@ -2,8 +2,10 @@
 // every tab (it is one report): download the period picked — a month, or a
 // day, a week or dates — as a PDF or Excel file, open Send & Schedule (its tag
 // says whether the report goes out by itself, and when: always monthly), and
-// send the period picked now. What happened after a click is handed up as a
-// note, so the page can show it under the tabs.
+// send the period picked now — in the shared "send by email" popup, as on the
+// Executive Report: tick which of the carrier's logins get it, type any other
+// addresses, and pick the format. A download that
+// fails is handed up as a note, so the page can show it under the tabs.
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { CalendarClock, ChevronDown, Download, FileSpreadsheet, FileText } from "lucide-react";
@@ -11,25 +13,13 @@ import {
   downloadMonthlyReport, getDelivery, sendMonthlyReport,
   type DeliverySettings, type DeliveryView,
 } from "../api/reports";
-import { Modal } from "../components/ui/Modal";
+import { SendByEmailModal } from "../components/SendByEmail";
 import {
-  fmtDay, ordinal, periodRunning, periodTitle, plural, titleInSentence, upFirst,
+  fmtDay, ordinal, periodRunning, periodTitle, plural,
 } from "../utils/reportFormat";
 import type { ReportFilters } from "./MonthlyReport";
 
 export type ActionNote = { tone: "ok" | "warn"; text: string } | null;
-
-/** The "Sent as" line of the Send now popup. */
-function sentAs(s: DeliverySettings) {
-  if (s.delivery === "link") return "A link in the email (they sign in to open it)";
-  const file = s.file_format === "both" ? "PDF and Excel" : s.file_format === "pdf" ? "PDF" : "Excel";
-  return `${file}, attached to the email`;
-}
-
-/** "Sachin Argade (sachin@…)", or just the address when there is no name. */
-function nameAndEmail(p: { name: string | null; email: string }) {
-  return p.name ? `${p.name} (${p.email})` : p.email;
-}
 
 /** "3 Dec", for the tag on the Send & Schedule button. */
 function shortDay(iso: string) {
@@ -39,6 +29,10 @@ function shortDay(iso: string) {
 
 const BTN = { height: 38 };
 
+/** The formats Send now offers — the same three as Send & Schedule. */
+const FORMATS: { key: DeliverySettings["file_format"]; label: string }[] = [
+  { key: "pdf", label: "PDF" }, { key: "excel", label: "Excel" }, { key: "both", label: "Both" }];
+
 export default function MonthlyReportActions({ filters, onNote }: {
   filters: ReportFilters;
   onNote: (note: ActionNote) => void;
@@ -46,12 +40,10 @@ export default function MonthlyReportActions({ filters, onNote }: {
   const { cadence, period, programId, brokerId } = filters;
   // "October 2026", "9 – 15 Nov 2026", "17 Nov 2026"…
   const title = periodTitle(cadence, period);
-  const named = titleInSentence(cadence, title);
   const [delivery, setDelivery] = useState<DeliveryView | null>(null);
   const [menu, setMenu] = useState(false);
   const [fileBusy, setFileBusy] = useState<"pdf" | "excel" | null>(null);
   const [confirm, setConfirm] = useState(false);
-  const [sending, setSending] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -79,25 +71,6 @@ export default function MonthlyReportActions({ filters, onNote }: {
       onNote({ tone: "warn", text: "Could not make the file. Try again." });
     } finally {
       setFileBusy(null);
-    }
-  }
-
-  async function sendNow() {
-    setSending(true); onNote(null);
-    try {
-      const r = await sendMonthlyReport({ cadence, period });
-      const sent = r.recipients.filter(x => x.delivered).map(nameAndEmail).join(", ");
-      const missed = r.recipients.filter(x => !x.delivered).map(nameAndEmail).join(", ");
-      onNote(r.failed === 0
-        ? { tone: "ok", text: `The ${named} report was sent to ${sent}.` }
-        : { tone: "warn", text: (r.delivered ? `The ${named} report was sent to ${sent}. ` : "")
-            + `It could not be delivered to ${missed}.` });
-      getDelivery().then(setDelivery).catch(() => undefined);
-    } catch (e: any) {
-      onNote({ tone: "warn", text: e?.response?.data?.detail ?? "Could not send the report." });
-    } finally {
-      setSending(false);
-      setConfirm(false);
     }
   }
 
@@ -152,42 +125,20 @@ export default function MonthlyReportActions({ filters, onNote }: {
         Send now →
       </button>
 
-      <Modal open={confirm} size="md" title={`Send the ${named} report now?`}
-        onClose={() => { if (!sending) setConfirm(false); }}
-        footer={
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
-            <button type="button" className="btn" onClick={() => setConfirm(false)} disabled={sending}>Cancel</button>
-            <button type="button" className="btn pri" onClick={sendNow} disabled={sending || recipients.length === 0}>
-              {sending ? "Sending…" : "Send now"}
-            </button>
-          </div>
-        }>
-        {recipients.length > 0 && cfg ? (
-          <div style={{ display: "grid", gridTemplateColumns: "76px 1fr", rowGap: 14, fontSize: 14, lineHeight: 1.45 }}>
-            <div style={{ color: "var(--p-muted)" }}>To</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {recipients.map(p => (
-                <div key={p.user_id}>
-                  <div style={{ fontWeight: 600 }}>{p.name ?? p.email}</div>
-                  {p.name && <div style={{ color: "var(--p-muted)" }}>{p.email}</div>}
-                </div>
-              ))}
+      <SendByEmailModal open={confirm} onClose={() => setConfirm(false)}
+        title="Send the Periodic Report" noun="report"
+        what={<>
+          <b>{title}</b>{running && <span className="sub"> · still running, counts to today</span>}
+          {filtered && (
+            <div className="note warn" style={{ marginTop: 10 }}>
+              It covers the whole carrier, not only the programme or broker picked.
             </div>
-            <div style={{ color: "var(--p-muted)" }}>Sent as</div>
-            <div>{sentAs(cfg)}</div>
-          </div>
-        ) : (
-          <p style={{ margin: 0, fontSize: 14 }}>
-            This carrier has no active login with an email, so there is no one to send the report to.
-          </p>
-        )}
-        {(filtered || running) && (
-          <div className="note warn" style={{ marginTop: 16 }}>
-            {filtered && <div>It covers the whole carrier, not only the programme or broker picked.</div>}
-            {running && <div>{upFirst(named)} is not over yet, so the numbers count to today.</div>}
-          </div>
-        )}
-      </Modal>
+          )}
+        </>}
+        logins={recipients} formats={FORMATS} format={cfg?.file_format}
+        send={({ user_ids, emails, file_format }) =>
+          sendMonthlyReport({ cadence, period, user_ids, emails, file_format })}
+        onSent={() => { setConfirm(false); getDelivery().then(setDelivery).catch(() => undefined); }} />
     </div>
   );
 }

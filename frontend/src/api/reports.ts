@@ -401,7 +401,8 @@ export interface SentReport {
 
 export interface DeliveryView {
   settings: DeliverySettings;
-  /** The carrier's own logins — always everyone the report goes to. */
+  /** The carrier's own logins: everyone the automatic send goes to; Send now
+   *  can tick fewer and add other addresses. */
   recipients: ReportPerson[];
   /** Null while automatic sending is off. */
   next: { send_on: string; month: string } | null;
@@ -442,8 +443,16 @@ export interface SendResult {
 }
 
 /** Send a period's report now, to the carrier's own logins. */
-export async function sendMonthlyReport(body: ReportPeriod): Promise<SendResult> {
-  const { data } = await api.post<SendResult>("/reports/monthly/send", periodParams(body),
+export async function sendMonthlyReport(body: ReportPeriod & {
+  /** The logins ticked in the popup (the carrier's own); left out = all of them. */
+  user_ids?: number[];
+  /** Other addresses typed in the popup. */
+  emails?: string[];
+  /** The format picked in the popup; left out = Send & Schedule's. */
+  file_format?: DeliverySettings["file_format"];
+}): Promise<SendResult> {
+  const { data } = await api.post<SendResult>("/reports/monthly/send",
+    { ...periodParams(body), user_ids: body.user_ids, emails: body.emails, file_format: body.file_format },
     { params: { mga: currentMga() } });
   return data;
 }
