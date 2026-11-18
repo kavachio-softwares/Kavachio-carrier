@@ -1,4 +1,4 @@
-// MOPR 40 — Data Quality & Volumes, the Monthly Report's second tab.
+// MOPR 40 — Data Quality & Volumes, the Periodic Report's second tab.
 //
 // One month, read from the shared check record (backend check_record.py) that
 // every check writes to — the file-arrival checks, the quick lane and the full
@@ -7,10 +7,10 @@
 //   40.3  how many files were clean first time
 //   40.1  what the checks found: passed, failed, could not run, and the errors
 //
-// Layout as agreed in the Monthly Report proposal: a one-line summary of the
+// Layout as agreed in the Periodic Report proposal: a one-line summary of the
 // period, four tiles each beside the period before, transaction types beside
 // the checks, and the checks that failed most. The split by broker and
-// programme is not shown here (it stays in the API and in the Monthly Report's
+// programme is not shown here (it stays in the API and in the Periodic Report's
 // PDF / Excel). The period — a day, a week, a month or dates picked —
 // programme and broker are picked above the tabs (MonthlyReport); the files
 // counted are the ones first checked in that period.

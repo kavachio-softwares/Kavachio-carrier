@@ -51,3 +51,4 @@ backend/python-services/pipeline_decisions.log
 # is a key anyone with repo access can spend the GCP project with.
 *gcp-credetials*.json
 *gcp-credentials*.json
+Kavachio-website/

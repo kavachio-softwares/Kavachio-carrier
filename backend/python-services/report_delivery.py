@@ -1,4 +1,4 @@
-"""MOPR 42.2 — delivering the Monthly Report.
+"""MOPR 42.2 — delivering the Periodic Report.
 
 The pack (monthly_report.pack) as a PDF or an Excel file, emailed to the
 carrier — by itself on the Nth working day after each month ends, or by hand
@@ -41,7 +41,7 @@ CATCH_UP_DAYS = 7
 SUBJECT_PREFIX = "Kavachio - "
 REPORT_FOOTER = (
     "You're receiving this as your carrier's login on Kavachio. When and how it "
-    "is sent is set under Monthly Report › Send & Schedule.")
+    "is sent is set under Periodic Report › Send & Schedule.")
 PDF_MIME = "application/pdf"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -447,7 +447,7 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=14 * mm, rightMargin=14 * mm,
                             topMargin=14 * mm, bottomMargin=14 * mm,
-                            title=f"Monthly Report — {title_of(pack)}", author="Kavachio")
+                            title=f"Periodic Report — {title_of(pack)}", author="Kavachio")
     ss = getSampleStyleSheet()
     h1 = ParagraphStyle("h1", parent=ss["Title"], fontName="Helvetica-Bold", fontSize=18,
                         alignment=0, spaceAfter=2)
@@ -491,7 +491,7 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
     what = WHAT_WORDS[cadence_of(pack)]
     story = [
         para("Kavachio", ParagraphStyle("brand", parent=sub, textColor=teal, fontName="Helvetica-Bold")),
-        para(f"Monthly Report — {title_of(pack)}", h1),
+        para(f"Periodic Report — {title_of(pack)}", h1),
         para(" · ".join(x for x in (carrier, scope) if x)
                   + f" · numbers as at {datetime.fromisoformat(pack['as_of']).strftime('%d %B %Y')}", sub),
         Spacer(1, 8),
@@ -604,7 +604,7 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
         canvas.saveState()
         canvas.setFont("Helvetica", 7.5)
         canvas.setFillColor(colors.HexColor("#8B93A2"))
-        canvas.drawString(d.leftMargin, 8 * mm, f"Kavachio · Monthly Report — {title_of(pack)}")
+        canvas.drawString(d.leftMargin, 8 * mm, f"Kavachio · Periodic Report — {title_of(pack)}")
         canvas.drawRightString(d.leftMargin + d.width, 8 * mm, f"Page {canvas.getPageNumber()}")
         canvas.restoreState()
 
@@ -668,7 +668,7 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
     # The title sits on top of the table, centred across it, as the box's
     # first line; under it the period in a few sentences and the dates it
     # compares. A file narrowed to a programme or broker says which.
-    banner(ws, 1, f"Monthly Report — {title_of(pack)}" + (f" · {scope}" if scope else ""), width,
+    banner(ws, 1, f"Periodic Report — {title_of(pack)}" + (f" · {scope}" if scope else ""), width,
            font=Font(bold=True, size=14), height=26, center=True)
     said = glance(pack, filtered=bool(scope))
     banner(ws, 2, said, width, height=15 * (1 + len(said) // 120))
@@ -815,9 +815,9 @@ def files(pack: dict, file_format: str, carrier: str,
           scope: str = "") -> list[tuple[str, bytes, str]]:
     """(filename, data, mime) for each file the format asks for."""
     c = cadence_of(pack)
-    name = (f"Monthly Report {pack['month']}" if c in ("month", "day")
-            else f"Monthly Report week of {pack['month']}" if c == "week"
-            else f"Monthly Report {pack['month'].replace('..', ' to ')}")
+    name = (f"Periodic Report {pack['month']}" if c in ("month", "day")
+            else f"Periodic Report week of {pack['month']}" if c == "week"
+            else f"Periodic Report {pack['month'].replace('..', ' to ')}")
     out = []
     if file_format in ("pdf", "both"):
         out.append((f"{name}.pdf", render_pdf(pack, carrier, scope), PDF_MIME))
@@ -906,25 +906,25 @@ def send(s, tenant_id: int, month: str, *, kind: str, user_id: Optional[int] = N
         s.commit()
         raise
     named = title_of(pack)
-    title = f"Monthly Report — {named}"
-    subject = SUBJECT_PREFIX + f"Monthly Report · {named}"
-    body = (f"The {carrier} Monthly Report for {named} is attached."
+    title = f"Periodic Report — {named}"
+    subject = SUBJECT_PREFIX + f"Periodic Report · {named}"
+    body = (f"The {carrier} Periodic Report for {named} is attached."
             if attach else
-            f"The {carrier} Monthly Report for {named} is ready. Sign in to open it.")
+            f"The {carrier} Periodic Report for {named} is ready. Sign in to open it.")
     facts = headline(pack)
 
     results = []
     for p in to:
         try:
             mailer(p["email"], subject,
-                   notification_email_html(title, body, facts, link, "Open the Monthly Report",
+                   notification_email_html(title, body, facts, link, "Open the Periodic Report",
                                            greeting_name=p.get("name"), footer=REPORT_FOOTER),
                    text=_email_text(title, body, facts, link), account=NOTIFY_MAIL_ACCOUNT,
                    attachments=attachments or None)
             results.append({**{k: p.get(k) for k in ("user_id", "email", "name")},
                             "delivered": True, "error": None})
         except Exception as e:  # noqa: BLE001 — one bad address must not stop the rest
-            log.warning("monthly report %s to %s failed: %s", month, p["email"], e)
+            log.warning("periodic report %s to %s failed: %s", month, p["email"], e)
             results.append({**{k: p.get(k) for k in ("user_id", "email", "name")},
                             "delivered": False, "error": str(e)[:300]})
 
@@ -1006,7 +1006,7 @@ def run_due(s, now: Optional[datetime] = None,
         try:
             r = send(s, tid, month, kind="scheduled", now=now, mailer=mailer)
         except Exception:  # noqa: BLE001
-            log.exception("monthly report: carrier %s, %s failed", tid, month)
+            log.exception("periodic report: carrier %s, %s failed", tid, month)
             s.rollback()
             continue
         if r is None:

@@ -405,6 +405,9 @@ _SELF_LOGGED = [
     ("PUT",    re.compile(r"^/reports/executive/delivery$")),
     ("POST",   re.compile(r"^/reports/executive/send$")),
     ("POST",   re.compile(r"^/reports/executive/sends/clear$")),
+    # 43.3: emailing the policy list writes its own named row (policy_export),
+    # with how many policies, the filters and who it went to.
+    ("POST",   re.compile(r"^/policies/send$")),
     ("PUT",    re.compile(r"^/intake/routes/\d+/contacts$")),
     ("POST",   re.compile(r"^/extra-fields$")),
     ("POST",   re.compile(r"^/extra-fields/[^/]+/adopt$")),

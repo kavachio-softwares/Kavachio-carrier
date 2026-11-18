@@ -1,4 +1,4 @@
-// MOPR 42 — the Monthly Report: one sidebar entry, three views of one period.
+// MOPR 42 — the Periodic Report: one sidebar entry, three views of one period.
 //   Overview              the pack (42.1): timeliness, volumes, data quality and
 //                         fixes, beside the period before and last year (42.2)
 //   Data Quality          the detail behind the volumes and errors (MOPR 40)
@@ -146,7 +146,7 @@ export default function MonthlyReport() {
       <div className="view full">
         <div className="page-head" style={{ marginBottom: 14 }}>
           <div className="t">
-            <h2>Monthly Report
+            <h2>Periodic Report
               <InfoTip text={ABOUT} />
             </h2>
           </div>
@@ -156,7 +156,7 @@ export default function MonthlyReport() {
             grey page, the open tab in the brand teal. The report's buttons sit
             to its right, so they show on every tab. */}
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "12px 16px", marginBottom: 14 }}>
-          <nav aria-label="Monthly Report views"
+          <nav aria-label="Periodic Report views"
             className="flex min-w-0 flex-[1_1_520px] flex-wrap gap-1 rounded-[10px] border bg-white p-1"
             style={{ borderColor: "var(--p-border)", boxShadow: "var(--p-sh-sm)" }}>
             {TABS.map(({ key, label, icon: Icon }, i) => {

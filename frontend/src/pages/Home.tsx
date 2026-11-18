@@ -669,7 +669,7 @@ export default function Home() {
           </div>
           {(canProcess || canAccessPath("/policies")) && (
             <div className="actions">
-              {/* Policies has no sidebar entry: this is its way in. */}
+              {/* A shortcut: Policies is also in the sidebar, under Operations. */}
               {canAccessPath("/policies") && (
                 <Link className="btn" to="/policies">Search Policies</Link>
               )}

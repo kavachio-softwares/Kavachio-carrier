@@ -18,6 +18,7 @@ import {
 import { drillLink } from "../api/policies";
 import { InfoTip } from "../components/InfoTip";
 import { showDone, showError } from "../components/ResultPopup";
+import { FormatPick, lines, Recipients, SendByEmailModal } from "../components/SendByEmail";
 import { Modal } from "../components/ui/Modal";
 import { fmtDay, fmtMonth, lastMonths, ordinal, plural } from "../utils/reportFormat";
 
@@ -75,8 +76,6 @@ function split(v: string): [string, string | null] {
   const m = /^(.*?) \((.*)\)$/.exec(v);
   return m ? [m[1], m[2]] : [v, null];
 }
-
-const who = (p: { name: string | null; email: string }) => (p.name ? `${p.name} (${p.email})` : p.email);
 
 export default function ExecutiveReport() {
   const months = useMemo(() => lastMonths(), []);
@@ -712,92 +711,20 @@ function SentDrawer({ open, delivery, onClose, onCleared }: {
   );
 }
 
-/** Logins to tick, and other addresses one per line — shared by both popups. */
-function Recipients({ logins, ticked, setTicked, emails, setEmails }: {
-  logins: Login[]; ticked: number[]; setTicked: (v: number[]) => void;
-  emails: string; setEmails: (v: string) => void;
-}) {
-  return (
-    <div style={{ display: "grid", gap: 12 }}>
-      <div>
-        <div className="sub" style={{ marginBottom: 6 }}>Your company&rsquo;s logins</div>
-        {logins.length === 0 ? <div className="sub">No logins with an email.</div> : logins.map(p => (
-          <label key={p.user_id} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
-            <input type="checkbox" checked={ticked.includes(p.user_id)}
-              onChange={e => setTicked(e.target.checked ? [...ticked, p.user_id] : ticked.filter(x => x !== p.user_id))} />
-            {who(p)}
-          </label>
-        ))}
-      </div>
-      <label style={{ display: "grid", gap: 6 }}>
-        <span className="sub">Other email addresses <InfoTip text="One per line. Anyone you add gets the report by email — they do not need a login." /></span>
-        <textarea rows={4} value={emails} onChange={e => setEmails(e.target.value)}
-          placeholder={"ceo@company.com\ncfo@company.com"}
-          style={{ width: "100%", border: "1px solid var(--p-border-2)", borderRadius: 8, padding: 8, fontSize: 14 }} />
-      </label>
-    </div>
-  );
-}
-
-const lines = (t: string) => t.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
-
-function FormatPick({ value, onChange }: { value: FileFormat; onChange: (f: FileFormat) => void }) {
-  return (
-    <div>
-      <div className="sub" style={{ marginBottom: 6 }}>Format</div>
-      <span className="seg">{FORMATS.map(f => (
-        <button key={f.key} type="button" className={value === f.key ? "on" : ""} onClick={() => onChange(f.key)}>{f.label}</button>
-      ))}</span>
-    </div>
-  );
-}
-
+/** Send now — the shared popup (components/SendByEmail, also used by the
+ *  Policies list), filled in from the saved schedule's people and format. */
 function SendModal({ open, onClose, report, logins, settings, onSent }: {
   open: boolean; onClose: () => void; report: Report; logins: Login[];
   settings: ExecutiveSettings; onSent: () => void;
 }) {
-  const [ticked, setTicked] = useState<number[]>([]);
-  const [emails, setEmails] = useState("");
-  const [format, setFormat] = useState<FileFormat>("pdf");
-  const [sending, setSending] = useState(false);
-  useEffect(() => {
-    if (!open) return;
-    setTicked(settings.user_ids ?? logins.map(p => p.user_id));
-    setEmails((settings.emails ?? []).join("\n"));
-    setFormat(settings.file_format);
-  }, [open, settings, logins]);
-  const count = ticked.length + lines(emails).length;
-
-  async function send() {
-    setSending(true);
-    try {
-      const r = await sendExecutiveReport({ cadence: report.cadence, period: report.period,
-        user_ids: ticked, emails: lines(emails), file_format: format });
-      const total = r.delivered + r.failed;
-      if (r.failed === 0) showDone(`Sent to ${plural(r.delivered, "person", "people")}.`, "Report sent");
-      else showError(new Error(`Sent to ${r.delivered} of ${total}. Not delivered: `
-        + r.recipients.filter(x => !x.delivered).map(x => x.email).join(", ")), "Not everyone got the report");
-      onSent();
-    } catch (e) {
-      showError(e, "Could not send the report");
-    } finally {
-      setSending(false);
-    }
-  }
-
   return (
-    <Modal open={open} size="md" title="Send the Executive Report" onClose={() => { if (!sending) onClose(); }}
-      footer={<div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
-        <button className="btn" onClick={onClose} disabled={sending}>Cancel</button>
-        <button className="btn pri" onClick={send} disabled={sending || count === 0}>{sending ? "Sending…" : "Send"}</button>
-      </div>}>
-      <div style={{ display: "grid", gap: 16, fontSize: 14 }}>
-        <div><b>{report.title}</b>{!report.complete && <span className="sub"> · still running, counts to today</span>}</div>
-        <div><div className="sub" style={{ marginBottom: 6 }}>Send to</div>
-          <Recipients logins={logins} ticked={ticked} setTicked={setTicked} emails={emails} setEmails={setEmails} /></div>
-        <FormatPick value={format} onChange={setFormat} />
-      </div>
-    </Modal>
+    <SendByEmailModal open={open} onClose={onClose} title="Send the Executive Report" noun="report"
+      what={<><b>{report.title}</b>{!report.complete && <span className="sub"> · still running, counts to today</span>}</>}
+      logins={logins} ticked={settings.user_ids} emails={settings.emails}
+      formats={FORMATS} format={settings.file_format}
+      send={({ user_ids, emails, file_format }) => sendExecutiveReport({ cadence: report.cadence,
+        period: report.period, user_ids, emails, file_format: file_format ?? settings.file_format })}
+      onSent={onSent} />
   );
 }
 
@@ -875,7 +802,7 @@ function ScheduleModal({ open, onClose, delivery, onSaved }: {
           : `Last month's report, on the ${ordinal(sendDay)} working day of each month.`}</div>
         <div><div className="sub" style={{ marginBottom: 6 }}>Send to</div>
           <Recipients logins={delivery.logins} ticked={ticked} setTicked={setTicked} emails={emails} setEmails={setEmails} /></div>
-        <FormatPick value={format} onChange={setFormat} />
+        <FormatPick value={format} onChange={setFormat} formats={FORMATS} />
       </div>
     </Modal>
   );

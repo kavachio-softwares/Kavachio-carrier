@@ -271,7 +271,7 @@ export default function App() {
             due month, rather than one programme's deadlines. /calendar stays as
             the place a single programme's schedule is SET. */}
         <Route path="/bordereau-calendar" element={<BordereauCalendar />} />
-        {/* MOPR 42 — the Monthly Report: Overview, Data Quality (MOPR 40) and
+        {/* MOPR 42 — the Periodic Report: Overview, Data Quality (MOPR 40) and
             Exception Resolution (MOPR 41) as three tabs of one screen. The old
             paths of the two detail screens open their tab. */}
         <Route path="/monthly-report" element={<MonthlyReport />} />

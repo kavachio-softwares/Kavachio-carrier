@@ -6,24 +6,33 @@
 // every policy its brokers have sent; a broker sees only its own, on the
 // carrier picked in the sidebar's carrier switch (all carriers when none is).
 //
-// Deliberately NOT a sidebar entry: it is opened from the Dashboard (both
-// seats) and from File Submissions (carrier), like Party and Contracts.
+// Carrier: in the sidebar under Operations, directly below File Submissions
+// (18 Nov 2026) — the files, then the policies inside them. Also opened from
+// the Dashboard and File Submissions. Broker: opened from its Dashboard.
 //
-// 38.1: a number clicked on a report (Financial Summary, Monthly Report) opens
+// 38.1: a number clicked on a report (Financial Summary, Periodic Report) opens
 // this page on the policies behind that number only — the report's own
 // selection, worked out on the server (backend drill_down.py). The URL says
 // which number (api/policies drillLink); the other filters still apply on top.
+//
+// 43.2: Download Excel and Send take out the WHOLE list as filtered — every
+// page, not the 25 on screen — as an Excel file (backend policy_export.py).
+// Send is the Executive Report's popup (components/SendByEmail). 43.3: each
+// download and send is a named row in the Audit Logs.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { Search } from "lucide-react";
+import { FileSpreadsheet, Search, Send } from "lucide-react";
 import {
-  DRILL_KEYS, drillFrom, getPolicyDetail, searchPolicies, type PolicyDateField, type PolicyDetail,
-  type PolicyLine, type PolicyRow, type PolicySearchResult,
+  DRILL_KEYS, downloadPolicies, drillFrom, getPolicyDetail, getPolicyRecipients, searchPolicies,
+  sendPolicies, type PolicyDateField, type PolicyDetail, type PolicyLine, type PolicyRow,
+  type PolicySearchParams, type PolicySearchResult,
 } from "../api/policies";
 import { useBrokerCarrierId } from "../brokerCarrier";
 import { isBrokerSeat } from "../auth";
 import { InfoTip } from "../components/InfoTip";
 import { Pagination } from "../components/Pagination";
+import { showError } from "../components/ResultPopup";
+import { SendByEmailModal, type SendLogin } from "../components/SendByEmail";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { periodLabel } from "../utils/date";
 
@@ -77,6 +86,17 @@ export default function PolicySearch() {
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [open, setOpen] = useState<PolicyLine | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [sendOpen, setSendOpen] = useState(false);
+  const [logins, setLogins] = useState<SendLogin[] | null>(null);
+
+  // The filters and the number clicked — what the list shows, and exactly
+  // what Download Excel and Send take out (all pages of it).
+  const current: PolicySearchParams = {
+    q, program_id: programId, broker_party_id: broker ? null : brokerId,
+    carrier_id: broker ? carrierId : null, state,
+    date_field: dateField, date_from: from, date_to: to, drill,
+  };
 
   // A new search or filter starts again from the first page.
   useEffect(() => { setPage(1); },
@@ -85,12 +105,7 @@ export default function PolicySearch() {
   useEffect(() => {
     let live = true;
     setLoading(true); setFailed(false);
-    searchPolicies({
-      q, program_id: programId, broker_party_id: broker ? null : brokerId,
-      carrier_id: broker ? carrierId : null, state,
-      date_field: dateField, date_from: from, date_to: to,
-      page, page_size: PAGE_SIZE, drill,
-    })
+    searchPolicies({ ...current, page, page_size: PAGE_SIZE })
       .then(r => { if (live) setData(r); })
       .catch(() => { if (live) setFailed(true); })
       .finally(() => { if (live) setLoading(false); });
@@ -105,8 +120,26 @@ export default function PolicySearch() {
     setParams(next, { replace: true });
   };
 
+  async function download() {
+    setDownloading(true);
+    try { await downloadPolicies(current); }
+    catch (e) { showError(e, "Could not make the file"); }
+    finally { setDownloading(false); }
+  }
+
+  /** Who the list can go to is asked for once, when Send is first pressed. */
+  async function openSend() {
+    if (logins == null) {
+      try { setLogins((await getPolicyRecipients()).logins); }
+      catch (e) { showError(e, "Could not load who to send it to"); return; }
+    }
+    setSendOpen(true);
+  }
+
   const f = data?.filters;
   const filtered = !!(q || programId != null || brokerId != null || state || from || to);
+  // Nothing to take out while the list is empty or still loading.
+  const nothing = !data || loading || data.total === 0;
   // The carrier column earns its place only when a broker is looking across
   // more than one carrier.
   const showInsurer = broker && carrierId == null && (f?.insurers.length ?? 0) > 1;
@@ -122,10 +155,20 @@ export default function PolicySearch() {
                 : "Every policy in the bordereaux your brokers have sent, as each file's latest version. One line per policy; open it to see every row behind it."} />
             </h2>
           </div>
-          <div className="actions">
+          <div className="actions" style={{ flexWrap: "wrap" }}>
+            {/* The carrier reaches this from the sidebar; the broker only from
+                its Dashboard, so it keeps the way back. */}
             {drill
               ? <button className="btn" onClick={() => navigate(-1)}>← Back to the report</button>
-              : <Link className="btn" to={broker ? "/broker" : "/home"}>← Dashboard</Link>}
+              : broker && <Link className="btn" to="/broker">← Dashboard</Link>}
+            <button className="btn" onClick={download} disabled={nothing || downloading}
+              title="Every policy in this list, all pages, with the filters you picked">
+              <FileSpreadsheet size={15} /> {downloading ? "Making…" : "Download Excel"}
+            </button>
+            <button className="btn pri" onClick={openSend} disabled={nothing}
+              title="Email this list as an Excel file">
+              <Send size={15} /> Send
+            </button>
           </div>
         </div>
 
@@ -283,6 +326,20 @@ export default function PolicySearch() {
 
       <PolicyDrawer line={open} carrierId={broker ? carrierId : null}
         onClose={() => setOpen(null)} />
+
+      {logins && data && (
+        <SendByEmailModal open={sendOpen} onClose={() => setSendOpen(false)}
+          title="Send the policy list" noun="policy list"
+          what={<>
+            <b>{data.total.toLocaleString("en-GB")} {data.total === 1 ? "policy" : "policies"}</b>
+            {data.drill?.label && <> behind {data.drill.label}{data.drill.period_name ? ` · ${data.drill.period_name}` : ""}</>}
+            <span className="sub"> · every page, as an Excel file</span>
+            <InfoTip text="The list as filtered on screen. People you add get it by email and do not need a login." />
+          </>}
+          logins={logins}
+          send={({ user_ids, emails }) => sendPolicies(current, { user_ids, emails })}
+          onSent={() => setSendOpen(false)} />
+      )}
     </div>
   );
 }

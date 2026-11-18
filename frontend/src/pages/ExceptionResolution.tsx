@@ -1,4 +1,4 @@
-// MOPR 41 — Exception Resolution Performance, the Monthly Report's third tab.
+// MOPR 41 — Exception Resolution Performance, the Periodic Report's third tab.
 //
 // How fast the problems the checks find get fixed, against the carrier's own
 // target, and the age and owner of every problem still waiting (backend

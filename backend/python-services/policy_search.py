@@ -377,8 +377,9 @@ def search(s, p, *, q: Optional[str] = None, program_id: Optional[int] = None,
            broker_party_id: Optional[int] = None, carrier_id: Optional[int] = None,
            state: Optional[str] = None, date_field: str = "start",
            date_from: Optional[str] = None, date_to: Optional[str] = None,
-           page: int = 1, page_size: int = 25, drill: Optional[dict] = None) -> dict:
+           page: int = 1, page_size: Optional[int] = 25, drill: Optional[dict] = None) -> dict:
     """One page of this seat's policies, and the choices its filters offer.
+    `page_size` None returns every match (the Excel file and email, 43.2).
 
     `drill` (drill_down.resolve) narrows the search to the policies behind one
     number on a report: {"within": {file id: keys | None}, "title": …}. The
@@ -434,9 +435,9 @@ def search(s, p, *, q: Optional[str] = None, program_id: Optional[int] = None,
     # Latest bordereau month first; within a month, by policy number.
     hits.sort(key=lambda g: (g["policy"] or "").lower())
     hits.sort(key=lambda g: g["last_period"] or "", reverse=True)
-    start = (page - 1) * page_size
+    start = (page - 1) * (page_size or 0)
     return {
-        "items": hits[start:start + page_size],
+        "items": hits if page_size is None else hits[start:start + page_size],
         "total": len(hits),
         "page": page,
         "page_size": page_size,

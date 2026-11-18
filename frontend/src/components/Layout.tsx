@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, ChevronDown, Layers, ListChecks, ClipboardList,
   FileCheck, CalendarDays, ScrollText, History, FileSpreadsheet, BarChart3, Presentation, Timer, AlertTriangle, Award,
+  FileSearch,
 } from "lucide-react";
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
@@ -106,6 +107,11 @@ const GROUPS: {
       // /direct/runs is scoped to the tenant, never to who pressed the button,
       // so such a run is listed here beside the brokers' own.
       { to: "/runs", label: "File Submissions", icon: History },
+      // 43: the policies INSIDE those files, searched, downloaded and emailed —
+      // directly below File Submissions, the files then what is in them (18 Nov
+      // 2026). Carrier seat here; /policies' `only` keeps Kavachio out, and the
+      // broker opens it from its Dashboard.
+      { to: "/policies", label: "Policies", icon: FileSearch },
       // Process Reinsurance Bordereau has its own "Reinsurance" section below
       // (17 Nov 2026): it is the carrier's OWN processing for its reinsurers,
       // not the brokers' files this section watches.
@@ -157,15 +163,15 @@ const GROUPS: {
     ],
   },
   {
-    // MOPR 42: the Monthly Report — ONE item, three tabs inside: the Overview
+    // MOPR 42: the Periodic Report — ONE item, three tabs inside: the Overview
     // pack, Data Quality (MOPR 40) and Exception Resolution (MOPR 41). They
     // are views of the same month, so one entry rather than three. It has its
-    // own heading, as agreed in the Monthly Report proposal: reading a month
+    // own heading, as agreed in the Periodic Report proposal: reading a month
     // back is a different job from the day's work under Operations.
     title: "Reports",
     requires: "carrier_admin",
     items: [
-      { to: "/monthly-report", label: "Monthly Report", icon: BarChart3 },
+      { to: "/monthly-report", label: "Periodic Report", icon: BarChart3 },
       // 38.2: the whole book for leadership, downloadable and sent by email.
       { to: "/executive-report", label: "Executive Report", icon: Presentation },
       // 36: each broker's clean files on time, best and worst.
@@ -310,11 +316,13 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // Files has no sidebar entry — it is opened from the Dashboard — so /files
   // (and /intake, which redirects there) keeps Dashboard lit.
   if (under("/intake") || under("/files")) return "/home";
-  // Policies has no sidebar entry either — both seats open it from their
-  // Dashboard, so that stays lit.
-  if (under("/policies") || under("/financial-summary")) return isBrokerSeat() ? "/broker" : "/home";
+  // Financial Summary has no sidebar entry either — both seats open it from
+  // their Dashboard, so that stays lit. Policies does for the carrier (under
+  // Operations), which lights itself; the broker has none, so its Dashboard.
+  if (under("/financial-summary")) return isBrokerSeat() ? "/broker" : "/home";
+  if (under("/policies") && isBrokerSeat()) return "/broker";
 
-  // The Monthly Report's Data Quality and Exception Resolution tabs.
+  // The Periodic Report's Data Quality and Exception Resolution tabs.
   if (under("/monthly-report")) return "/monthly-report";
 
   if (under("/parties")) return "/parties";

@@ -595,10 +595,14 @@ def clean_emails(raw) -> list[str]:
     return out
 
 
-def recipients(s, tenant_id: int, user_ids: Optional[list], emails: Optional[list]) -> list[dict]:
+def recipients(s, tenant_id: Optional[int], user_ids: Optional[list], emails: Optional[list],
+               logins: Optional[list[dict]] = None) -> list[dict]:
     """The people a report goes to: the ticked logins (None = every login) and
-    the other addresses, each address once."""
-    logins = rd.people(s, tenant_id)
+    the other addresses, each address once. `logins` is whose logins may be
+    ticked — the carrier's (report_delivery.people) unless the caller says
+    otherwise; the Policies list (policy_export) passes a broker's own."""
+    if logins is None:
+        logins = rd.people(s, tenant_id)
     if user_ids is not None:
         want = {int(i) for i in user_ids}
         logins = [p for p in logins if p["user_id"] in want]

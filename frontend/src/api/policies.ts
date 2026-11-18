@@ -1,4 +1,5 @@
-import { api } from "./client";
+import { api, downloadFile } from "./client";
+import type { SendLogin, SendOutcome } from "../components/SendByEmail";
 
 // Policy Search (Phase 2, 43.1) — the policies inside the processed
 // bordereaux (backend policy_search.py). Carrier and broker seats only.
@@ -56,7 +57,7 @@ export interface PolicyDrillParams {
   metric?: string;
   currency?: string;
   open_problems?: "include" | "exclude";
-  // Monthly Report
+  // Periodic Report
   month?: string;
   measure?: string;
 }
@@ -111,8 +112,35 @@ function clean(p: object): Record<string, string | number> {
   return Object.fromEntries(Object.entries(p).filter(([, v]) => v !== null && v !== undefined && v !== ""));
 }
 
-export async function searchPolicies({ drill, ...p }: PolicySearchParams): Promise<PolicySearchResult> {
-  return (await api.get<PolicySearchResult>("/policies", { params: clean({ ...p, ...(drill ?? {}) }) })).data;
+/** The list's filters and the number clicked, as the server reads them —
+ *  one set for the page, the Excel file and the email (policy_routes._filters). */
+function listParams({ drill, ...p }: PolicySearchParams): Record<string, string | number> {
+  return clean({ ...p, ...(drill ?? {}) });
+}
+
+export async function searchPolicies(p: PolicySearchParams): Promise<PolicySearchResult> {
+  return (await api.get<PolicySearchResult>("/policies", { params: listParams(p) })).data;
+}
+
+// ── 43.2: the list taken out — every page of it, with the filters on screen ──
+
+/** Every policy the filters select, as an Excel file. Recorded in the Audit Logs (43.3). */
+export async function downloadPolicies(p: PolicySearchParams): Promise<void> {
+  const q = new URLSearchParams(Object.entries(listParams(p)).map(([k, v]) => [k, String(v)]));
+  await downloadFile(`/policies/file?${q.toString()}`, "Policies.xlsx");
+}
+
+/** Your own company's logins the list can be emailed to. */
+export async function getPolicyRecipients(): Promise<{ logins: SendLogin[] }> {
+  return (await api.get<{ logins: SendLogin[] }>("/policies/recipients")).data;
+}
+
+export interface PolicySendResult extends SendOutcome { policies: number }
+
+/** Email every policy the filters select, as an Excel file. Recorded in the Audit Logs (43.3). */
+export async function sendPolicies(p: PolicySearchParams,
+  to: { user_ids: number[]; emails: string[] }): Promise<PolicySendResult> {
+  return (await api.post<PolicySendResult>("/policies/send", to, { params: listParams(p) })).data;
 }
 
 /** One bordereau row of a policy, with every column of it. */

@@ -467,11 +467,14 @@ ACTION_WORDS = {
     # MOPR 41 — the carrier's target for fixing problems (fix_performance.py)
     "fix_target_updated":         "Changed the target time to fix problems",
     # MOPR 42.2 — sending the Monthly Report (report_delivery.py)
-    "monthly_report_settings_updated": "Changed how the monthly report is sent",
-    "monthly_report_sent":        "Sent the monthly report",
+    "monthly_report_settings_updated": "Changed how the periodic report is sent",
+    "monthly_report_sent":        "Sent the periodic report",
     "executive_report_settings_updated": "Changed how the executive report is sent",
     "executive_report_sent":      "Sent the executive report",
     "executive_report_sends_cleared": "Cleared the sent executive reports list",
+    # 43.2 / 43.3 — the policy list taken out of Kavachio (policy_export.py)
+    "policies_exported":          "Downloaded the policy list",
+    "policies_sent":              "Emailed the policy list",
     # The status messages about a file — to the broker, or the carrier when a
     # deadline needs a decision. Which message, and to whom, is the detail.
     "bdx_notice_sent":            "Emailed a file status update",
@@ -1304,7 +1307,8 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "intake_guide_emailed", "intake.arrival.released",
       "intake.arrival.discarded", "intake_arrival_rerun", "itd_config_saved",
       "itd_file_withdrawn", "itd_dropped_decided"), CARRIER_SEATS),
-    ("downloads", "Downloads and views", ("download", "read", "export"), ALL_SEATS),
+    ("downloads", "Downloads and views", ("download", "read", "export",
+                                          "policies_exported", "policies_sent"), ALL_SEATS),
     # The browser silently renewing its token. Kept out of the default feed
     # (see _rows) because it is the machine working, not a person acting — but
     # it is real security evidence, so it stays one click away.
@@ -2593,7 +2597,9 @@ def categories_for_group(group: str) -> tuple[str, ...]:
     if group in ("auth", "sessions"):
         return ("auth",)
     if group == "downloads":
-        return ("access",)
+        # The access log, plus the named rows that record data leaving
+        # Kavachio with what was in it: the policy list downloaded or emailed (43.3).
+        return ("access", "activity")
     # Exceptions live in exception_decision_log now, not activity_events —
     # except the review link's own rows (code asked for, signed in, checked,
     # submitted), which are the broker working through them.

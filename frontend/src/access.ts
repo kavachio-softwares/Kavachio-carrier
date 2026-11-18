@@ -233,7 +233,7 @@ export const ROUTE_ACCESS: {
   { pattern: "/runs", requires: "carrier_admin" },
   { pattern: "/calendar", requires: "carrier_admin" },
   { pattern: "/bordereau-calendar", requires: "carrier_admin" },
-  // MOPR 42 — the Monthly Report and its tabs: Data Quality (MOPR 40, the
+  // MOPR 42 — the Periodic Report and its tabs: Data Quality (MOPR 40, the
   // month's files, checks and volumes) and Exception Resolution (MOPR 41, how
   // fast problems get fixed, and what is still waiting). The two old paths
   // redirect to their tab.

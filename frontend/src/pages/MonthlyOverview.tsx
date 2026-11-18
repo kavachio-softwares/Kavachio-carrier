@@ -1,4 +1,4 @@
-// MOPR 42 — the Monthly Report's Overview tab: the pack (42.1) for one period,
+// MOPR 42 — the Periodic Report's Overview tab: the pack (42.1) for one period,
 // beside the period before and — a month or a week — the same one last year
 // (42.2). Every number is counted the same way as on the detail tabs (backend
 // monthly_report.py); a period before the records began says "Not available"
