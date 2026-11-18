@@ -352,6 +352,7 @@ function subScreenOwner(pathname: string, search: string): string | null {
     // Bordereau, which is a different path from the carrier's.
     if (from === "broker") return "/broker/bordereau";
     if (from === "calendar") return "/bordereau-calendar";
+    if (from === "partner") return "/partner-performance";
     // Files Received has no sidebar entry; the Dashboard is its way in.
     if (from === "files") return "/home";
   }

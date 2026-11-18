@@ -8,8 +8,8 @@
 // that came by its due date AND passed its first check. A file that came on
 // time with no check recorded is left out of that share, never counted as 0.
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { Award, Clock, Download, ShieldCheck } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { Award, Clock, Download, Eye, ShieldCheck } from "lucide-react";
 import {
   downloadPartnerPerformance, getPartnerPerformance,
   type PartnerPerformance as Data, type PerfBroker, type PerfCadence, type PerfRow,
@@ -289,7 +289,13 @@ function Body({ r, programId, fileType, brokerId }: {
               <td>{!x.received ? <span className="sub">—</span>
                 : x.files_with_problems
                   ? <><span style={{ fontWeight: 700, color: RED }}>{x.files_with_problems} file{x.files_with_problems === 1 ? "" : "s"}</span>
-                      <div className="sub">{x.problems_open} open</div></>
+                      <div className="sub" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        {x.problems_open} open
+                        {x.problems_link && <Link to={x.problems_link} className="linkish" style={{ display: "inline-flex" }}
+                          title={x.files_with_problems > 1 ? "See the exceptions on the file with the most still open"
+                            : "See the exceptions on this file"}
+                          aria-label="See the exceptions"><Eye size={15} /></Link>}
+                      </div></>
                   : <span className="sub">None</span>}</td>
               <td>{!x.received ? <span className="sub">—</span>
                 : x.problems_found

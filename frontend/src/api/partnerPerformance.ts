@@ -49,6 +49,9 @@ interface PerfScore extends PerfFigures {
   prev_clean_on_time_pct: number | null;
   /** Files received in the period before (null = none were due then). */
   prev_received: number | null;
+  /** The exception screen of the file with the most problems still open
+   *  (null = none open). */
+  problems_link: string | null;
   /** Clean and on time against the period before, in percentage points;
    *  null when there is nothing to compare, or no file came in either period. */
   change_pts: number | null;
