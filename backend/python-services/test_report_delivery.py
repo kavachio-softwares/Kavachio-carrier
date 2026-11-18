@@ -324,11 +324,14 @@ def test_the_files_carry_the_checks_that_failed_and_the_errors_still_waiting():
 
     wb = load_workbook(io.BytesIO(rd.render_xlsx(pack, "Test Carrier")))
     checks = wb["Checks that failed most"]
-    assert (checks["B2"].value, checks["F2"].value) == ("Premium must be more than 0", 0.5)
+    # Counts only — no share columns, as on screen.
+    assert [c.value for c in checks[1]] == ["#", "Check", "Severity", "Files", "Errors"]
+    assert (checks["B2"].value, checks["E2"].value) == ("Premium must be more than 0", 1)
     waiting = wb["Errors still waiting"]
     assert waiting["A1"].value.startswith("As at 4 Nov 2026: 2 waiting, 1 longer than the 5-day target")
     assert [waiting.cell(row=r, column=1).value for r in range(4, 8)] == [
         "0–2 days", "3–7 days", "8–30 days", "Over 30 days"]
+    assert [c.value for c in waiting[3]][:3] == ["Waiting for", "Errors", "Past the target"]
     assert waiting["A10"].value == "Broker 8"
     listed = wb["Waiting list"]
     # The longest waiting first, one row per file and check.

@@ -555,26 +555,24 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
     top = pack.get("top_checks")
     if top is not None:
         story.append(para("Checks that failed most", h2))
-        rows = [["#", "Check", "Severity", "Files", "Errors", "Share of all errors"]]
+        rows = [["#", "Check", "Severity", "Files", "Errors"]]
         for i, ch in enumerate(top["checks"][:5], 1):
             rows.append([str(i), para(ch["check"] or "—", cell),
                          SEV_WORDS.get(ch["severity"] or "", "—"), _num(ch["files"]),
-                         _num(ch["errors"]), _pct(100.0 * ch["errors"] / top["errors"])
-                         if top["errors"] else "—"])
+                         _num(ch["errors"])])
         if len(rows) == 1:
-            rows.append(["", f"No check failed this {what}.", "", "", "", ""])
-        story.append(table(rows, [doc.width * w for w in (.05, .47, .12, .1, .1, .16)], left=2))
+            rows.append(["", f"No check failed this {what}.", "", "", ""])
+        story.append(table(rows, [doc.width * w for w in (.05, .55, .14, .13, .13)], left=2))
 
     # 41.3 — every error still open, how old, and who has to act (the
     # Exception Resolution tab's numbers, as at the day the file was made).
     w = pack.get("waiting")
     if w is not None:
-        rows = [["Waiting for", "Errors", "Share"]]
+        rows = [["Waiting for", "Errors"]]
         tones = []
         for b in w["by_age"]:
             late = b["past_target"] and b["problems"] > 0
-            rows.append([b["label"] + (" · past target" if late else ""), _num(b["problems"]),
-                         _pct(100.0 * b["problems"] / w["problems"]) if w["problems"] else "—"])
+            rows.append([b["label"] + (" · past target" if late else ""), _num(b["problems"])])
             if late:
                 tones.append((len(rows) - 1, 0, "crit"))
         # The heading, the counts and the age table stay on one page.
@@ -583,7 +581,7 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
             para(f"{_num(w['problems'])} waiting · {_num(w['past_target'])} longer than the "
                  f"{w['target_days']}-day target · longest waiting {_age(w['oldest_days'])}.", sub),
             Spacer(1, 4),
-            table(rows, [doc.width * x for x in (.24, .1, .1)], tones=tones),
+            table(rows, [doc.width * x for x in (.24, .1)], tones=tones),
         ]))
         story.append(Spacer(1, 8))
         shown = w["by_owner"][:10]
@@ -726,7 +724,7 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
     top = pack.get("top_checks")
     if top is not None:
         sh = wb.create_sheet("Checks that failed most")
-        heads = ["#", "Check", "Severity", "Files", "Errors", "Share of all errors"]
+        heads = ["#", "Check", "Severity", "Files", "Errors"]
         for c, h in enumerate(heads, 1):
             put(sh, 1, c, h, font=bold, fill=grey)
         for i, ch in enumerate(top["checks"], 2):
@@ -735,10 +733,9 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
             put(sh, i, 3, SEV_WORDS.get(ch["severity"] or "", None))
             put(sh, i, 4, ch["files"], "#,##0")
             put(sh, i, 5, ch["errors"], "#,##0")
-            put(sh, i, 6, ch["errors"] / top["errors"] if top["errors"] else None, "0%")
         if not top["checks"]:
             put(sh, 2, 2, f"No check failed this {WHAT_WORDS[cadence_of(pack)]}.")
-        for col, w in zip("ABCDEF", (6, 60, 12, 10, 10, 20)):
+        for col, w in zip("ABCDE", (6, 60, 12, 10, 10)):
             sh.column_dimensions[col].width = w
         tables.append((sh, 1, sh.max_row, len(heads)))
 
@@ -751,14 +748,13 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
                       f"{_num(wt['past_target'])} longer than the {wt['target_days']}-day target, "
                       f"longest waiting {_age(wt['oldest_days'])}.", 5, font=bold, height=20)
         tables.append((sh, 1, 1, 5))
-        heads = ["Waiting for", "Errors", "Share", "Past the target"]
+        heads = ["Waiting for", "Errors", "Past the target"]
         for c, h in enumerate(heads, 1):
             put(sh, 3, c, h, font=bold, fill=grey)
         for i, b in enumerate(wt["by_age"], 4):
             put(sh, i, 1, b["label"])
             put(sh, i, 2, b["problems"], "#,##0")
-            put(sh, i, 3, b["problems"] / wt["problems"] if wt["problems"] else None, "0%")
-            put(sh, i, 4, "Yes" if b["past_target"] else "No",
+            put(sh, i, 3, "Yes" if b["past_target"] else "No",
                 font=tone_font["crit"] if b["past_target"] and b["problems"] else None)
         tables.append((sh, 3, 3 + len(wt["by_age"]), len(heads)))
         first = 5 + len(wt["by_age"])

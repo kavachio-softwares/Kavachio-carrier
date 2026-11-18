@@ -20,7 +20,7 @@ import { getDataQuality, type DataQualityReport, type TxnGroup } from "../api/re
 import { Delta } from "../components/Delta";
 import { InfoTip } from "../components/InfoTip";
 import {
-  fmtMonthName, inPeriod, num, pct, PERIOD_WORD, periodTitle, plural, share, type ReportCadence, upFirst,
+  fmtMonthName, inPeriod, num, pct, PERIOD_WORD, periodTitle, plural, type ReportCadence, upFirst,
   VS_WORDS,
 } from "../utils/reportFormat";
 import type { TabProps } from "./MonthlyReport";
@@ -100,10 +100,9 @@ export default function DataQuality({ filters, onLists }: TabProps) {
   // "September", or "last week", "the same day last week", "the period before".
   const before = cadence === "month" && pv ? fmtMonthName(pv.period) : VS_WORDS[cadence];
   const types = v?.transaction_types ?? [];
-  // Shares of the transaction types: of the policies when files carry a
-  // policy column, of the rows otherwise.
+  // The transaction types counted in policies when files carry a policy
+  // column, in rows otherwise.
   const byPolicies = !!v?.policies_known;
-  const typeTotal = types.reduce((n, g) => n + (byPolicies ? g.policies : g.rows), 0);
   const unclassified = types.find(g => g.key === "unclassified");
   const checksRun = q?.checks_run ?? 0;
   const filtered = programId != null || brokerId != null;
@@ -228,7 +227,6 @@ export default function DataQuality({ filters, onLists }: TabProps) {
                 <tr>
                   <th className="l">Type</th>
                   <th className="r">{byPolicies ? "Policies" : "Rows"}</th>
-                  <th className="r">Share</th>
                 </tr>
               </thead>
               <tbody>
@@ -251,11 +249,10 @@ export default function DataQuality({ filters, onLists }: TabProps) {
                       )}
                     </td>
                     <td className="r" style={{ fontWeight: 600 }}>{num(byPolicies ? g.policies : g.rows)}</td>
-                    <td className="r muted">{share(byPolicies ? g.policies : g.rows, typeTotal)}</td>
                   </tr>
                 ))}
                 {types.length === 0 && (
-                  <tr><td colSpan={3} className="muted" style={{ textAlign: "center" }}>—</td></tr>
+                  <tr><td colSpan={2} className="muted" style={{ textAlign: "center" }}>—</td></tr>
                 )}
               </tbody>
             </table>
@@ -293,9 +290,6 @@ export default function DataQuality({ filters, onLists }: TabProps) {
                     {r.label}{r.tip && <InfoTip text={r.tip} />}
                   </span>
                   <span style={{ marginLeft: "auto", fontSize: 14, fontWeight: 600, color: r.ink }}>{num(r.n)}</span>
-                  <span className="muted" style={{ width: 48, textAlign: "right", fontSize: 13 }}>
-                    {share(r.n, checksRun)}
-                  </span>
                 </div>
               ))}
             </div>
@@ -318,12 +312,11 @@ export default function DataQuality({ filters, onLists }: TabProps) {
                 <th className="r" style={{ width: 40 }}>#</th>
                 <th className="l">Check</th><th className="r">Severity</th>
                 <th className="r">Files</th><th className="r">Errors</th>
-                <th className="r">Share of all errors</th>
               </tr>
             </thead>
             <tbody>
               {(q?.top_failing_checks ?? []).length === 0 && (
-                <tr><td colSpan={6} className="muted" style={{ textAlign: "center" }}>No check failed this {PERIOD_WORD[cadence]}.</td></tr>
+                <tr><td colSpan={5} className="muted" style={{ textAlign: "center" }}>No check failed this {PERIOD_WORD[cadence]}.</td></tr>
               )}
               {(q?.top_failing_checks ?? []).map((c, i) => {
                 const sev = c.severity ? SEVERITY[c.severity] : null;
@@ -337,7 +330,6 @@ export default function DataQuality({ filters, onLists }: TabProps) {
                     </td>
                     <td className="r">{num(c.files)}</td>
                     <td className="r" style={{ fontWeight: 600 }}>{num(c.errors)}</td>
-                    <td className="r muted">{share(c.errors, q?.errors ?? 0)}</td>
                   </tr>
                 );
               })}

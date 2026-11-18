@@ -22,7 +22,7 @@ import { InfoTip } from "../components/InfoTip";
 import { Pagination } from "../components/Pagination";
 import {
   fmtAge, fmtMonthName, fmtTook, inPeriod, num, pct, PERIOD_WORD, periodTitle, plural,
-  type ReportCadence, share, upFirst,
+  type ReportCadence, upFirst,
 } from "../utils/reportFormat";
 import type { TabProps } from "./MonthlyReport";
 
@@ -292,7 +292,7 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         </div>
         <div className="tbl-wrap">
           <table>
-            <thead><tr><th className="l">Waiting for</th><th className="r">Problems</th><th className="r">Share</th></tr></thead>
+            <thead><tr><th className="l">Waiting for</th><th className="r">Problems</th></tr></thead>
             <tbody>
               {(o?.by_age ?? []).map(b => (
                 <tr key={b.key}>
@@ -303,7 +303,6 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
                     )}
                   </td>
                   <td className="r">{num(b.problems)}</td>
-                  <td className="r muted">{share(b.problems, o?.problems ?? 0)}</td>
                 </tr>
               ))}
             </tbody>

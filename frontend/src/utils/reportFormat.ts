@@ -34,8 +34,6 @@ export function shiftMonth(key: string, n: number): string {
 export const num = (n: number | null | undefined) => (n == null ? "—" : n.toLocaleString("en-GB"));
 export const pct = (n: number | null | undefined) => (n == null ? "—" : `${Math.round(n)}%`);
 export const plural = (n: number, w: string, ws = `${w}s`) => `${num(n)} ${n === 1 ? w : ws}`;
-/** Whole-number share, "—" when there is nothing to share out. */
-export const share = (n: number, of: number) => (of > 0 ? `${Math.round((100 * n) / of)}%` : "—");
 
 /** A fix time: hours under a day, else days to one decimal. */
 export function fmtTook(d: number | null | undefined): string {
