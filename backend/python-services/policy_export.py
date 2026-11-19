@@ -202,7 +202,7 @@ def workbook(result: dict, f: dict, *, org: str, by: Optional[str], at: dt.datet
     info.column_dimensions["B"].width = 70
     # 45.2 — what every column means, in plain English.
     import export_glossary as gl
-    gl.xlsx_sheet(wb, "policies")
+    gl.xlsx_sheet(wb, skip=[info.title])
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()

@@ -660,7 +660,7 @@ def workbook(data: dict) -> bytes:
     ws.auto_filter.ref = ws.dimensions
     # 45.2 — what every column means, in plain English.
     import export_glossary as gl
-    gl.xlsx_sheet(wb, "partner")
+    gl.xlsx_sheet(wb)
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()

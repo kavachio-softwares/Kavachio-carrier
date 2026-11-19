@@ -205,7 +205,7 @@ def render_pdf(pack: dict, carrier: str) -> bytes:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
-    from reportlab.platypus import CondPageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import CondPageBreak, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
     from xml.sax.saxutils import escape
 
     title = f"Executive Report — {period_title(pack['cadence'], pack['period'])}"
@@ -274,12 +274,15 @@ def render_pdf(pack: dict, carrier: str) -> bytes:
         fixed = _set_widths(heading)
         story.append(table(rows, [doc.width * w for w in fixed[0]] if fixed else None))
 
-    # 45.2 — what every word on these pages means, in plain English.
+    # 45.2 — the Column Guide, read from the tables above: only the columns
+    # this PDF really has, each in plain English.
     import export_glossary as gl
-    story.append(CondPageBreak(60 * mm))
+    gl_rows = gl.pdf_rows(story)
+    story.append(PageBreak())          # the guide always starts on a fresh page
     story.append(para(gl.TITLE, h2))
-    story.append(table(gl.pdf_rows("executive"),
-                       [doc.width * .3, doc.width * .7]))
+    story.append(para(gl.INTRO, sub))
+    story.append(Spacer(1, 4))
+    story.append(table(gl_rows, [doc.width * w for w in (.24, .52, .24)]))
 
     def _footer(canvas, d):
         canvas.saveState()
@@ -525,7 +528,7 @@ def render_xlsx(pack: dict, carrier: str) -> bytes:
         sh.freeze_panes = "A2"
     # 45.2 — what every word in this file means, in plain English.
     import export_glossary as gl
-    gl.xlsx_sheet(wb, "executive")
+    gl.xlsx_sheet(wb)
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()

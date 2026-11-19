@@ -442,7 +442,7 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
-    from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
     from xml.sax.saxutils import escape
 
     def para(text, style):
@@ -605,13 +605,14 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
             story.append(para(f"…and {len(w['by_owner']) - len(shown)} more — every one is in "
                               "the Excel file.", small))
 
-    # 45.2 — what every word on these pages means, in plain English.
+    # 45.2 — the Column Guide, read from the tables above: only the columns
+    # this PDF really has, each in plain English.
     import export_glossary as gl
-    gl_rows = gl.pdf_rows("periodic", target=_days_word(pack))
-    story.append(KeepTogether([para(gl.TITLE, h2), Spacer(1, 2)]))
-    story.append(table([[para(c, head_l if (i == 0 or not r[1]) else cell) for c in r] for i, r in enumerate(gl_rows)],
-                       [doc.width * .28, doc.width * .72],
-                       group_rows=[i for i, r in enumerate(gl_rows) if i and not r[1]], left=2))
+    gl_rows = gl.pdf_rows(story, target=_days_word(pack))
+    story.append(PageBreak())          # the guide always starts on a fresh page
+    story.append(KeepTogether([para(gl.TITLE, h2), para(gl.INTRO, small), Spacer(1, 4)]))
+    story.append(table([[para(c, head_l if i == 0 else cell) for c in r] for i, r in enumerate(gl_rows)],
+                       [doc.width * w for w in (.22, .56, .22)], left=3))
 
     def _footer(canvas, d):
         canvas.saveState()
@@ -803,9 +804,9 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
             sh.column_dimensions[col].width = w
         tables.append((sh, 1, sh.max_row, len(heads)))
 
-    # 45.2 — what every word in this file means, in plain English.
+    # 45.2 — the Column Guide, read from the sheets above.
     import export_glossary as gl
-    gl.xlsx_sheet(wb, "periodic", target=_days_word(pack))
+    gl.xlsx_sheet(wb, target=_days_word(pack))
 
     # Every cell of each table — the Key numbers title lines too — in a bold
     # (medium) mid-grey box: clearly a border, but not black. Notes under a
