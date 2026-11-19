@@ -195,7 +195,8 @@ def access(s, principal, f: af.Filters, kind: str, page: int, page_size: int) ->
     from db import AccessLog
     sc = af.scope_for(s, v)
     base = af.Filters(since=f.since, until=f.until, actor_user_ids=f.actor_user_ids,
-                      actor_broker_ids=f.actor_broker_ids, actor_system=f.actor_system, q=f.q)
+                      actor_broker_ids=f.actor_broker_ids, actor_system=f.actor_system, q=f.q,
+                      record=f.record)
     q = af._base_query(s, AccessLog, sc, base, af._search_targets(s, f.q) if f.q else ([], []))
     if q is None:
         out["counts"] = {"viewed": 0, "downloaded": 0, "people": 0}
@@ -301,11 +302,18 @@ def submission_timeline(s, principal, expected_id: int, today: Optional[dt.date]
                     ActivityEvent.target == f"program:{e.program_id}",
                     ActivityEvent.action.in_(list(REMINDER_WORDS) + ["submission_chased"]))
             .order_by(ActivityEvent.created_at.asc()).all())
+    case_steps = sc_.history(s, e.id, label=lambda uid: people.name(uid))
+    # Since 49.2 a chase is also written into the case itself; read it from
+    # there, and from the general log only for chases made before that.
+    case_chases = [_when(_parse(h.get("at"))) for h in case_steps if h.get("kind") == "chased"]
     for a in acts:
         d = a.details if isinstance(a.details, dict) else {}
         if d.get("period") != e.period:
             continue
         if d.get("broker_party_id") not in (None, e.broker_party_id):
+            continue
+        if a.action == "submission_chased" and any(
+                abs((_when(a.created_at) - c).total_seconds()) < 60 for c in case_chases):
             continue
         if a.action == "submission_chased":
             steps.append({"at": _iso(a.created_at), "_k": _when(a.created_at), "kind": "chase",
@@ -315,7 +323,13 @@ def submission_timeline(s, principal, expected_id: int, today: Optional[dt.date]
         else:
             steps.append({"at": _iso(a.created_at), "_k": _when(a.created_at), "kind": "reminder",
                           "title": REMINDER_WORDS[a.action], "detail": None, "by": "Kavachio · Automatic"})
-    for h in sc_.history(s, e.id, label=lambda uid: people.name(uid)):
+    for h in case_steps:
+        if h.get("kind") == "chased":
+            steps.append({"at": h.get("at"), "_k": _when(_parse(h.get("at"))), "kind": "chase",
+                          "title": h.get("kind_label"),
+                          "detail": f"Message: “{h['note']}”" if h.get("note") else None,
+                          "by": "Kavachio · Automatic" if h.get("by") == "Automatic" else h.get("by")})
+            continue
         steps.append({"at": h.get("at"), "_k": _when(_parse(h.get("at"))), "kind": "case",
                       "title": h.get("kind_label") or h.get("kind"),
                       "detail": " · ".join(x for x in (h.get("reason_label"), h.get("note")) if x) or None,
@@ -439,6 +453,10 @@ def _steps_of(s, contracts: list, people: People) -> dict[int, list[dict]]:
         if m and int(m.group(1)) in by:
             by[int(m.group(1))].append({"_k": _when(ev.created_at), "action": ev.action,
                                         "user": ev.actor_user_id, "note": None})
+    # Task 49.3: each "Draft changed" opens the before / after recorded for
+    # that save (change_history.py) — from the day that recording began.
+    import change_history as chist
+    edits = chist.edits_near(s, ids)
     out: dict[int, list[dict]] = {}
     for cid, steps in by.items():
         steps.sort(key=lambda x: x["_k"])
@@ -453,7 +471,9 @@ def _steps_of(s, contracts: list, people: People) -> dict[int, list[dict]]:
                          "action": st["action"], "title": words, "kind": kind,
                          "before": before if after else None, "after": after,
                          "note": st["note"], "by": people.name(st["user"], "—") if st["user"] else
-                         ("—" if st["action"] == "raised" else "Kavachio · Automatic")})
+                         ("—" if st["action"] == "raised" else "Kavachio · Automatic"),
+                         "change_id": chist.match_edit(edits.get(cid), st["_k"], st["user"])
+                         if st["action"] == "contract_edited" else None})
         out[cid] = rows
     return out
 

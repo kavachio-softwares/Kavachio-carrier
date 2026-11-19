@@ -25,7 +25,8 @@ export interface TrailSummary { activities: number; people: number; viewed: numb
 export const getTrailSummary = (q: AuditQuery) =>
   api.get<TrailSummary>("/audit/history/summary", {
     params: clean({ from: dayStart(q.from), to: dayEnd(q.to), actor: q.actor,
-                    action: q.action && q.action !== "all" ? q.action : undefined, q: q.q }),
+                    action: q.action && q.action !== "all" ? q.action : undefined, q: q.q,
+                    record: q.record }),
   }).then(r => r.data);
 
 export type AccessPage = AuditPage & { counts: { viewed: number; downloaded: number; people: number } };
@@ -33,7 +34,7 @@ export type AccessPage = AuditPage & { counts: { viewed: number; downloaded: num
 export const getAccess = (q: AuditQuery, kind: string, page: number, pageSize: number) =>
   api.get<AccessPage>("/audit/history/access", {
     params: clean({ from: dayStart(q.from), to: dayEnd(q.to), actor: q.actor, q: q.q, kind, page,
-                    page_size: pageSize }),
+                    page_size: pageSize, record: q.record }),
   }).then(r => r.data);
 
 export interface Choice { id: number; name: string }
@@ -73,6 +74,8 @@ export const getSubmissionTimeline = (id: number) =>
 export interface ContractStep {
   at: string | null; action: string; title: string; kind: string;
   before: string | null; after: string | null; note: string | null; by: string;
+  /** "Draft changed": its recorded before / after on Change History (task 49.3). */
+  change_id?: number | null;
 }
 export interface ContractEvent extends ContractStep {
   contract_id: number; contract: string; programme: string; broker: string;

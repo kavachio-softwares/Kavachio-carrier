@@ -259,7 +259,10 @@ def _mem_session():
                      # The Versions panel reads when each file came in from its
                      # output and landing, and the board a programme's setups.
                      db.OutputExport.__table__, db.LandingRecord.__table__,
-                     db.Pipeline.__table__])
+                     db.Pipeline.__table__,
+                     # A chase is also written into the late file's case
+                     # history (task 49.2).
+                     db.SubmissionCaseEvent.__table__])
     return sessionmaker(bind=eng)()
 
 

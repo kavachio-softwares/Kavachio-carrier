@@ -1258,6 +1258,17 @@ def send_bordereau(session, expected_id: int, broker_party_id: int, *,
            "mail_sent": mail_sent, "mail_error": mail_error}
 
 
+def _chaser(actor: Optional[str]) -> dict:
+    """Who is chasing: the signed-in person of this request (change_history's
+    request context), so the chase names them and not only an email."""
+    import audit
+    import change_history
+    uid = (change_history.current() or {}).get("user_id")
+    _email, role, broker_id = audit.actor_identity(uid)
+    return {"actor": actor or _email or "system", "user_id": uid, "role": role,
+            "broker_party_id": broker_id}
+
+
 def record_chase(session, expected_ids: list[int], *, actor: Optional[str] = None,
                  note: Optional[str] = None,
                  today: Optional[date] = None) -> dict:
@@ -1308,9 +1319,19 @@ def record_chase(session, expected_ids: list[int], *, actor: Optional[str] = Non
         # which is the half that matters if it is ever disputed.
         if note:
             details["note"] = note
+        who = _chaser(actor)
         session.add(ActivityEvent(
             tenant_id=e.tenant_id, actor=actor or "system", action="submission_chased",
-            target=f"program:{e.program_id}", details=details))
+            target=f"program:{e.program_id}", details=details,
+            actor_user_id=who["user_id"], actor_role=who["role"],
+            actor_broker_party_id=who["broker_party_id"]))
+        # Task 49.2: the chase is part of the late file's own record too, so
+        # its case history (Partner Submission History, the calendar's case)
+        # shows it without reading the general log. Not a move: no state.
+        import submission_case
+        submission_case._record(session, e, "chased", from_state=None, to_state=None, on=today,
+                                who=who, note=note,
+                                details={"chase_count": e.chase_count, "days_over": days_over})
         chased.append({"expected_id": e.id, "period": e.period,
                        "program_id": e.program_id,
                        "broker_party_id": e.broker_party_id,

@@ -21,9 +21,10 @@ def trail_summary(days: Optional[int] = None,
                   since: Optional[str] = Query(default=None, alias="from"),
                   until: Optional[str] = Query(default=None, alias="to"),
                   actor: Optional[str] = None, action: Optional[str] = None, q: Optional[str] = None,
+                  record: Optional[str] = None,
                   principal: Principal = Depends(current_principal)):
     with SessionLocal() as s:
-        return ah.summary(s, principal, _filters(days, since, until, actor, action, q))
+        return ah.summary(s, principal, _filters(days, since, until, actor, action, q, record))
 
 
 @router.get("/access")
@@ -32,9 +33,11 @@ def downloads_and_views(kind: str = "", page: int = 1, page_size: int = 50,
                         since: Optional[str] = Query(default=None, alias="from"),
                         until: Optional[str] = Query(default=None, alias="to"),
                         actor: Optional[str] = None, q: Optional[str] = None,
+                        record: Optional[str] = None,
                         principal: Principal = Depends(current_principal)):
     with SessionLocal() as s:
-        return ah.access(s, principal, _filters(days, since, until, actor, "all", q), kind, page, page_size)
+        return ah.access(s, principal, _filters(days, since, until, actor, "all", q, record),
+                         kind, page, page_size)
 
 
 @router.get("/submissions")

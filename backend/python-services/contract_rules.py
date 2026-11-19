@@ -453,7 +453,14 @@ def write_rules(conn, *, contract_id: int, program_id: int | None,
     # comparison against a bordereau column is a custom check run on the way
     # IN — which is also where every rule already in this table sits.
     tag = (set_scope or {}).get("tag")
+    # Task 48.2: the rules about to be replaced, read with the same WHERE the
+    # delete below uses, so the ones that really changed are kept on record
+    # (rule_history.record_replace at the end). A no-op outside a signed-in request.
+    import rule_history
     if set_scope is None:
+        h_where = "contract_id = :cid AND COALESCE(rule_spec->>'source', '') <> 'reinsurance'"
+        h_params = {"cid": contract_id}
+        h_before = rule_history.snapshot_contract(conn, h_where, h_params)
         conn.execute(text("DELETE FROM rule_sql WHERE contract_id = :cid"),
                      {"cid": contract_id})
         # Not a treaty's reinsurance rules (ceded_canonical): they follow the
@@ -468,6 +475,8 @@ def write_rules(conn, *, contract_id: int, program_id: int | None,
                  "(output_template_id IS NULL OR output_template_id = ANY(:fam))")
         params = {"cid": contract_id,
                   "fam": [int(t) for t in set_scope.get("family") or []]}
+        h_where, h_params = f"contract_id = :cid AND {which}", params
+        h_before = rule_history.snapshot_contract(conn, h_where, h_params)
         # rule_sql first, while the rules it caches can still be found. Its
         # rows live in the legacy rule_id column (see db_persister's writer).
         conn.execute(text(
@@ -538,4 +547,5 @@ def write_rules(conn, *, contract_id: int, program_id: int | None,
                 # uncertain about — unlike a rule read out of a PDF.
                 "confidence": 1.0,
             })
+    rule_history.record_replace(conn, h_before, h_where, h_params)
     return len(rules)

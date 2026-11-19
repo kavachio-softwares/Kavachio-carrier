@@ -59,6 +59,8 @@ export type AuditQuery = {
   /** An Action Type group key, or one event name. "" / "all" for everything. */
   action?: string;
   q?: string;
+  /** One record only (task 49.1): "contract:12" | "policy:P-1" | "file:march". */
+  record?: string;
 };
 
 /** Start of a local calendar day as an instant the server can compare.
@@ -89,6 +91,7 @@ function params(q: AuditQuery): Record<string, string> {
   if (q.actor) out.actor = q.actor;
   if (q.action && q.action !== "all") out.action = q.action;
   if (q.q?.trim()) out.q = q.q.trim();
+  if (q.record) out.record = q.record;
   return out;
 }
 

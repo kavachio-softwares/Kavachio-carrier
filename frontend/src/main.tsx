@@ -5,6 +5,9 @@ import { Provider } from "react-redux";
 import { PersistGate } from "redux-persist/integration/react";
 import { store, persistor } from "./store";
 import App from "./App";
+// The optional "why are you making this change?" popup on important saves
+// (task 48.1). Importing it installs it on the shared api client.
+import "./components/ChangeReasonPrompt";
 import "./index.css";
 import "./proto.css";
 

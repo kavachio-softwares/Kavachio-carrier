@@ -617,6 +617,8 @@ _ACCESS_PATHS = [
     re.compile(r"^/admin/contract-period-evidence/\d+/file$"),
     # Taking the audit trail out of the building is itself worth a line in it.
     re.compile(r"^/audit/export$"),
+    # …and so is taking the change or rule history (tasks 48.1, 48.2).
+    re.compile(r"^/audit/(changes|rules)/download$"),
     # Who opened or downloaded which data (task 49.1): a policy, a contract's
     # documents and PDF, and the report files.
     re.compile(r"^/policies/detail$"),

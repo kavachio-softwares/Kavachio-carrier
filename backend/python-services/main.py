@@ -56,6 +56,9 @@ from segment_routes import router as segment_router
 from esign_routes import router as esign_router, public_router as esign_public_router
 from audit_routes import router as audit_router
 from audit_history_routes import router as audit_history_router
+# Change History, Rule History, reinsurer link views (tasks 48.1, 48.2, 49.1).
+from audit_change_routes import router as audit_change_router
+import change_history as _change_history
 # Reinsurance treaties (Phase 26): a treaty's structure and the programmes it
 # protects (carrier side), and the reinsurer's private read-only link, unlocked
 # by an emailed one-time code (/treaty-view/…, no login).
@@ -171,6 +174,7 @@ app.include_router(ceded_router)
 # fall out of step with it.
 app.include_router(audit_router)
 app.include_router(audit_history_router)
+app.include_router(audit_change_router)
 # The secure correction link — no login, the emailed token is the credential.
 app.include_router(fix_link_router)
 app.include_router(submission_router)
@@ -366,6 +370,14 @@ async def _db_audit_middleware(request, call_next):
     except Exception:  # noqa: BLE001 — auditing must never break the request
         pass
     return response
+
+
+# Task 48.1: the signed-in person and the optional reason (X-Change-Reason)
+# for every writing request, so a save can record who changed what and why
+# (change_history.py). Added last, so it wraps everything above it; the
+# hooks record each field's before / after in the save's own transaction.
+app.add_middleware(_change_history.ChangeContext)
+_change_history.install()
 
 
 def _content_disposition(filename: Optional[str], default: str = "download.xlsx") -> str:

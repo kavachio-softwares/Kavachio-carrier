@@ -85,6 +85,10 @@ EVENT_WORDS = {
     "file_received": "File received — case closed",
     "cleared": "No longer late — the due date moved",
     "carrier_reminded": "Carrier reminded to decide",
+    # Task 49.2: a person chasing the broker (submission_calendar_service.
+    # record_chase). Written with no from/to state — it is not a move, and the
+    # Executive Report reads a case's state from the moves alone.
+    "chased": "Broker chased for the file",
 }
 DECISIONS = ("accept", "reject", "waive", "extend", "reopen")
 # A closed case the carrier can take back: one IT closed. A case closed by the

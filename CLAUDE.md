@@ -89,6 +89,7 @@ Docker: `backend/python-services/Dockerfile` (python 3.12, Tesseract OCR, `uvico
 - Paging is opt-in (`page` / `page_size`); without `page` a response stays the same. Per-row filters run before the page is cut.
 - UI wording: plain, short, no jargon. Explanations go behind the ⓘ icon (`InfoTip`, `StatCard info`), not grey lines under labels. Use the app's own popups.
 - New audit action names go in `audit._FRIENDLY`.
+- Change and rule history record themselves (`change_history.py`, `rule_history.py`): any ORM save of a tracked model, and `UPDATE validation_rule … WHERE rule_id = :x`. A raw-SQL write to a tracked table in any other form is not recorded — use the ORM or that form.
 
 ## How to work here
 

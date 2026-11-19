@@ -35,6 +35,7 @@ DEFAULT_PAGE_SIZE = 200         # the screen reads 200 at a time, in a scrolling
 
 def _filters(days: Optional[int], since: Optional[str], until: Optional[str],
              actor: Optional[str], action: Optional[str], q: Optional[str],
+             record: Optional[str] = None,
              ) -> audit_feed.Filters:
     """Turn the query string into the one filter object every read uses."""
     lo, hi = audit_feed.window(days, since, until)
@@ -46,6 +47,7 @@ def _filters(days: Optional[int], since: Optional[str], until: Optional[str],
         actions=audit_feed.actions_for_group(group),
         actor_user_ids=uids, actor_broker_ids=bids, actor_system=system,
         q=(q or "").strip(),
+        record=(record or "").strip(),
     )
 
 
@@ -59,6 +61,7 @@ def audit_logs(
     actor: Optional[str] = None,
     action: Optional[str] = None,
     q: Optional[str] = None,
+    record: Optional[str] = None,
     principal: Principal = Depends(current_principal),
 ):
     """One page of this seat's audit trail.
@@ -70,7 +73,7 @@ def audit_logs(
     """
     with SessionLocal() as s:
         v = audit_feed.viewer_for(s, principal)
-        return audit_feed.page(s, v, _filters(days, since, until, actor, action, q),
+        return audit_feed.page(s, v, _filters(days, since, until, actor, action, q, record),
                                page, page_size)
 
 
@@ -85,6 +88,7 @@ def audit_log_group(
     actor: Optional[str] = None,
     action: Optional[str] = None,
     q: Optional[str] = None,
+    record: Optional[str] = None,
     principal: Principal = Depends(current_principal),
 ):
     """Every decision in one bulk save — the rows behind a "Corrected 40
@@ -92,7 +96,7 @@ def audit_log_group(
     opens exactly the decisions that line counted."""
     with SessionLocal() as s:
         v = audit_feed.viewer_for(s, principal)
-        return audit_feed.group_rows(s, v, _filters(days, since, until, actor, action, q),
+        return audit_feed.group_rows(s, v, _filters(days, since, until, actor, action, q, record),
                                      key, offset, limit)
 
 
@@ -157,6 +161,7 @@ def audit_export(
     actor: Optional[str] = None,
     action: Optional[str] = None,
     q: Optional[str] = None,
+    record: Optional[str] = None,
     principal: Principal = Depends(current_principal),
 ):
     """Every row the current filters select, capped at audit_feed.MAX_EXPORT_ROWS.
@@ -168,7 +173,7 @@ def audit_export(
     with SessionLocal() as s:
         v = audit_feed.viewer_for(s, principal)
         rows = audit_feed.export_rows(
-            s, v, _filters(days, since, until, actor, action, q))
+            s, v, _filters(days, since, until, actor, action, q, record))
 
     if (format or "csv").lower() in ("xlsx", "excel"):
         return _xlsx(rows)

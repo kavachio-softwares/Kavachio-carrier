@@ -15,6 +15,11 @@ import { getTrailSummary, type TrailSummary } from "../api/auditHistory";
 import {
   ContractHistory, DownloadsViews, Facts, FileVersions, PartnerSubmissions, SidePanel, Tile, tiles,
 } from "./AuditHistoryTabs";
+// Tasks 48.1, 48.2 and 49.1 — each in its own file.
+import ChangeHistoryTab from "./ChangeHistoryTab";
+import RuleHistoryTab from "./RuleHistoryTab";
+import AuditReinsurerViews from "./AuditReinsurerViews";
+import { AuditRecordFilter } from "../components/AuditRecordFilter";
 
 // 200 a page, read by scrolling the table itself (its header stays put); the
 // page controls under it move between pages of 200.
@@ -70,6 +75,10 @@ function rangeDates(key: string, from: string, to: string): { from?: string; to?
  *  then the histories of files, contracts and versions (audit_history.py). */
 const TABS = [
   { key: "trail", label: "Audit Trails", sub: "Track all changes, approvals and activities across the system." },
+  { key: "rules", label: "Rule History",
+    sub: "Every rule and mapping, version by version: created, changed, switched off — the earlier version kept." },
+  { key: "changes", label: "Change History",
+    sub: "Every change to an important record: the old value, the new value, who changed it, when and why." },
   { key: "access", label: "Downloads & Views", sub: "Who opened or downloaded which data, and when." },
   { key: "submissions", label: "Partner Submission History",
     sub: "Every file a broker owed, across all programmes, and what was done when one was late." },
@@ -92,6 +101,7 @@ export default function AuditLogs() {
   const [from, setFrom] = useState(daysAgo(30));
   const [to, setTo] = useState(localDay(new Date()));
   const [actor, setActor] = useState("");
+  const [record, setRecord] = useState("");
   // A notice can open this page on one Action type ("?action=contracts").
   const [search, setSearch] = useSearchParams();
   const tab: TabKey = (TABS.find(x => x.key === search.get("tab"))?.key ?? "trail") as TabKey;
@@ -115,8 +125,8 @@ export default function AuditLogs() {
   useEffect(() => { getAuditOptions().then(setOpts).catch(() => setOpts(null)); }, []);
 
   const query: AuditQuery = useMemo(
-    () => ({ ...rangeDates(range, from, to), actor, action, q }),
-    [range, from, to, actor, action, q],
+    () => ({ ...rangeDates(range, from, to), actor, action, q, record }),
+    [range, from, to, actor, action, q, record],
   );
 
   useEffect(() => {
@@ -138,7 +148,7 @@ export default function AuditLogs() {
 
   const seat = list.extra?.seat ?? "";
   const showCarrier = seat === "platform";
-  const filtered = Boolean(actor || (action && action !== "all") || q || range !== "30");
+  const filtered = Boolean(actor || (action && action !== "all") || q || record || range !== "30");
 
   const save = async (format: "csv" | "xlsx") => {
     setBusy(format);
@@ -179,6 +189,8 @@ export default function AuditLogs() {
         </div>
 
         {tab === "submissions" ? <PartnerSubmissions />
+          : tab === "changes" ? <ChangeHistoryTab />
+          : tab === "rules" ? <RuleHistoryTab />
           : tab === "contracts" ? <ContractHistory />
           : tab === "versions" ? <FileVersions />
           : (<>
@@ -229,6 +241,8 @@ export default function AuditLogs() {
               </select>
             </label>}
 
+            <AuditRecordFilter value={record} onChange={setRecord} />
+
             {/* Labelled like the three dropdowns, or it sits a caption-height
                 higher than them. */}
             <label className="fbar-field grow">
@@ -244,13 +258,13 @@ export default function AuditLogs() {
             {filtered && (
               <span className="linkish fbar-clear-link" onClick={() => {
                 setRange("30"); setFrom(daysAgo(30)); setTo(localDay(new Date()));
-                setActor(""); setAction("all"); setTyped("");
+                setActor(""); setAction("all"); setTyped(""); setRecord("");
               }}>Clear filters</span>
             )}
           </div>
         </div>
 
-        {tab === "access" ? <DownloadsViews query={query} /> : (<>
+        {tab === "access" ? <><DownloadsViews query={query} /><AuditReinsurerViews query={query} /></> : (<>
         <div style={tiles(5)}>
           <Tile icon={Activity} label="Total activities" value={sum?.activities} colour="#7c3aed"
             info="Everything recorded in these dates that matches the filters." />

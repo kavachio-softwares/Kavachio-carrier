@@ -390,6 +390,17 @@ function ContractPanel({ id, onClose }: { id: number | null; onClose: () => void
           <div style={{ marginBottom: 12 }}><Link className="linkish" to={`/contracts/${t.id}`}>Open the contract →</Link></div>
           <h4 style={{ margin: "4px 0 12px" }}>Timeline</h4>
           <Timeline steps={t.steps.map(s => ({ ...s, detail: s.note ? `“${s.note}”` : null }))} />
+          {/* Task 49.3: each draft change opens its before / after (recorded
+              from 19 Nov 2026) on Change History. */}
+          {t.steps.some(s => s.change_id) && (
+            <>
+              <h4 style={{ margin: "8px 0 8px" }}>What changed in each draft</h4>
+              {t.steps.filter(s => s.change_id).map(s => (
+                <div key={s.change_id} style={{ marginBottom: 4 }}>
+                  <Link className="linkish" to={`/audit?tab=changes&change=${s.change_id}`}>
+                    {s.at ? fmtDateTime(s.at) : "—"} · {s.by} — see before / after →</Link>
+                </div>))}
+            </>)}
         </>)}
     </SidePanel>
   );

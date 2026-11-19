@@ -687,6 +687,8 @@ _ACCESS_WORDS = [
     (re.compile(r"^/admin/contract-period-evidence/\d+/file"),
      "Downloaded the evidence for a large contract date correction"),
     (re.compile(r"^/audit/export"),              "Downloaded the audit log"),
+    (re.compile(r"^/audit/changes/download"),    "Downloaded the change history"),
+    (re.compile(r"^/audit/rules/download"),      "Downloaded the rule history"),
     (re.compile(r"^/policies/detail"),           "Opened a policy"),
     (re.compile(r"^/contracts/\d+/documents/\d+/view"), "Opened a contract document"),
     (re.compile(r"^/contracts/\d+/documents/\d+/download"), "Downloaded a contract document"),
@@ -1175,7 +1177,11 @@ SUPPRESSED_ACTIONS = (
 #   direct_output_checked  written by the review link's Validate in the same
 #   by "Secure link (…)"   millisecond as bdx_fix_link_validated, which has the
 #                          counts that matter (corrected, still failing, open).
-NEVER_SHOWN_ACTIONS = ("bdx_fix_link_answers",)
+NEVER_SHOWN_ACTIONS = ("bdx_fix_link_answers",
+                       # A field-by-field before / after of a save (task 48.1,
+                       # change_history.py). The save's own request already
+                       # has its line here; this is read on Change History.
+                       "record_changed")
 # Kavachio's own bookkeeping after a file arrives. Nobody pressed anything and
 # nothing is decided by it, so a carrier or broker has no use for it: it is one
 # more line to read past, twice per run. Only the Kavachio admin sees it (9 Oct
@@ -1381,6 +1387,9 @@ class Filters:
     # to "view" or "download".
     views: bool = False
     access_kind: str = ""
+    # "contract:12" | "policy:P-1" | "file:march" — one record's rows only
+    # (task 49.1, audit_record_filter). Narrows after the scope, never widens.
+    record: str = ""
 
 
 def _actor_user_col(model):
@@ -1542,6 +1551,9 @@ def _base_query(s, model, sc: Scope, f: Filters, q_ids):
         q = q.filter(actor_clause)
     if f.q:
         q = q.filter(_q_clause(model, f.q, *q_ids))
+    if f.record:
+        import audit_record_filter
+        q = q.filter(audit_record_filter.where(s, model, f))
     return q
 
 
@@ -1615,6 +1627,9 @@ def _decision_query(s, sc: Scope, f: Filters, q_ids):
         if bids:
             ors.append(E.decided_by_broker_party_id.in_(bids))
         q = q.filter(or_(*ors))
+    if f.record:
+        import audit_record_filter
+        q = q.filter(audit_record_filter.decision_where(s, E, f))
     return q
 
 
