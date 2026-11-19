@@ -5288,378 +5288,378 @@ def dashboard_bordereau_status(mga: str, period: Optional[str] = None,
     return {"period": period or "all", "unit": unit, "items": [by[k] for k in keys]}
 
 
-# @router.get("/dashboard/stats")
-# def dashboard_stats(mga: str, principal: Principal = Depends(current_principal)):
-#     """Aggregates for the home dashboard."""
-#     today = datetime.utcnow().date()
-#     week_ago = datetime.utcnow() - timedelta(days=7)
-#     with SessionLocal() as s:
-#         tid = resolve_tenant_id(s, principal, mga)
-#         # `upload` is overloaded (§2a): count only real ingest rows (mapper_id set),
-#         # not the canonical lineage shadow rows — matches the /uploads list.
-#         uploads_today = s.query(Upload).filter(
-#             Upload.tenant_id == tid,
-#             Upload.mapper_id.isnot(None),
-#             func.date(Upload.ingested_at) == today,
-#         ).count()
-#         total_uploads = s.query(Upload).filter(
-#             Upload.tenant_id == tid, Upload.mapper_id.isnot(None)).count()
-#         programs = s.query(Program).filter(Program.tenant_id == tid,
-#                                            Program.is_app_managed.is_(True),
-#                                            Program.status == "active").count()
-#         # "Active setups" = activated output templates (a carrier+program config
-#         # that's been activated to generate BDX), plus the carriers they span.
-#         active_setups = s.query(ExportTemplate).filter(
-#             ExportTemplate.tenant_id == tid, ExportTemplate.is_active == 1).count()
-#         active_setup_carriers = s.query(
-#             func.count(func.distinct(ExportTemplate.carrier_party_id))
-#         ).filter(
-#             ExportTemplate.tenant_id == tid, ExportTemplate.is_active == 1,
-#             ExportTemplate.carrier_party_id.isnot(None),
-#         ).scalar() or 0
-#         parties = s.query(Party).filter(
-#             or_(and_(Party.tenant_id == tid, Party.is_app_managed.is_(True)),
-#                 Party.scope == "global")
-#         ).count()
+@router.get("/dashboard/stats")
+def dashboard_stats(mga: str, principal: Principal = Depends(current_principal)):
+    """Aggregates for the home dashboard."""
+    today = datetime.utcnow().date()
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        # `upload` is overloaded (§2a): count only real ingest rows (mapper_id set),
+        # not the canonical lineage shadow rows — matches the /uploads list.
+        uploads_today = s.query(Upload).filter(
+            Upload.tenant_id == tid,
+            Upload.mapper_id.isnot(None),
+            func.date(Upload.ingested_at) == today,
+        ).count()
+        total_uploads = s.query(Upload).filter(
+            Upload.tenant_id == tid, Upload.mapper_id.isnot(None)).count()
+        programs = s.query(Program).filter(Program.tenant_id == tid,
+                                           Program.is_app_managed.is_(True),
+                                           Program.status == "active").count()
+        # "Active setups" = activated output templates (a carrier+program config
+        # that's been activated to generate BDX), plus the carriers they span.
+        active_setups = s.query(ExportTemplate).filter(
+            ExportTemplate.tenant_id == tid, ExportTemplate.is_active == 1).count()
+        active_setup_carriers = s.query(
+            func.count(func.distinct(ExportTemplate.carrier_party_id))
+        ).filter(
+            ExportTemplate.tenant_id == tid, ExportTemplate.is_active == 1,
+            ExportTemplate.carrier_party_id.isnot(None),
+        ).scalar() or 0
+        parties = s.query(Party).filter(
+            or_(and_(Party.tenant_id == tid, Party.is_app_managed.is_(True)),
+                Party.scope == "global")
+        ).count()
 
-#         # A "run" is a generated output (OutputExport), which carries the
-#         # validation result — matches the dashboard's "Recent runs" table.
-#         # "Runs this week" tile + a 7-day daily series (oldest → newest) for the spark.
-#         week_rows = s.query(
-#             func.date(OutputExport.created_at), OutputExport.status, func.count(OutputExport.id)
-#         ).filter(
-#             OutputExport.tenant_id == tid,
-#             OutputExport.created_at >= week_ago,
-#         ).group_by(func.date(OutputExport.created_at), OutputExport.status).all()
+        # A "run" is a generated output (OutputExport), which carries the
+        # validation result — matches the dashboard's "Recent runs" table.
+        # "Runs this week" tile + a 7-day daily series (oldest → newest) for the spark.
+        week_rows = s.query(
+            func.date(OutputExport.created_at), OutputExport.status, func.count(OutputExport.id)
+        ).filter(
+            OutputExport.tenant_id == tid,
+            OutputExport.created_at >= week_ago,
+        ).group_by(func.date(OutputExport.created_at), OutputExport.status).all()
         
-#         runs_this_week = 0
-#         by_date = {}
-#         for d, status, c in week_rows:
-#             d_str = str(d)
-#             runs_this_week += c
-#             if d_str not in by_date:
-#                 by_date[d_str] = {"clean": 0, "flagged": 0, "resolved": 0}
+        runs_this_week = 0
+        by_date = {}
+        for d, status, c in week_rows:
+            d_str = str(d)
+            runs_this_week += c
+            if d_str not in by_date:
+                by_date[d_str] = {"clean": 0, "flagged": 0, "resolved": 0}
             
-#             if status == "clean":
-#                 by_date[d_str]["clean"] += c
-#             else:
-#                 by_date[d_str]["flagged"] += c
+            if status == "clean":
+                by_date[d_str]["clean"] += c
+            else:
+                by_date[d_str]["flagged"] += c
                 
-#         resolved_rows = s.query(
-#             func.date(ExceptionDecisionLog.decided_at), func.count(ExceptionDecisionLog.id)
-#         ).filter(
-#             ExceptionDecisionLog.tenant_id == tid,
-#             ExceptionDecisionLog.decided_at >= week_ago,
-#             # "reject" settles an exception too, and broker_tally counts a
-#             # rejected one as resolved — the trend has to agree with the tiles.
-#             ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss", "reject"))
-#         ).group_by(func.date(ExceptionDecisionLog.decided_at)).all()
+        resolved_rows = s.query(
+            func.date(ExceptionDecisionLog.decided_at), func.count(ExceptionDecisionLog.id)
+        ).filter(
+            ExceptionDecisionLog.tenant_id == tid,
+            ExceptionDecisionLog.decided_at >= week_ago,
+            # "reject" settles an exception too, and broker_tally counts a
+            # rejected one as resolved — the trend has to agree with the tiles.
+            ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss", "reject"))
+        ).group_by(func.date(ExceptionDecisionLog.decided_at)).all()
         
-#         for d, c in resolved_rows:
-#             d_str = str(d)
-#             if d_str not in by_date:
-#                 by_date[d_str] = {"clean": 0, "flagged": 0, "resolved": 0}
-#             by_date[d_str]["resolved"] += c
+        for d, c in resolved_rows:
+            d_str = str(d)
+            if d_str not in by_date:
+                by_date[d_str] = {"clean": 0, "flagged": 0, "resolved": 0}
+            by_date[d_str]["resolved"] += c
 
-#         runs_by_day_status = []
-#         for i in range(6, -1, -1):
-#             d_str = str(today - timedelta(days=i))
-#             day_data = by_date.get(d_str, {"clean": 0, "flagged": 0, "resolved": 0})
-#             runs_by_day_status.append({**day_data, "date": d_str})
+        runs_by_day_status = []
+        for i in range(6, -1, -1):
+            d_str = str(today - timedelta(days=i))
+            day_data = by_date.get(d_str, {"clean": 0, "flagged": 0, "resolved": 0})
+            runs_by_day_status.append({**day_data, "date": d_str})
 
-#         # "Exceptions to review" tile — real exception totals across generated
-#         # outputs (replaces the previous hardcoded 0). Counts every flagged
-#         # exception; per-exception resolution state is not yet subtracted.
-#         # Current files only (exception_tally.current_export_ids): each
-#         # month's newest version, and not a file under a replaced contract
-#         # once the newer contract has a file for that month — those are kept
-#         # for audit, not counted as work. Summing every run ever made counted
-#         # each re-send's exceptions again.
-#         from exception_tally import current_export_ids
-#         exc_sum, exc_runs, sev_crit, sev_warn, sev_info = s.query(
-#             func.coalesce(func.sum(OutputExport.exception_count), 0),
-#             func.count(OutputExport.id),
-#             func.coalesce(func.sum(OutputExport.critical_count), 0),
-#             func.coalesce(func.sum(OutputExport.warning_count), 0),
-#             func.coalesce(func.sum(OutputExport.info_count), 0),
-#         ).filter(
-#             OutputExport.tenant_id == tid,
-#             OutputExport.status == "has_exceptions",
-#             OutputExport.id.in_(current_export_ids(s, tenant_id=tid) or {-1}),
-#         ).one()
-#         # Runs whose checks never ran (validation_outcome) — no findings to
-#         # review, but they still need someone's attention, so counted apart.
-#         not_validated_runs = s.query(func.count(OutputExport.id)).filter(
-#             OutputExport.tenant_id == tid,
-#             OutputExport.status == "not_validated",
-#         ).scalar() or 0
+        # "Exceptions to review" tile — real exception totals across generated
+        # outputs (replaces the previous hardcoded 0). Counts every flagged
+        # exception; per-exception resolution state is not yet subtracted.
+        # Current files only (exception_tally.current_export_ids): each
+        # month's newest version, and not a file under a replaced contract
+        # once the newer contract has a file for that month — those are kept
+        # for audit, not counted as work. Summing every run ever made counted
+        # each re-send's exceptions again.
+        from exception_tally import current_export_ids
+        exc_sum, exc_runs, sev_crit, sev_warn, sev_info = s.query(
+            func.coalesce(func.sum(OutputExport.exception_count), 0),
+            func.count(OutputExport.id),
+            func.coalesce(func.sum(OutputExport.critical_count), 0),
+            func.coalesce(func.sum(OutputExport.warning_count), 0),
+            func.coalesce(func.sum(OutputExport.info_count), 0),
+        ).filter(
+            OutputExport.tenant_id == tid,
+            OutputExport.status == "has_exceptions",
+            OutputExport.id.in_(current_export_ids(s, tenant_id=tid) or {-1}),
+        ).one()
+        # Runs whose checks never ran (validation_outcome) — no findings to
+        # review, but they still need someone's attention, so counted apart.
+        not_validated_runs = s.query(func.count(OutputExport.id)).filter(
+            OutputExport.tenant_id == tid,
+            OutputExport.status == "not_validated",
+        ).scalar() or 0
 
-#         # "Mapping tasks" tile (Kavachio admin) — open items in the data-model queue.
-#         mapping_tasks_open = s.query(AdminMappingTask).filter(
-#             AdminMappingTask.tenant_id == tid,
-#             AdminMappingTask.status.in_(("open", "in_progress")),
-#         ).count()
+        # "Mapping tasks" tile (Kavachio admin) — open items in the data-model queue.
+        mapping_tasks_open = s.query(AdminMappingTask).filter(
+            AdminMappingTask.tenant_id == tid,
+            AdminMappingTask.status.in_(("open", "in_progress")),
+        ).count()
 
-#         # "Pending Signatures" tile — CONTRACTS waiting on this carrier's own
-#         # signature, not e-sign envelopes.
-#         #
-#         # It used to count envelopes in ("sent", "in_progress"), and an
-#         # envelope does not exist until somebody presses Sign
-#         # (esign_routes._open_round). So a contract whose terms the broker had
-#         # just agreed — the exact moment the carrier has to act, since the
-#         # CARRIER SIGNS FIRST — left this tile reading 0, and the carrier was
-#         # told nothing was waiting on them.
-#         #
-#         # Counted the same way the broker's own queue is: the contract is in
-#         # the signing round and this side has not signed yet.
-#         import contract_routes as _cr
-#         sign_rows = s.query(Contract).filter(
-#             Contract.tenant_id == tid,
-#             Contract.lifecycle.in_(("agreed", "signed")),
-#         ).all()
-#         pending_signatures = 0
-#         for _c in sign_rows:
-#             if _cr._effective_lifecycle(_c) not in ("agreed", "signed"):
-#                 continue        # lapsed in the meantime — nobody signs it now
-#             if "carrier" in _cr._unsigned_sides(_cr._signatures(s, _c.id)):
-#                 pending_signatures += 1
+        # "Pending Signatures" tile — CONTRACTS waiting on this carrier's own
+        # signature, not e-sign envelopes.
+        #
+        # It used to count envelopes in ("sent", "in_progress"), and an
+        # envelope does not exist until somebody presses Sign
+        # (esign_routes._open_round). So a contract whose terms the broker had
+        # just agreed — the exact moment the carrier has to act, since the
+        # CARRIER SIGNS FIRST — left this tile reading 0, and the carrier was
+        # told nothing was waiting on them.
+        #
+        # Counted the same way the broker's own queue is: the contract is in
+        # the signing round and this side has not signed yet.
+        import contract_routes as _cr
+        sign_rows = s.query(Contract).filter(
+            Contract.tenant_id == tid,
+            Contract.lifecycle.in_(("agreed", "signed")),
+        ).all()
+        pending_signatures = 0
+        for _c in sign_rows:
+            if _cr._effective_lifecycle(_c) not in ("agreed", "signed"):
+                continue        # lapsed in the meantime — nobody signs it now
+            if "carrier" in _cr._unsigned_sides(_cr._signatures(s, _c.id)):
+                pending_signatures += 1
 
-#         # EVERYTHING on the carrier's desk, not only the signatures. A contract
-#         # a colleague raised and left in draft, or one the broker has pushed
-#         # back on, is just as much the carrier's move — and neither is in a
-#         # signing round, so neither is counted above. The carrier had no way to
-#         # see those at all: the list could be filtered by lifecycle, and no
-#         # lifecycle answers "whose move is it" (a contract in `agreed` is one
-#         # side's or the other's depending on who has already signed).
-#         #
-#         # Counted through _whose_turn, the same function the record, the
-#         # carrier's list and the broker's list all use, so this tile and the
-#         # screen it opens can never disagree.
-#         #
-#         # AND SPLIT BY SEAT, because "the carrier's move" is not one queue. The
-#         # signature at the end is the carrier ADMIN's alone, so a contract the
-#         # broker has just agreed is on their desk and on nobody else's; showing
-#         # it to the carrier user who raised it would be telling them to do
-#         # something the API refuses. _carrier_admin_turn is the one function
-#         # that answers which of the two, and the record screen and the
-#         # notifications read the same one.
-#         waiting_rows = s.query(Contract).filter(Contract.tenant_id == tid).all()
-#         _seat = _carrier_seat(s, principal)
-#         _is_admin_seat = _seat in ("admin", "both")
-#         contracts_waiting = 0
-#         contracts_awaiting_admin = 0
-#         # ...and split the SAME rows by what the carrier actually has to do,
-#         # which is the split the tile draws: sign something already settled,
-#         # or decide something that is not. Counted here rather than subtracted
-#         # on the screen from `pending_signatures`, which is NOT seat-filtered —
-#         # subtracting an unfiltered count from a filtered one is how two halves
-#         # stop adding up to the number above them.
-#         contracts_pending_signature = 0
-#         contracts_pending_review = 0
-#         contracts_terms_agreed = 0
-#         # Contracts in force (signed or active) whose term ends within the next
-#         # EXPIRING_SOON_DAYS — the "N expiring soon" line under the Contracts
-#         # tile. Counted over every contract, not only the ones waiting on the
-#         # carrier. An already-expired one is not "soon"; it is gone.
-#         EXPIRING_SOON_DAYS = CONTRACT_EXPIRING_SOON_DAYS
-#         _today_d = _cr._today()
-#         _soon_d = _today_d + timedelta(days=EXPIRING_SOON_DAYS)
-#         contracts_expiring_soon = 0
-#         # Of the contracts it is the carrier's move on, the ones a BROKER has
-#         # sent back asking for changes — shown on the Contracts to Sign tile,
-#         # where a contract the carrier cannot sign until it answers belongs.
-#         contracts_changes_requested = 0
-#         for _c in waiting_rows:
-#             _uns = _cr._unsigned_sides(_cr._signatures(s, _c.id))
-#             _state = _cr._effective_lifecycle(_c)
-#             if (_state in ("signed", "active") and _c.expiry_dt
-#                     and _today_d <= _c.expiry_dt <= _soon_d):
-#                 contracts_expiring_soon += 1
-#             # The counterpart to the review queue: terms this carrier has
-#             # settled, whatever is left to do about signing them. Counted over
-#             # every contract, not only the ones waiting on the carrier.
-#             if _state in ("agreed", "signed", "active"):
-#                 contracts_terms_agreed += 1
-#             if _cr._whose_turn(_c, _uns) != "carrier":
-#                 continue
-#             _admins = _cr._carrier_admin_turn(_c, _uns)
-#             if _admins:
-#                 contracts_awaiting_admin += 1
-#             # A carrier user's tile counts only what a carrier user can act on.
-#             if _is_admin_seat or not _admins:
-#                 contracts_waiting += 1
-#                 if _state in ("agreed", "signed") and "carrier" in _uns:
-#                     contracts_pending_signature += 1
-#                 else:
-#                     contracts_pending_review += 1
-#                     if _state == "changes_requested":
-#                         contracts_changes_requested += 1
+        # EVERYTHING on the carrier's desk, not only the signatures. A contract
+        # a colleague raised and left in draft, or one the broker has pushed
+        # back on, is just as much the carrier's move — and neither is in a
+        # signing round, so neither is counted above. The carrier had no way to
+        # see those at all: the list could be filtered by lifecycle, and no
+        # lifecycle answers "whose move is it" (a contract in `agreed` is one
+        # side's or the other's depending on who has already signed).
+        #
+        # Counted through _whose_turn, the same function the record, the
+        # carrier's list and the broker's list all use, so this tile and the
+        # screen it opens can never disagree.
+        #
+        # AND SPLIT BY SEAT, because "the carrier's move" is not one queue. The
+        # signature at the end is the carrier ADMIN's alone, so a contract the
+        # broker has just agreed is on their desk and on nobody else's; showing
+        # it to the carrier user who raised it would be telling them to do
+        # something the API refuses. _carrier_admin_turn is the one function
+        # that answers which of the two, and the record screen and the
+        # notifications read the same one.
+        waiting_rows = s.query(Contract).filter(Contract.tenant_id == tid).all()
+        _seat = _carrier_seat(s, principal)
+        _is_admin_seat = _seat in ("admin", "both")
+        contracts_waiting = 0
+        contracts_awaiting_admin = 0
+        # ...and split the SAME rows by what the carrier actually has to do,
+        # which is the split the tile draws: sign something already settled,
+        # or decide something that is not. Counted here rather than subtracted
+        # on the screen from `pending_signatures`, which is NOT seat-filtered —
+        # subtracting an unfiltered count from a filtered one is how two halves
+        # stop adding up to the number above them.
+        contracts_pending_signature = 0
+        contracts_pending_review = 0
+        contracts_terms_agreed = 0
+        # Contracts in force (signed or active) whose term ends within the next
+        # EXPIRING_SOON_DAYS — the "N expiring soon" line under the Contracts
+        # tile. Counted over every contract, not only the ones waiting on the
+        # carrier. An already-expired one is not "soon"; it is gone.
+        EXPIRING_SOON_DAYS = CONTRACT_EXPIRING_SOON_DAYS
+        _today_d = _cr._today()
+        _soon_d = _today_d + timedelta(days=EXPIRING_SOON_DAYS)
+        contracts_expiring_soon = 0
+        # Of the contracts it is the carrier's move on, the ones a BROKER has
+        # sent back asking for changes — shown on the Contracts to Sign tile,
+        # where a contract the carrier cannot sign until it answers belongs.
+        contracts_changes_requested = 0
+        for _c in waiting_rows:
+            _uns = _cr._unsigned_sides(_cr._signatures(s, _c.id))
+            _state = _cr._effective_lifecycle(_c)
+            if (_state in ("signed", "active") and _c.expiry_dt
+                    and _today_d <= _c.expiry_dt <= _soon_d):
+                contracts_expiring_soon += 1
+            # The counterpart to the review queue: terms this carrier has
+            # settled, whatever is left to do about signing them. Counted over
+            # every contract, not only the ones waiting on the carrier.
+            if _state in ("agreed", "signed", "active"):
+                contracts_terms_agreed += 1
+            if _cr._whose_turn(_c, _uns) != "carrier":
+                continue
+            _admins = _cr._carrier_admin_turn(_c, _uns)
+            if _admins:
+                contracts_awaiting_admin += 1
+            # A carrier user's tile counts only what a carrier user can act on.
+            if _is_admin_seat or not _admins:
+                contracts_waiting += 1
+                if _state in ("agreed", "signed") and "carrier" in _uns:
+                    contracts_pending_signature += 1
+                else:
+                    contracts_pending_review += 1
+                    if _state == "changes_requested":
+                        contracts_changes_requested += 1
 
-#         # The subtitle beside it, counted in the same units: contracts both
-#         # sides have signed. An envelope count here would have said "1
-#         # completed" next to two contracts in force, since a contract signed
-#         # on paper and recorded has no envelope at all.
-#         completed_signatures = sum(
-#             1 for _c in sign_rows
-#             if not _cr._unsigned_sides(_cr._signatures(s, _c.id)))
-#         completed_signatures += s.query(Contract).filter(
-#             Contract.tenant_id == tid,
-#             Contract.lifecycle.in_(("active", "expired", "terminated")),
-#         ).count()
+        # The subtitle beside it, counted in the same units: contracts both
+        # sides have signed. An envelope count here would have said "1
+        # completed" next to two contracts in force, since a contract signed
+        # on paper and recorded has no envelope at all.
+        completed_signatures = sum(
+            1 for _c in sign_rows
+            if not _cr._unsigned_sides(_cr._signatures(s, _c.id)))
+        completed_signatures += s.query(Contract).filter(
+            Contract.tenant_id == tid,
+            Contract.lifecycle.in_(("active", "expired", "terminated")),
+        ).count()
 
-#         # "Avg Turnaround" tile (tenant/operator) — average wall-clock time from a
-#         # file's upload to its validated output, over the last 30 days. Combines
-#         # BOTH validation pipelines, since a tenant's uploads can go through
-#         # either (or both):
-#         #   1. Uploads screen  → upload.ingested_at → validation_run.completed_at
-#         #   2. Process Bordereau (direct run) → landing_record.created_at →
-#         #      output_exports.created_at (via landing_record.output_export_id)
-#         # upload.ingested_at is naive (datetime.utcnow(), no tz) while
-#         # validation_run.completed_at is timestamptz; diffing them directly lets
-#         # Postgres cast the naive side using the session's timezone, silently
-#         # skewing the result — `AT TIME ZONE 'UTC'` marks it UTC first so the
-#         # subtraction is correct everywhere. landing_record/output_exports are
-#         # both naive already, so no cast is needed there.
-#         #
-#         # Two data-integrity traps found while validating this against real
-#         # rows, both fixed below:
-#         #   - An upload can be RE-validated many times (found one with 38 runs
-#         #     spanning 5 days); diffing every completed run against the same
-#         #     original ingested_at turned a normal turnaround into "5 days" —
-#         #     only the upload's FIRST completed validation is a real "upload →
-#         #     validated" measurement, so re-validations are excluded.
-#         #   - "Fix & re-run" reassigns landing_record.output_export_id to a
-#         #     freshly-generated export, so a landing re-rendered long after its
-#         #     own created_at (found real gaps of 19-44 hours) looked like an
-#         #     enormous turnaround. Process Bordereau is synchronous, so
-#         #     anything over an hour there is a reused landing, not real
-#         #     latency — capped out.
-#         avg_turnaround_min = s.execute(
-#             text("""
-#                 WITH first_validation AS (
-#                     SELECT bdx_upload_id, MIN(completed_at) AS completed_at
-#                     FROM validation_run
-#                     WHERE tenant_id = :tid AND status = 'completed' AND completed_at IS NOT NULL
-#                     GROUP BY bdx_upload_id
-#                 ),
-#                 durations AS (
-#                     SELECT EXTRACT(EPOCH FROM (fv.completed_at - (u.ingested_at AT TIME ZONE 'UTC'))) / 60.0 AS mins
-#                     FROM first_validation fv
-#                     JOIN upload u ON u.upload_id = fv.bdx_upload_id
-#                     WHERE fv.completed_at > (u.ingested_at AT TIME ZONE 'UTC')
-#                       AND fv.completed_at >= NOW() - INTERVAL '30 days'
-#                     UNION ALL
-#                     SELECT EXTRACT(EPOCH FROM (oe.created_at - lr.created_at)) / 60.0 AS mins
-#                     FROM landing_record lr
-#                     JOIN output_exports oe ON oe.id = lr.output_export_id
-#                     WHERE lr.tenant_id = :tid
-#                       AND lr.output_export_id IS NOT NULL
-#                       AND oe.created_at > lr.created_at
-#                       AND oe.created_at - lr.created_at <= INTERVAL '60 minutes'
-#                       AND oe.created_at >= NOW() - INTERVAL '30 days'
-#                 )
-#                 SELECT AVG(mins) FROM durations
-#             """),
-#             {"tid": tid},
-#         ).scalar()
+        # "Avg Turnaround" tile (tenant/operator) — average wall-clock time from a
+        # file's upload to its validated output, over the last 30 days. Combines
+        # BOTH validation pipelines, since a tenant's uploads can go through
+        # either (or both):
+        #   1. Uploads screen  → upload.ingested_at → validation_run.completed_at
+        #   2. Process Bordereau (direct run) → landing_record.created_at →
+        #      output_exports.created_at (via landing_record.output_export_id)
+        # upload.ingested_at is naive (datetime.utcnow(), no tz) while
+        # validation_run.completed_at is timestamptz; diffing them directly lets
+        # Postgres cast the naive side using the session's timezone, silently
+        # skewing the result — `AT TIME ZONE 'UTC'` marks it UTC first so the
+        # subtraction is correct everywhere. landing_record/output_exports are
+        # both naive already, so no cast is needed there.
+        #
+        # Two data-integrity traps found while validating this against real
+        # rows, both fixed below:
+        #   - An upload can be RE-validated many times (found one with 38 runs
+        #     spanning 5 days); diffing every completed run against the same
+        #     original ingested_at turned a normal turnaround into "5 days" —
+        #     only the upload's FIRST completed validation is a real "upload →
+        #     validated" measurement, so re-validations are excluded.
+        #   - "Fix & re-run" reassigns landing_record.output_export_id to a
+        #     freshly-generated export, so a landing re-rendered long after its
+        #     own created_at (found real gaps of 19-44 hours) looked like an
+        #     enormous turnaround. Process Bordereau is synchronous, so
+        #     anything over an hour there is a reused landing, not real
+        #     latency — capped out.
+        avg_turnaround_min = s.execute(
+            text("""
+                WITH first_validation AS (
+                    SELECT bdx_upload_id, MIN(completed_at) AS completed_at
+                    FROM validation_run
+                    WHERE tenant_id = :tid AND status = 'completed' AND completed_at IS NOT NULL
+                    GROUP BY bdx_upload_id
+                ),
+                durations AS (
+                    SELECT EXTRACT(EPOCH FROM (fv.completed_at - (u.ingested_at AT TIME ZONE 'UTC'))) / 60.0 AS mins
+                    FROM first_validation fv
+                    JOIN upload u ON u.upload_id = fv.bdx_upload_id
+                    WHERE fv.completed_at > (u.ingested_at AT TIME ZONE 'UTC')
+                      AND fv.completed_at >= NOW() - INTERVAL '30 days'
+                    UNION ALL
+                    SELECT EXTRACT(EPOCH FROM (oe.created_at - lr.created_at)) / 60.0 AS mins
+                    FROM landing_record lr
+                    JOIN output_exports oe ON oe.id = lr.output_export_id
+                    WHERE lr.tenant_id = :tid
+                      AND lr.output_export_id IS NOT NULL
+                      AND oe.created_at > lr.created_at
+                      AND oe.created_at - lr.created_at <= INTERVAL '60 minutes'
+                      AND oe.created_at >= NOW() - INTERVAL '30 days'
+                )
+                SELECT AVG(mins) FROM durations
+            """),
+            {"tid": tid},
+        ).scalar()
 
-#         # "Carrier Users" tile — the carrier users the carrier admin has added,
-#         # invited ones included (they have a seat, they just have not set a
-#         # password yet). Not the carrier admin themselves, not the brokers'
-#         # people, who belong to their own organisation, and not anyone removed
-#         # (suspended).
-#         # Only the carrier admin sees this count. A carrier user sees no count
-#         # of their colleagues at all — instead, how many broker companies THEY
-#         # brought on board, and how many of those have not accepted yet.
-#         seat = _carrier_seat(s, principal)
-#         users_total = users_invited = my_brokers = my_brokers_pending = None
-#         # "Broker onboarding pending" — brokers a carrier user has asked to
-#         # bring on and nobody has answered yet. The carrier ADMIN's only, like
-#         # the setup queue: they are the one who decides, and a count of work
-#         # waiting on somebody else is noise on a colleague's dashboard.
-#         #
-#         # ALWAYS A NUMBER for them, never None, because the tile is meant to be
-#         # there at nought as well — "nothing is waiting on me" is the answer
-#         # they come to the dashboard for, and a tile that appears only when
-#         # there is bad news is a tile nobody learns to trust.
-#         broker_requests_pending = None
-#         if seat in ("admin", "both"):
-#             from db import BrokerOnboardingRequest
-#             broker_requests_pending = (
-#                 s.query(func.count(BrokerOnboardingRequest.id))
-#                 .filter(BrokerOnboardingRequest.tenant_id == tid,
-#                         BrokerOnboardingRequest.status == "pending")
-#                 .scalar() or 0)
-#         if seat in ("admin", "both"):
-#             owner_id = s.query(Tenant.owner_user_id).filter(Tenant.id == tid).scalar()
-#             user_rows = s.query(AppUser.status, func.count(AppUser.id)).filter(
-#                 AppUser.tenant_id == tid,
-#                 AppUser.role != "kavachio_admin",
-#                 AppUser.id != owner_id if owner_id else True,
-#                 AppUser.status.in_(("active", "invited", "pending")),
-#             ).group_by(AppUser.status).all()
-#             users_invited = sum(n for st, n in user_rows if st in ("invited", "pending"))
-#             users_total = sum(n for _st, n in user_rows)
-#         if seat == "user":
-#             from db import BrokerInvitation
-#             mine = _my_broker_party_ids(s, principal, tid)
-#             my_brokers = len(mine)
-#             my_brokers_pending = (s.query(func.count(func.distinct(BrokerInvitation.party_id)))
-#                 .filter(BrokerInvitation.tenant_id == tid,
-#                         BrokerInvitation.party_id.in_(mine) if mine else False,
-#                         BrokerInvitation.status == "pending").scalar() or 0)
+        # "Carrier Users" tile — the carrier users the carrier admin has added,
+        # invited ones included (they have a seat, they just have not set a
+        # password yet). Not the carrier admin themselves, not the brokers'
+        # people, who belong to their own organisation, and not anyone removed
+        # (suspended).
+        # Only the carrier admin sees this count. A carrier user sees no count
+        # of their colleagues at all — instead, how many broker companies THEY
+        # brought on board, and how many of those have not accepted yet.
+        seat = _carrier_seat(s, principal)
+        users_total = users_invited = my_brokers = my_brokers_pending = None
+        # "Broker onboarding pending" — brokers a carrier user has asked to
+        # bring on and nobody has answered yet. The carrier ADMIN's only, like
+        # the setup queue: they are the one who decides, and a count of work
+        # waiting on somebody else is noise on a colleague's dashboard.
+        #
+        # ALWAYS A NUMBER for them, never None, because the tile is meant to be
+        # there at nought as well — "nothing is waiting on me" is the answer
+        # they come to the dashboard for, and a tile that appears only when
+        # there is bad news is a tile nobody learns to trust.
+        broker_requests_pending = None
+        if seat in ("admin", "both"):
+            from db import BrokerOnboardingRequest
+            broker_requests_pending = (
+                s.query(func.count(BrokerOnboardingRequest.id))
+                .filter(BrokerOnboardingRequest.tenant_id == tid,
+                        BrokerOnboardingRequest.status == "pending")
+                .scalar() or 0)
+        if seat in ("admin", "both"):
+            owner_id = s.query(Tenant.owner_user_id).filter(Tenant.id == tid).scalar()
+            user_rows = s.query(AppUser.status, func.count(AppUser.id)).filter(
+                AppUser.tenant_id == tid,
+                AppUser.role != "kavachio_admin",
+                AppUser.id != owner_id if owner_id else True,
+                AppUser.status.in_(("active", "invited", "pending")),
+            ).group_by(AppUser.status).all()
+            users_invited = sum(n for st, n in user_rows if st in ("invited", "pending"))
+            users_total = sum(n for _st, n in user_rows)
+        if seat == "user":
+            from db import BrokerInvitation
+            mine = _my_broker_party_ids(s, principal, tid)
+            my_brokers = len(mine)
+            my_brokers_pending = (s.query(func.count(func.distinct(BrokerInvitation.party_id)))
+                .filter(BrokerInvitation.tenant_id == tid,
+                        BrokerInvitation.party_id.in_(mine) if mine else False,
+                        BrokerInvitation.status == "pending").scalar() or 0)
 
-#         return {
-#             "users_total": users_total,
-#             "users_invited": users_invited,
-#             "my_brokers": my_brokers,
-#             "my_brokers_pending": my_brokers_pending,
-#             # Broker onboarding requests waiting on the carrier admin. None for
-#             # a carrier user, who is not the one being asked.
-#             "broker_requests_pending": broker_requests_pending,
-#             "uploads_today": uploads_today,
-#             "uploads_total": total_uploads,
-#             "open_bdx_cycles": programs,
-#             "active_setups": active_setups,             # "Active setups" tile
-#             "active_setup_carriers": int(active_setup_carriers),
-#             "parties_in_directory": parties,
-#             "pending_exceptions": int(exc_sum or 0),
-#             "exceptions_by_severity": {
-#                 "critical": int(sev_crit or 0),
-#                 "warning": int(sev_warn or 0),
-#                 "info": int(sev_info or 0),
-#             },
-#             "exception_runs": int(exc_runs or 0),
-#             "not_validated_runs": int(not_validated_runs),
-#             "ai_cache_hit_rate": None,
-#             "runs_this_week": runs_this_week,
-#             "runs_by_day_status": runs_by_day_status,
-#             "mapping_tasks_open": mapping_tasks_open,
-#             "pending_signatures": pending_signatures,
-#             "completed_signatures": completed_signatures,
-#             # Contracts it is the CARRIER's move on — drafts, change requests
-#             # and signatures together. A superset of pending_signatures.
-#             "contracts_waiting": contracts_waiting,
-#             # The two halves of that number, in the order the work happens:
-#             # decide the contract, then sign it. They always sum to
-#             # contracts_waiting — same rows, same seat filter, one pass.
-#             "contracts_pending_review": contracts_pending_review,
-#             "contracts_pending_signature": contracts_pending_signature,
-#             # Terms already settled — the "done" count beside the review half,
-#             # the carrier's mirror of the broker's terms_agreed.
-#             "contracts_terms_agreed": contracts_terms_agreed,
-#             # In force and ending within the next 30 days (and the window it
-#             # was counted over, so the screen never restates the number).
-#             "contracts_expiring_soon": contracts_expiring_soon,
-#             # Broker pushed back; the carrier has to answer. Part of
-#             # contracts_pending_review.
-#             "contracts_changes_requested": contracts_changes_requested,
-#             "contracts_expiring_soon_days": EXPIRING_SOON_DAYS,
-#             # Of those, the ones only the carrier admin can move. The tile uses
-#             # it to say "2 to sign" rather than leaving the reader to subtract.
-#             "contracts_awaiting_admin": contracts_awaiting_admin,
-#             "avg_turnaround_min": round(avg_turnaround_min, 1) if avg_turnaround_min is not None else None,
-#         }
+        return {
+            "users_total": users_total,
+            "users_invited": users_invited,
+            "my_brokers": my_brokers,
+            "my_brokers_pending": my_brokers_pending,
+            # Broker onboarding requests waiting on the carrier admin. None for
+            # a carrier user, who is not the one being asked.
+            "broker_requests_pending": broker_requests_pending,
+            "uploads_today": uploads_today,
+            "uploads_total": total_uploads,
+            "open_bdx_cycles": programs,
+            "active_setups": active_setups,             # "Active setups" tile
+            "active_setup_carriers": int(active_setup_carriers),
+            "parties_in_directory": parties,
+            "pending_exceptions": int(exc_sum or 0),
+            "exceptions_by_severity": {
+                "critical": int(sev_crit or 0),
+                "warning": int(sev_warn or 0),
+                "info": int(sev_info or 0),
+            },
+            "exception_runs": int(exc_runs or 0),
+            "not_validated_runs": int(not_validated_runs),
+            "ai_cache_hit_rate": None,
+            "runs_this_week": runs_this_week,
+            "runs_by_day_status": runs_by_day_status,
+            "mapping_tasks_open": mapping_tasks_open,
+            "pending_signatures": pending_signatures,
+            "completed_signatures": completed_signatures,
+            # Contracts it is the CARRIER's move on — drafts, change requests
+            # and signatures together. A superset of pending_signatures.
+            "contracts_waiting": contracts_waiting,
+            # The two halves of that number, in the order the work happens:
+            # decide the contract, then sign it. They always sum to
+            # contracts_waiting — same rows, same seat filter, one pass.
+            "contracts_pending_review": contracts_pending_review,
+            "contracts_pending_signature": contracts_pending_signature,
+            # Terms already settled — the "done" count beside the review half,
+            # the carrier's mirror of the broker's terms_agreed.
+            "contracts_terms_agreed": contracts_terms_agreed,
+            # In force and ending within the next 30 days (and the window it
+            # was counted over, so the screen never restates the number).
+            "contracts_expiring_soon": contracts_expiring_soon,
+            # Broker pushed back; the carrier has to answer. Part of
+            # contracts_pending_review.
+            "contracts_changes_requested": contracts_changes_requested,
+            "contracts_expiring_soon_days": EXPIRING_SOON_DAYS,
+            # Of those, the ones only the carrier admin can move. The tile uses
+            # it to say "2 to sign" rather than leaving the reader to subtract.
+            "contracts_awaiting_admin": contracts_awaiting_admin,
+            "avg_turnaround_min": round(avg_turnaround_min, 1) if avg_turnaround_min is not None else None,
+        }
 
 
 def _report_window(cadence: Optional[str], period: Optional[str],
