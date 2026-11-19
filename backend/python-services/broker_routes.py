@@ -1124,10 +1124,11 @@ def broker_insights(days: int = Query(30, ge=7, le=90),
 def _run_rows(s, exports) -> list[dict]:
     """The run rows both the dashboard and the run history show."""
     from app_routes import _iso_utc
-    from exception_tally import contract_flags, export_versions
+    from exception_tally import contract_flags, export_versions, submission_tallies
     vers = export_versions(s, [e.id for e in exports]) if exports else {}
     flags = contract_flags(s, [e.id for e in exports]) if exports else {}
-    tallies = {e.id: _export_tally(e) for e in exports}
+    # Exceptions resolved before a Fix & Validate version are counted in.
+    tallies = submission_tallies(s, exports)
     prog_names = ({pid: name for pid, name in s.query(Program.id, Program.name)
                    .filter(Program.id.in_({e.program_id for e in exports})).all()}
                   if exports else {})
@@ -1212,6 +1213,8 @@ def _uploader_work(s, bid: int, user_ids: list[int], since) -> dict[int, dict]:
                      OutputExport.generated_by_user_id.in_(user_ids),
                      OutputExport.created_at >= since,
                      OutputExport.id.in_(live)).all())
+    from exception_tally import correction_bases, tally_with_fixes
+    bases, base_cache = correction_bases(s, [eid for eid, _ in rows]), {}
     for eid, uid in rows:
         # One export at a time, then let it go: the exceptions column runs to
         # megabytes on a big bordereau and a busy person has many of them.
@@ -1219,7 +1222,7 @@ def _uploader_work(s, bid: int, user_ids: list[int], since) -> dict[int, dict]:
         if r is None:
             continue
         tally = out[uid]
-        t = _export_tally(r)
+        t = tally_with_fixes(s, r, bases, base_cache)
         tally["files"] += 1
         tally["rows"] += t["rows"]
         tally["rows_flagged"] += t["rows_flagged"]
@@ -1562,13 +1565,15 @@ def broker_person_files(user_id: int, days: int = Query(30, ge=7, le=90),
         # them), but only the page asked for is returned. A broker's files in a
         # 30-day window are tens, not thousands — the cost is one exception blob
         # per file, the same pass the dashboard already makes for its top five.
+        from exception_tally import correction_bases, tally_with_fixes
+        bases, base_cache = correction_bases(s, eids), {}
         items, by_prog = [], {}
         lo, hi = (page - 1) * page_size, (page - 1) * page_size + page_size
         for n, eid in enumerate(eids):
             r = s.get(OutputExport, eid)
             if r is None:
                 continue
-            t = _export_tally(r)
+            t = tally_with_fixes(s, r, bases, base_cache)
             cid = carrier_of_prog.get(r.program_id)
             g = by_prog.setdefault(r.program_id, {
                 "id": r.program_id,
