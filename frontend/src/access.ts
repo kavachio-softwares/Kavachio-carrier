@@ -239,7 +239,8 @@ export const ROUTE_ACCESS: {
   // fast problems get fixed, and what is still waiting). The two old paths
   // redirect to their tab.
   { pattern: "/monthly-report", requires: "carrier_admin" },
-  // MOPR 42.2 — Send & Schedule: who receives the report, when, and how.
+  // MOPR 42.2 — the old Send & Schedule page's path: it opens the report,
+  // whose Schedule popup and Sent reports drawer replaced it.
   { pattern: "/monthly-report/send-schedule", requires: "carrier_admin" },
   { pattern: "/monthly-report/:tab", requires: "carrier_admin" },
   { pattern: "/data-quality", requires: "carrier_admin" },

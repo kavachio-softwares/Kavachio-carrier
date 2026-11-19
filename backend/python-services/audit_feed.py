@@ -469,6 +469,7 @@ ACTION_WORDS = {
     # MOPR 42.2 — sending the Monthly Report (report_delivery.py)
     "monthly_report_settings_updated": "Changed how the operational report is sent",
     "monthly_report_sent":        "Sent the operational report",
+    "monthly_report_sends_cleared": "Cleared the sent operational reports list",
     "executive_report_settings_updated": "Changed how the executive report is sent",
     "executive_report_sent":      "Sent the executive report",
     "executive_report_sends_cleared": "Cleared the sent executive reports list",
@@ -1302,7 +1303,7 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "submission_case_reopened_by_carrier", "submission_case_resolved",
       "bdx_delivery_rule_updated", "fix_target_updated",
       "monthly_report_settings_updated", "monthly_report_sent",
-      "executive_report_settings_updated", "executive_report_sent",
+      "monthly_report_sends_cleared", "executive_report_settings_updated", "executive_report_sent",
       "executive_report_sends_cleared"), CARRIER_SEATS),
     # Programme Rules: the carrier sets them, brokers and reinsurers answer.
     ("programme_rules", "Programme rules",

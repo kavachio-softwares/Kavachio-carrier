@@ -2763,10 +2763,12 @@ class MonthlyReportSetting(Base):
     send_day = Column(Integer, nullable=False, default=3)          # Nth working day of the next month
     file_format = Column(String, nullable=False, default="pdf")    # pdf | excel | both
     delivery = Column(String, nullable=False, default="attach")    # attach | link
-    # Not used since 5 Nov 2026 (the report goes to the carrier's logins, in
-    # full). Kept because create_all had already made the table on some
-    # databases, where the two NOT NULL columns would refuse a row without
-    # them; drop all four together in a later migration.
+    # `recipient_user_ids` and the two compare_* columns: not used since 5 Nov
+    # 2026. Kept because create_all had already made the table on some
+    # databases, where the two NOT NULL columns would refuse a row without them.
+    # `sections` is used again since 18 Nov 2026, for the rest of the schedule
+    # (report_delivery.settings), so no column had to be added:
+    # {"schedule": {cadence, week_day, send_hour, time_zone}, "user_ids", "emails"}.
     recipient_user_ids = Column(JSON, nullable=True)
     sections = Column(JSON, nullable=True)
     compare_last_month = Column(Boolean, nullable=False, default=True)

@@ -26,6 +26,10 @@ Configuration (all optional, sensible defaults):
                                             mail. Requires NOTIFY_SMTP_* (or the
                                             default SMTP_*) and APP_BASE_URL.
 
+The Operational Report's automatic sends (MOPR 42.2) run in a loop of their own,
+every hour, so each carrier's report goes from the hour it picked
+(report_delivery.run_due). Once per carrier per period: the send's unique key.
+
 If the app runs with multiple workers/replicas, each will run its own scheduler.
 That is harmless (idempotent), but you can set SWEEP_SCHEDULER_ENABLED=0 on the
 extra workers to avoid the redundant runs.
@@ -40,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 log = logging.getLogger("sweep_scheduler")
 
 _task: asyncio.Task | None = None
+_reports_task: asyncio.Task | None = None   # the Operational Report, hourly
 
 
 def _enabled() -> bool:
@@ -207,9 +212,10 @@ def _sweep_all_tenants() -> dict:
 
 
 def _send_monthly_reports() -> int:
-    """MOPR 42.2 — every carrier's Monthly Report that is due today
-    (report_delivery.run_due). Once per carrier per month, however many runs or
-    app instances: the send row's unique key sees to that."""
+    """MOPR 42.2 — every carrier's Operational Report that is due now
+    (report_delivery.run_due): every day, week or month, from the hour the
+    carrier picked. Once per carrier per period, however many runs or app
+    instances: the send row's unique key sees to that."""
     from db import SessionLocal
     import report_delivery
     with SessionLocal() as s:
@@ -243,13 +249,8 @@ async def _loop() -> None:
             except Exception:  # noqa: BLE001 — a bad run must not kill the loop
                 log.exception("C-9 sweep run failed; will retry next cycle")
             # Its own step: a report that fails to send must not cost the
-            # deadline reminders, nor they the report.
-            try:
-                n = await loop.run_in_executor(None, _send_monthly_reports)
-                if n:
-                    log.info("Monthly report: sent for %s carrier(s)", n)
-            except Exception:  # noqa: BLE001
-                log.exception("Monthly report run failed; will retry next cycle")
+            # deadline reminders, nor they the report. (The Operational
+            # Report runs every hour instead — _reports_loop.)
             try:
                 n = await loop.run_in_executor(None, _send_executive_reports)
                 if n:
@@ -263,6 +264,33 @@ async def _loop() -> None:
         raise
 
 
+def _seconds_until_next_hour(now: datetime) -> float:
+    """To a minute past the next hour: each carrier's Operational Report goes
+    from the hour it picked."""
+    nxt = now.replace(minute=1, second=0, microsecond=0)
+    if nxt <= now:
+        nxt += timedelta(hours=1)
+    return (nxt - now).total_seconds()
+
+
+async def _reports_loop() -> None:
+    """MOPR 42.2 — the Operational Report's automatic sends, every hour (the
+    daily sweep above keeps its own hour)."""
+    try:
+        await asyncio.sleep(_startup_delay())
+        while True:
+            loop = asyncio.get_running_loop()
+            try:
+                n = await loop.run_in_executor(None, _send_monthly_reports)
+                if n:
+                    log.info("Operational report: sent for %s carrier(s)", n)
+            except Exception:  # noqa: BLE001 — a bad run must not kill the loop
+                log.exception("Operational report run failed; will retry next hour")
+            await asyncio.sleep(_seconds_until_next_hour(datetime.now(timezone.utc)))
+    except asyncio.CancelledError:
+        raise
+
+
 def start(app) -> None:
     """Register the scheduler on a FastAPI app's startup/shutdown. No-op when
     disabled via SWEEP_SCHEDULER_ENABLED."""
@@ -272,17 +300,20 @@ def start(app) -> None:
 
     @app.on_event("startup")
     async def _start_sweep() -> None:  # pragma: no cover - wiring
-        global _task
+        global _task, _reports_task
         if _task is None or _task.done():
             _task = asyncio.create_task(_loop())
+        if _reports_task is None or _reports_task.done():
+            _reports_task = asyncio.create_task(_reports_loop())
 
     @app.on_event("shutdown")
     async def _stop_sweep() -> None:   # pragma: no cover - wiring
-        global _task
-        if _task is not None:
-            _task.cancel()
-            try:
-                await _task
-            except asyncio.CancelledError:
-                pass
-            _task = None
+        global _task, _reports_task
+        for task in (_task, _reports_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        _task = _reports_task = None

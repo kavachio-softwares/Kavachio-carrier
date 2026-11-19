@@ -401,6 +401,7 @@ _SELF_LOGGED = [
     ("PUT",    re.compile(r"^/reports/exception-resolution/target$")),
     ("PUT",    re.compile(r"^/reports/monthly/delivery$")),
     ("POST",   re.compile(r"^/reports/monthly/send$")),
+    ("POST",   re.compile(r"^/reports/monthly/sends/clear$")),
     # 38.2's Executive Report schedule and sends, the same way.
     ("PUT",    re.compile(r"^/reports/executive/delivery$")),
     ("POST",   re.compile(r"^/reports/executive/send$")),

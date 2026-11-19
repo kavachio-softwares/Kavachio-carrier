@@ -143,7 +143,7 @@ def test_send_now_goes_to_who_is_picked_in_the_format_picked(monkeypatch):
                 emails=["cfo@carrier.test", "U2@carrier.test"], file_format="excel")
     assert [m["to"] for m in mail.sent] == ["u2@carrier.test", "cfo@carrier.test"]
     assert r["delivered"] == 2
-    assert [a[0] for a in mail.sent[0]["attachments"]] == ["Periodic Report 2026-10.xlsx"]
+    assert [a[0] for a in mail.sent[0]["attachments"]] == ["Operational Report 2026-10.xlsx"]
     assert rd.history(s, 1)[0]["people"] == 2
     with pytest.raises(ValueError, match="Tick a login or type an email address"):
         rd.send(s, 1, "2026-10", kind="now", now=NOW, mailer=mail, user_ids=[3])
@@ -163,6 +163,36 @@ def test_reports_sent_can_be_paged_through_newest_first():
     assert [h["month"] for h in rd.history(s, 1, limit=3)] == ["2026-10", "2026-09", "2026-08"]
     assert [h["month"] for h in rd.history(s, 1, limit=3, offset=3)] == ["2026-07"]
     assert rd.count_sends(s, 2) == 0
+
+
+def test_the_sent_list_says_who_and_clears_without_losing_a_send():
+    s = _mem_session()
+    _user(s, 1, name="Asha Rao")
+    s.commit()
+    rd.send(s, 1, "2026-09", kind="now", user_id=1, now=NOW, mailer=Mailer(),
+            emails=["cfo@carrier.test"])
+    rd.run_due(s, now=datetime(2026, 11, 4, 9, 1), mailer=Mailer())      # off: nothing
+    rd.save_settings(s, 1, {"auto_send": True}, user_id=1)
+    rd.run_due(s, now=datetime(2026, 11, 4, 9, 1), mailer=Mailer())      # October, by itself
+    s.commit()
+    h = rd.history(s, 1)
+    assert [(x["month"], x["kind"], x["sent_by"]) for x in h] == [
+        ("2026-10", "scheduled", None), ("2026-09", "now", "Asha Rao")]
+    assert h[1]["recipients"] == [
+        {"name": "Asha Rao", "email": "u1@carrier.test", "delivered": True},
+        {"name": None, "email": "cfo@carrier.test", "delivered": True}]
+    assert h[0]["sent_at"].endswith("Z")
+    # Cleared: the list is empty, but October still counts as sent.
+    assert rd.clear_history(s, 1, now=datetime(2026, 11, 4, 10, 0)) == 2
+    s.commit()
+    assert rd.history(s, 1) == [] and rd.count_sends(s, 1) == 0
+    assert rd.run_due(s, now=datetime(2026, 11, 4, 11, 1), mailer=Mailer()) == 0
+    # Saving the schedule keeps it cleared; a later send shows again.
+    rd.save_settings(s, 1, {"send_hour": 8}, user_id=1)
+    rd.send(s, 1, "2026-08", kind="now", user_id=1, now=datetime(2026, 11, 5, 9, 0), mailer=Mailer())
+    s.commit()
+    assert [x["month"] for x in rd.history(s, 1)] == ["2026-08"]
+    assert rd.clear_history(s, 2) == 0       # another carrier: nothing to clear
 
 
 def test_one_bad_address_does_not_stop_the_others():
@@ -201,14 +231,112 @@ def test_the_daily_job_sends_each_month_once():
     rd.save_settings(s, 1, {"auto_send": True}, user_id=1)
     s.commit()
     mail = Mailer()
-    assert rd.run_due(s, now=datetime(2026, 11, 3, 6), mailer=mail) == 0     # not its day yet
-    assert rd.run_due(s, now=NOW, mailer=mail) == 1
-    assert rd.run_due(s, now=NOW, mailer=mail) == 0                          # already gone
+    assert rd.run_due(s, now=datetime(2026, 11, 3, 10), mailer=mail) == 0    # not its day yet
+    assert rd.run_due(s, now=NOW, mailer=mail) == 0                          # its day, before 09:00 UK
+    assert rd.run_due(s, now=datetime(2026, 11, 4, 9, 1), mailer=mail) == 1
+    assert rd.run_due(s, now=datetime(2026, 11, 4, 10, 1), mailer=mail) == 0  # already gone
     assert len(mail.sent) == 1
     assert rd.sent_months(s, 1) == {"2026-10"}
     import db
     ev = s.query(db.ActivityEvent).filter(db.ActivityEvent.action == "monthly_report_sent").one()
     assert ev.actor == "system" and ev.details["kind"] == "scheduled"
+
+
+def test_the_carriers_clock_is_uk_india_or_utc():
+    # UK: GMT in winter, BST (UTC+1) from the last Sunday of March to the last of October.
+    assert rd.local_time(datetime(2026, 11, 4, 6), "Europe/London") == datetime(2026, 11, 4, 6)
+    assert rd.local_time(datetime(2026, 7, 1, 8), "Europe/London") == datetime(2026, 7, 1, 9)
+    assert rd.local_time(datetime(2026, 3, 29, 0, 59), "Europe/London").hour == 0
+    assert rd.local_time(datetime(2026, 3, 29, 1, 0), "Europe/London").hour == 2
+    assert rd.local_time(datetime(2026, 10, 25, 0, 59), "Europe/London").hour == 1
+    assert rd.local_time(datetime(2026, 10, 25, 1, 0), "Europe/London").hour == 1
+    assert rd.local_time(datetime(2026, 11, 4, 6), "Asia/Kolkata") == datetime(2026, 11, 4, 11, 30)
+    assert rd.local_time(datetime(2026, 11, 4, 6), "UTC") == datetime(2026, 11, 4, 6)
+
+
+def test_how_often_when_and_to_whom_are_saved_and_checked():
+    s = _mem_session()
+    _user(s, 1)
+    _user(s, 2)
+    cfg = rd.settings(s, 1)
+    assert (cfg["cadence"], cfg["week_day"], cfg["send_hour"], cfg["time_zone"]) == (
+        "month", 0, 9, "Europe/London")
+    assert (cfg["user_ids"], cfg["emails"]) == (None, [])
+    for bad in ({"cadence": "custom"}, {"week_day": 5}, {"send_hour": 24},
+                {"time_zone": "Mars"}, {"emails": ["not an address"]}):
+        with pytest.raises(ValueError):
+            rd.save_settings(s, 1, bad, user_id=1)
+    with pytest.raises(ValueError, match="Tick a login or type an email address"):
+        rd.save_settings(s, 1, {"auto_send": True, "user_ids": []}, user_id=1)
+    _, after = rd.save_settings(s, 1, {"auto_send": True, "cadence": "week", "week_day": 2,
+                                       "send_hour": 8, "time_zone": "Asia/Kolkata",
+                                       "user_ids": [2], "emails": ["cfo@carrier.test"]}, user_id=1)
+    assert {k: after[k] for k in ("cadence", "week_day", "send_hour", "time_zone",
+                                  "user_ids", "emails")} == {
+        "cadence": "week", "week_day": 2, "send_hour": 8, "time_zone": "Asia/Kolkata",
+        "user_ids": [2], "emails": ["cfo@carrier.test"]}
+    # Only typed addresses is enough.
+    rd.save_settings(s, 1, {"user_ids": [], "emails": ["cfo@carrier.test"]}, user_id=1)
+
+
+def test_a_week_goes_from_its_weekday_at_the_hour_picked_to_whom_it_was_picked():
+    s = _mem_session()
+    _user(s, 1)
+    _user(s, 2)
+    # Wednesdays at 09:00 UK time, to login 2 and one other address.
+    rd.save_settings(s, 1, {"auto_send": True, "cadence": "week", "week_day": 2, "send_hour": 9,
+                            "user_ids": [2], "emails": ["cfo@carrier.test"]}, user_id=1)
+    s.commit()
+    cfg = rd.settings(s, 1)
+    assert rd.schedule_due(cfg, datetime(2026, 11, 17, 10)) is None          # Tuesday
+    assert rd.schedule_due(cfg, datetime(2026, 11, 18, 8, 30)) is None       # Wednesday, 08:30
+    assert rd.schedule_due(cfg, datetime(2026, 11, 18, 9, 1)) == ("week", "2026-11-09")
+    # Missed on Wednesday (the app was down): Thursday's first run sends it.
+    assert rd.schedule_due(cfg, datetime(2026, 11, 19, 3)) == ("week", "2026-11-09")
+    nxt = rd.next_run(cfg, datetime(2026, 11, 17, 10), set())
+    assert (nxt["send_on"], nxt["period"], nxt["cadence"], nxt["send_hour"]) == (
+        "2026-11-18", "2026-11-09", "week", 9)
+    mail = Mailer()
+    assert rd.run_due(s, now=datetime(2026, 11, 18, 9, 1), mailer=mail) == 1
+    assert rd.run_due(s, now=datetime(2026, 11, 18, 10, 1), mailer=mail) == 0   # gone already
+    assert [m["to"] for m in mail.sent] == ["u2@carrier.test", "cfo@carrier.test"]
+    assert mail.sent[0]["attachments"][0][0] == "Operational Report week of 2026-11-09.pdf"
+    assert rd.sent_keys(s, 1) == {"week:2026-11-09"}
+    assert rd.next_run(cfg, datetime(2026, 11, 18, 10), rd.sent_keys(s, 1))["send_on"] == "2026-11-25"
+    h = rd.history(s, 1)[0]
+    assert (h["kind"], h["cadence"], h["people"]) == ("scheduled", "week", 2)
+
+
+def test_an_address_typed_in_gets_the_file_even_when_logins_get_a_link(monkeypatch):
+    import notifications
+    monkeypatch.setattr(notifications, "_app_link", lambda path: f"https://app.test{path}")
+    s = _mem_session()
+    _user(s, 1)
+    rd.save_settings(s, 1, {"delivery": "link", "emails": ["cfo@carrier.test"]}, user_id=1)
+    s.commit()
+    mail = Mailer()
+    cfg = rd.settings(s, 1)
+    rd.send(s, 1, "2026-10", kind="scheduled", now=NOW, mailer=mail,
+            user_ids=cfg["user_ids"], emails=cfg["emails"])
+    got = {m["to"]: [a[0] for a in m["attachments"]] for m in mail.sent}
+    # The login signs in to open it; the outside address has no login.
+    assert got == {"u1@carrier.test": [], "cfo@carrier.test": ["Operational Report 2026-10.pdf"]}
+
+
+def test_a_day_goes_every_day_on_the_carriers_clock():
+    s = _mem_session()
+    _user(s, 1)
+    rd.save_settings(s, 1, {"auto_send": True, "cadence": "day", "send_hour": 7,
+                            "time_zone": "Asia/Kolkata"}, user_id=1)
+    s.commit()
+    cfg = rd.settings(s, 1)
+    # 01:00 UTC is 06:30 in India: not yet; 01:31 UTC is 07:01.
+    assert rd.schedule_due(cfg, datetime(2026, 11, 18, 1, 0)) is None
+    assert rd.schedule_due(cfg, datetime(2026, 11, 18, 1, 31)) == ("day", "2026-11-17")
+    mail = Mailer()
+    assert rd.run_due(s, now=datetime(2026, 11, 18, 1, 31), mailer=mail) == 1
+    assert rd.run_due(s, now=datetime(2026, 11, 19, 1, 31), mailer=mail) == 1   # the next day's
+    assert rd.sent_keys(s, 1) == {"day:2026-11-17", "day:2026-11-18"}
 
 
 def test_nobody_to_send_to_is_said_plainly():

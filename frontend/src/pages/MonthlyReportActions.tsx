@@ -1,37 +1,32 @@
 // MOPR 42.2 — the Operational Report's own buttons, beside the tabs so they show on
-// every tab (it is one report): download the period picked — a month, or a
-// day, a week or dates — as a PDF or Excel file, open Send & Schedule (its tag
-// says whether the report goes out by itself, and when: always monthly), and
-// send the period picked now — in the shared "send by email" popup, as on the
-// Executive Report: tick which of the carrier's logins get it, type any other
-// addresses, and pick the format. A download that
-// fails is handed up as a note, so the page can show it under the tabs.
+// every tab (it is one report), laid out as the Executive Report's: download the
+// period picked — a month, or a day, a week or dates — as a PDF or Excel file;
+// Sent reports (a drawer of every report sent); Schedule ("Send it
+// automatically" in a popup; its tag says when it next goes); and Send — the
+// period picked, now, in the shared "send by email" popup: tick which of the
+// carrier's logins get it, type any other addresses, and pick the format. A
+// download that fails is handed up as a note, so the page can show it under the tabs.
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
-import { CalendarClock, ChevronDown, Download, FileSpreadsheet, FileText } from "lucide-react";
+import { CalendarClock, ChevronDown, Download, FileSpreadsheet, FileText, History, Send } from "lucide-react";
 import {
-  downloadMonthlyReport, getDelivery, sendMonthlyReport,
-  type DeliverySettings, type DeliveryView,
+  downloadMonthlyReport, getDelivery, sendMonthlyReport, type DeliveryView,
 } from "../api/reports";
 import { SendByEmailModal } from "../components/SendByEmail";
 import {
-  fmtDay, ordinal, periodRunning, periodTitle, plural,
+  fmtDay, fmtHour, periodRunning, periodTitle, plural, scheduleWords,
 } from "../utils/reportFormat";
 import type { ReportFilters } from "./MonthlyReport";
+import { FORMATS, ScheduleModal, SENT_PAGE, SentDrawer, tzLabel } from "./MonthlyReportDelivery";
 
 export type ActionNote = { tone: "ok" | "warn"; text: string } | null;
 
-/** "3 Dec", for the tag on the Send & Schedule button. */
+/** "3 Dec", for the tag on the Schedule button. */
 function shortDay(iso: string) {
   const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
   return new Date(y, m - 1, d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
 const BTN = { height: 38 };
-
-/** The formats Send now offers — the same three as Send & Schedule. */
-const FORMATS: { key: DeliverySettings["file_format"]; label: string }[] = [
-  { key: "pdf", label: "PDF" }, { key: "excel", label: "Excel" }, { key: "both", label: "Both" }];
 
 export default function MonthlyReportActions({ filters, onNote }: {
   filters: ReportFilters;
@@ -44,11 +39,14 @@ export default function MonthlyReportActions({ filters, onNote }: {
   const [menu, setMenu] = useState(false);
   const [fileBusy, setFileBusy] = useState<"pdf" | "excel" | null>(null);
   const [confirm, setConfirm] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [sentOpen, setSentOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    getDelivery().then(setDelivery).catch(() => setDelivery(null));
-  }, []);
+  // The first page of reports sent comes too, for the Sent reports drawer.
+  const reload = () => getDelivery({ page: 1, page_size: SENT_PAGE }).then(setDelivery)
+    .catch(() => setDelivery(null));
+  useEffect(() => { reload(); }, []);
 
   // The Download menu closes on a click anywhere else, or on Escape.
   useEffect(() => {
@@ -77,9 +75,13 @@ export default function MonthlyReportActions({ filters, onNote }: {
   const cfg = delivery?.settings;
   const recipients = delivery?.recipients ?? [];
   const next = cfg?.auto_send ? delivery?.next : null;
+  // "Sent automatically every Wednesday at 09:00 UK time to 2 people. Next: …"
+  const people = cfg ? recipients.filter(p => cfg.user_ids == null || cfg.user_ids.includes(p.user_id)).length
+    + (cfg.emails?.length ?? 0) : 0;
+  const tz = delivery && cfg ? tzLabel(delivery, cfg.time_zone) : "";
   const status = next && cfg
-    ? `Sent automatically on the ${ordinal(cfg.send_day)} working day to `
-      + `${plural(recipients.length, "person", "people")}. Next: ${fmtDay(next.send_on)}.`
+    ? `Sent automatically ${scheduleWords(cfg)} at ${fmtHour(cfg.send_hour)} ${tz} to `
+      + `${plural(people, "person", "people")}. Next: ${fmtDay(next.send_on)}.`
     : "Not sent automatically yet.";
   const filtered = programId != null || brokerId != null;
   // Stored times are UTC, and so is the month the report counts to.
@@ -112,21 +114,40 @@ export default function MonthlyReportActions({ filters, onNote }: {
         )}
       </div>
 
-      <Link to="/monthly-report/send-schedule" className="btn" style={BTN} title={status}>
-        <CalendarClock size={15} aria-hidden="true" />
-        Send &amp; Schedule
+      <button type="button" className="btn" style={BTN} onClick={() => setSentOpen(true)} disabled={!delivery}>
+        <History size={15} aria-hidden="true" /> Sent reports
+        {delivery && (
+          <span className={`badge ${delivery.sends.length ? "b-info" : "b-mut"}`} style={{ padding: "2px 8px" }}>
+            {delivery.sends_total ?? delivery.sends.length}
+          </span>
+        )}
+      </button>
+
+      <button type="button" className="btn" style={BTN} title={status} onClick={() => setScheduleOpen(true)}
+        disabled={!delivery}>
+        <CalendarClock size={15} aria-hidden="true" /> Schedule
         <span className={`badge ${next ? "b-info" : "b-mut"}`} style={{ padding: "2px 8px" }}>
           {next ? shortDay(next.send_on) : "Off"}
         </span>
-      </Link>
+      </button>
 
       <button type="button" className="btn pri" style={BTN} disabled={!delivery}
         onClick={() => { onNote(null); setConfirm(true); }}>
-        Send now →
+        <Send size={15} aria-hidden="true" /> Send
       </button>
 
+      {delivery && (<>
+        <SentDrawer open={sentOpen} view={delivery} onClose={() => setSentOpen(false)} onChanged={setDelivery} />
+        {/* Saving changes the schedule, not what has been sent: the list stays. */}
+        <ScheduleModal open={scheduleOpen} onClose={() => setScheduleOpen(false)} view={delivery}
+          onSaved={v => {
+            setDelivery(prev => ({ ...v, sends: prev?.sends ?? v.sends, sends_total: prev?.sends_total }));
+            setScheduleOpen(false);
+          }} />
+      </>)}
+
       <SendByEmailModal open={confirm} onClose={() => setConfirm(false)}
-        title="Send the Periodic Report" noun="report"
+        title="Send the Operational Report" noun="report"
         what={<>
           <b>{title}</b>{running && <span className="sub"> · still running, counts to today</span>}
           {filtered && (
@@ -138,7 +159,7 @@ export default function MonthlyReportActions({ filters, onNote }: {
         logins={recipients} formats={FORMATS} format={cfg?.file_format}
         send={({ user_ids, emails, file_format }) =>
           sendMonthlyReport({ cadence, period, user_ids, emails, file_format })}
-        onSent={() => { setConfirm(false); getDelivery().then(setDelivery).catch(() => undefined); }} />
+        onSent={() => { setConfirm(false); reload(); }} />
     </div>
   );
 }

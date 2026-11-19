@@ -375,6 +375,18 @@ export interface DeliverySettings {
   send_day: number;
   file_format: "pdf" | "excel" | "both";
   delivery: "attach" | "link";
+  /** Every day (yesterday's report), week (last week's) or month (last month's). */
+  cadence: "day" | "week" | "month";
+  /** A week's send day: 0 = Monday … 4 = Friday. */
+  week_day: number;
+  /** The hour it goes, 0–23, on the clock of `time_zone`. */
+  send_hour: number;
+  /** "Europe/London" | "Asia/Kolkata" | "UTC" (DeliveryView.time_zones). */
+  time_zone: string;
+  /** The logins ticked; null = every login, including any added later. */
+  user_ids: number[] | null;
+  /** Other addresses, as typed. */
+  emails: string[];
   /** False until Send & Schedule is first saved: these are the defaults. */
   saved: boolean;
 }
@@ -389,9 +401,13 @@ export interface SentReport {
   /** scheduled = by itself, now = Send now, test = an early test send (no longer offered). */
   kind: "scheduled" | "now" | "test";
   sent_at: string | null;
+  /** Who pressed Send; null for an automatic send. */
+  sent_by?: string | null;
   file_format: "pdf" | "excel" | "both";
   delivery: "attach" | "link";
   people: number;
+  /** Who it went to, and whether each one got it. */
+  recipients?: { name: string | null; email: string; delivered: boolean }[];
   delivered: number;
   failed: number;
   status: "sent" | "partly" | "failed";
@@ -404,8 +420,12 @@ export interface DeliveryView {
   /** The carrier's own logins: everyone the automatic send goes to; Send now
    *  can tick fewer and add other addresses. */
   recipients: ReportPerson[];
-  /** Null while automatic sending is off. */
-  next: { send_on: string; month: string } | null;
+  /** Null while automatic sending is off. `month` is the period it reports
+   *  on (a month, a day, or a week's Monday); `title` names it. */
+  next: {
+    send_on: string; month: string; period?: string; cadence?: DeliverySettings["cadence"];
+    title?: string; send_hour?: number; time_zone?: string;
+  } | null;
   /** The newest 24, or — when a page is asked for — that page of them all. */
   sends: SentReport[];
   /** Only with a page: how many reports have been sent in all. */
@@ -413,10 +433,11 @@ export interface DeliveryView {
   page?: number;
   page_size?: number;
   send_days: number[];
+  /** The clocks the send time can be set by. */
+  time_zones?: { key: string; label: string }[];
 }
 
-/** Paging is opt-in: Send & Schedule pages the reports sent; the buttons
- *  beside the Operational Report's tabs don't need them. */
+/** Paging is opt-in: the Sent reports list pages through the reports sent. */
 export async function getDelivery(paging?: { page: number; page_size?: number }): Promise<DeliveryView> {
   const { data } = await api.get<DeliveryView>("/reports/monthly/delivery",
     { params: { mga: currentMga(), ...(paging ?? {}) } });
@@ -426,6 +447,14 @@ export async function getDelivery(paging?: { page: number; page_size?: number })
 /** Carrier admin only. Each change is kept in the Audit Logs. */
 export async function saveDelivery(body: Partial<DeliverySettings>): Promise<DeliveryView> {
   const { data } = await api.put<DeliveryView>("/reports/monthly/delivery", body,
+    { params: { mga: currentMga() } });
+  return data;
+}
+
+/** Clear the Sent reports list (carrier admin), as the Executive Report's.
+ *  The sends are hidden, not deleted, and the schedule never sends one twice. */
+export async function clearMonthlySends(): Promise<DeliveryView> {
+  const { data } = await api.post<DeliveryView>("/reports/monthly/sends/clear", null,
     { params: { mga: currentMga() } });
   return data;
 }

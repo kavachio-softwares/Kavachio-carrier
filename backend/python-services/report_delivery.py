@@ -35,7 +35,16 @@ log = logging.getLogger("report_delivery")
 FORMATS = ("pdf", "excel", "both")
 DELIVERIES = ("attach", "link")
 SEND_DAYS = (1, 2, 3, 4, 5, 10)
-DEFAULTS = {"auto_send": False, "send_day": 3, "file_format": "pdf", "delivery": "attach"}
+# The automatic send: every day, week or month. Dates picked are a one-off,
+# so they are for Send now only.
+CADENCES = ("day", "week", "month")
+WEEK_DAYS = (0, 1, 2, 3, 4)                 # Monday … Friday
+# The clocks a carrier can send by (local_time).
+TIME_ZONES = {"Europe/London": "UK time", "Asia/Kolkata": "India time", "UTC": "UTC"}
+DEFAULTS = {"auto_send": False, "send_day": 3, "file_format": "pdf", "delivery": "attach",
+            "cadence": "month", "week_day": 0, "send_hour": 9, "time_zone": "Europe/London",
+            # Who: the logins ticked (None = every login) and other addresses.
+            "user_ids": None, "emails": []}
 # How long after its working day a missed automatic send may still go out.
 CATCH_UP_DAYS = 7
 SUBJECT_PREFIX = "Kavachio - "
@@ -83,6 +92,64 @@ def next_send(send_day: int, today: date, sent_months: set[str]) -> dict:
     return {"send_on": working_day(y, m, send_day).isoformat(), "month": _key(today)}
 
 
+def _last_sunday(year: int, month: int) -> date:
+    d = date(year, month + 1, 1) - timedelta(days=1) if month < 12 else date(year, 12, 31)
+    return d - timedelta(days=(d.weekday() + 1) % 7)
+
+
+def local_time(now: datetime, time_zone: str) -> datetime:
+    """`now` (UTC, as stored) on the carrier's clock. UK clocks go forward at
+    01:00 UTC on the last Sunday of March and back at 01:00 UTC on the last
+    Sunday of October; India is UTC+5:30 all year. Worked out here rather than
+    from the system's time-zone files, which a slim server image may not have."""
+    if time_zone == "Asia/Kolkata":
+        return now + timedelta(hours=5, minutes=30)
+    if time_zone == "Europe/London":
+        y = now.year
+        summer = (datetime.combine(_last_sunday(y, 3), datetime.min.time()) + timedelta(hours=1)
+                  <= now < datetime.combine(_last_sunday(y, 10), datetime.min.time()) + timedelta(hours=1))
+        return now + timedelta(hours=1) if summer else now
+    return now
+
+
+def _first_day(cfg: dict, today: date) -> date:
+    """The first day the send now due may go: today for a day; the weekday
+    picked for a week; the working day picked for a month."""
+    if cfg["cadence"] == "week":
+        return today - timedelta(days=today.weekday()) + timedelta(days=cfg["week_day"])
+    if cfg["cadence"] == "month":
+        return working_day(today.year, today.month, cfg["send_day"])
+    return today
+
+
+def schedule_due(cfg: dict, now: datetime) -> Optional[tuple[str, str]]:
+    """(cadence, period) of the automatic send due at `now`, or None. When, as
+    the Executive Report's schedule (executive_delivery.due_now): yesterday's
+    report every day; last week's from the weekday picked to the week's end;
+    last month's from the working day picked to CATCH_UP_DAYS after — on the
+    carrier's clock, from the hour picked. A send missed on its first day (the
+    app was down) goes at the next run after it, whatever the hour."""
+    import executive_delivery as xd
+    local = local_time(now, cfg["time_zone"])
+    due = xd.due_now(cfg, local.date())
+    if due is None:
+        return None
+    if local.hour >= cfg["send_hour"] or local.date() > _first_day(cfg, local.date()):
+        return due
+    return None
+
+
+def next_run(cfg: dict, now: datetime, sent: set[str]) -> dict:
+    """When the next automatic send goes, on the carrier's clock, and what it
+    reports on (executive_delivery.next_send). `month` is the period, as the
+    screen has always read it."""
+    import executive_delivery as xd
+    n = xd.next_send(cfg, local_time(now, cfg["time_zone"]).date(), sent)
+    return {"send_on": n["send_on"], "month": n["period"], "period": n["period"],
+            "cadence": n["cadence"], "title": n["title"],
+            "send_hour": cfg["send_hour"], "time_zone": cfg["time_zone"]}
+
+
 # --- who, and how -------------------------------------------------------------
 
 def people(s, tenant_id: int) -> list[dict]:
@@ -110,8 +177,18 @@ def settings(s, tenant_id: int) -> dict:
            .filter(MonthlyReportSetting.tenant_id == tenant_id).first())
     if row is None:
         return {**DEFAULTS, "saved": False}
-    return {"auto_send": bool(row.auto_send), "send_day": row.send_day,
-            "file_format": row.file_format, "delivery": row.delivery, "saved": True}
+    # How often, when and to whom are kept in `sections` (JSON, unused since
+    # 5 Nov 2026), so no column had to be added on every database. Anything
+    # else found there — an older shape — reads as the defaults.
+    sec = row.sections if isinstance(row.sections, dict) else {}
+    sch = sec.get("schedule") if isinstance(sec.get("schedule"), dict) else {}
+    out = {"auto_send": bool(row.auto_send), "send_day": row.send_day,
+           "file_format": row.file_format, "delivery": row.delivery}
+    for k in ("cadence", "week_day", "send_hour", "time_zone"):
+        out[k] = sch.get(k, DEFAULTS[k])
+    out["user_ids"] = sec.get("user_ids") if isinstance(sec.get("user_ids"), list) else None
+    out["emails"] = sec.get("emails") if isinstance(sec.get("emails"), list) else []
+    return {**out, "saved": True}
 
 
 def save_settings(s, tenant_id: int, body: dict, user_id: Optional[int]) -> tuple[dict, dict]:
@@ -127,9 +204,26 @@ def save_settings(s, tenant_id: int, body: dict, user_id: Optional[int]) -> tupl
     delivery = str(body.get("delivery", before["delivery"]))
     if delivery not in DELIVERIES:
         raise ValueError("Choose to attach the file or send a link.")
+    cadence = str(body.get("cadence", before["cadence"]))
+    if cadence not in CADENCES:
+        raise ValueError("Pick every day, every week or every month.")
+    week_day = int(body.get("week_day", before["week_day"]))
+    if week_day not in WEEK_DAYS:
+        raise ValueError("Pick a weekday, Monday to Friday.")
+    send_hour = int(body.get("send_hour", before["send_hour"]))
+    if not 0 <= send_hour <= 23:
+        raise ValueError("Pick a time of day.")
+    time_zone = str(body.get("time_zone", before["time_zone"]))
+    if time_zone not in TIME_ZONES:
+        raise ValueError("Pick UK time, India time or UTC.")
+    import executive_delivery as xd
+    raw_ids = body.get("user_ids", before["user_ids"])
+    user_ids = None if raw_ids is None else sorted({int(i) for i in raw_ids})
+    emails = xd.clean_emails(body.get("emails", before["emails"]))   # names a bad address
     auto = bool(body.get("auto_send", before["auto_send"]))
-    if auto and not people(s, tenant_id):
-        raise ValueError(NO_ONE)
+    if auto and not xd.recipients(s, tenant_id, user_ids, emails):
+        raise ValueError(NO_ONE if not people(s, tenant_id) and not emails
+                         else "Tick a login or type an email address to send the report to.")
 
     row = (s.query(MonthlyReportSetting)
            .filter(MonthlyReportSetting.tenant_id == tenant_id).first())
@@ -137,6 +231,11 @@ def save_settings(s, tenant_id: int, body: dict, user_id: Optional[int]) -> tupl
         row = MonthlyReportSetting(tenant_id=tenant_id)
         s.add(row)
     row.auto_send, row.send_day, row.file_format, row.delivery = auto, send_day, file_format, delivery
+    # Keeps what else is there (when the Sent reports list was cleared).
+    sec = dict(row.sections) if isinstance(row.sections, dict) else {}
+    row.sections = {**sec, "schedule": {"cadence": cadence, "week_day": week_day,
+                                        "send_hour": send_hour, "time_zone": time_zone},
+                    "user_ids": user_ids, "emails": emails}
     row.updated_by_user_id = user_id
     row.updated_at = datetime.utcnow()
     s.flush()
@@ -912,7 +1011,11 @@ def send(s, tenant_id: int, month: str, *, kind: str, user_id: Optional[int] = N
 
     monthly = cadence == "month"
     row = MonthlyReportSend(tenant_id=tenant_id, month=month, kind=kind,
-                            scheduled_key=f"{tenant_id}:{month}" if kind == "scheduled" else None,
+                            # A month keeps the key it always had; a day or a
+                            # week says which, so neither takes the other's.
+                            scheduled_key=((f"{tenant_id}:{month}" if monthly
+                                            else f"{tenant_id}:{cadence}:{month}")
+                                           if kind == "scheduled" else None),
                             file_format=fmt, delivery="attach" if file_format else cfg["delivery"],
                             sent_by_user_id=user_id, created_at=now,
                             # Which kind of period `month` is, from the start,
@@ -933,9 +1036,12 @@ def send(s, tenant_id: int, month: str, *, kind: str, user_id: Optional[int] = N
     # A link is only a link when the app's address is configured; otherwise
     # the file goes along so the email is never empty-handed.
     attach = bool(file_format) or cfg["delivery"] == "attach" or not link
+    # An address typed in has no login to sign in with: it always gets the
+    # file, never the link (as the Executive Report sends it).
+    outside = any(not p.get("user_id") for p in to)
     try:
         pack = build_pack(s, tenant_id, month, now=now, cadence=cadence)
-        attachments = files(pack, fmt, carrier) if attach else []
+        attachments = files(pack, fmt, carrier) if attach or outside else []
     except Exception:
         # Nothing has gone out: drop the claim so the next run can try again.
         s.rollback()
@@ -945,19 +1051,24 @@ def send(s, tenant_id: int, month: str, *, kind: str, user_id: Optional[int] = N
     named = title_of(pack)
     title = f"Operational Report — {named}"
     subject = SUBJECT_PREFIX + f"Operational Report · {named}"
-    body = (f"The {carrier} Operational Report for {named} is attached."
-            if attach else
-            f"The {carrier} Operational Report for {named} is ready. Sign in to open it.")
+    attached = f"The {carrier} Operational Report for {named} is attached."
     facts = headline(pack)
 
     results = []
     for p in to:
+        mine = bool(p.get("user_id"))
+        their_link = link if mine else None
+        if mine and not attach:
+            body = f"The {carrier} Operational Report for {named} is ready. Sign in to open it."
+        else:
+            body = attached
+        footer = REPORT_FOOTER if mine else f"Sent from {carrier} on Kavachio."
         try:
             mailer(p["email"], subject,
-                   notification_email_html(title, body, facts, link, "Open the Operational Report",
-                                           greeting_name=p.get("name"), footer=REPORT_FOOTER),
-                   text=_email_text(title, body, facts, link), account=NOTIFY_MAIL_ACCOUNT,
-                   attachments=attachments or None)
+                   notification_email_html(title, body, facts, their_link, "Open the Operational Report",
+                                           greeting_name=p.get("name"), footer=footer),
+                   text=_email_text(title, body, facts, their_link), account=NOTIFY_MAIL_ACCOUNT,
+                   attachments=(attachments if attach or not mine else None) or None)
             results.append({**{k: p.get(k) for k in ("user_id", "email", "name")},
                             "delivered": True, "error": None})
         except Exception as e:  # noqa: BLE001 — one bad address must not stop the rest
@@ -996,27 +1107,73 @@ def _sent_title(r) -> str:
         return r.month
 
 
-def history(s, tenant_id: int, limit: int = 24, offset: int = 0) -> list[dict]:
-    """The reports sent, newest first — `limit` of them from `offset`, so the
-    Send & Schedule screen can page through every one (count_sends)."""
+def _cleared_at(s, tenant_id: int) -> Optional[datetime]:
+    """When the Sent reports list was last cleared (kept in the settings row's
+    `sections`, so no column was added), or None."""
+    from db import MonthlyReportSetting
+    row = (s.query(MonthlyReportSetting)
+           .filter(MonthlyReportSetting.tenant_id == tenant_id).first())
+    sec = row.sections if row is not None and isinstance(row.sections, dict) else {}
+    try:
+        return datetime.fromisoformat(sec["sent_cleared_at"]) if sec.get("sent_cleared_at") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _listed(s, tenant_id: int):
+    """The sends the Sent reports list shows: all but those cleared from it."""
     from db import MonthlyReportSend
-    rows = (s.query(MonthlyReportSend).filter(MonthlyReportSend.tenant_id == tenant_id)
+    q = s.query(MonthlyReportSend).filter(MonthlyReportSend.tenant_id == tenant_id)
+    cleared = _cleared_at(s, tenant_id)
+    return q.filter(MonthlyReportSend.created_at > cleared) if cleared else q
+
+
+def history(s, tenant_id: int, limit: int = 24, offset: int = 0) -> list[dict]:
+    """The reports sent, newest first, with who they went to and who sent them
+    — `limit` of them from `offset` (count_sends), leaving out the ones
+    cleared from the list (clear_history)."""
+    from db import AppUser, MonthlyReportSend
+    rows = (_listed(s, tenant_id)
             .order_by(MonthlyReportSend.created_at.desc(), MonthlyReportSend.id.desc())
             .offset(max(offset, 0)).limit(limit).all())
+    senders = {u.id: ((u.full_name or "").strip() or u.email) for u in s.query(AppUser).filter(
+        AppUser.id.in_({r.sent_by_user_id for r in rows if r.sent_by_user_id} or {0}))}
     return [{"id": r.id, "month": r.month, "kind": r.kind,
              "cadence": _sent_cadence(r), "title": _sent_title(r),
-             "sent_at": r.created_at.isoformat() if r.created_at else None,
+             "sent_at": r.created_at.isoformat() + "Z" if r.created_at else None,
+             "sent_by": senders.get(r.sent_by_user_id) if r.sent_by_user_id else None,
              "file_format": r.file_format, "delivery": r.delivery,
-             "people": len(r.recipients or []), "delivered": r.delivered, "failed": r.failed,
+             "people": len(r.recipients or []),
+             "recipients": [{k: x.get(k) for k in ("name", "email", "delivered")}
+                            for x in (r.recipients or [])],
+             "delivered": r.delivered, "failed": r.failed,
              "status": _status(r.delivered, r.failed) if r.pack is not None else "failed",
              "has_file": r.pack is not None} for r in rows]
 
 
 def count_sends(s, tenant_id: int) -> int:
-    """How many reports this carrier has been sent, for the history's pages."""
-    from db import MonthlyReportSend
-    return (s.query(MonthlyReportSend)
-            .filter(MonthlyReportSend.tenant_id == tenant_id).count())
+    """How many reports the Sent reports list holds, for its pages."""
+    return _listed(s, tenant_id).count()
+
+
+def clear_history(s, tenant_id: int, now: Optional[datetime] = None) -> int:
+    """Clear the Sent reports list, as the Executive Report's does. Nothing is
+    deleted: the sends, who they went to and their files are kept, and
+    sent_keys still counts them, so the schedule never sends one twice.
+    Returns how many were hidden; the caller commits."""
+    from db import MonthlyReportSetting
+    n = count_sends(s, tenant_id)
+    if not n:
+        return 0
+    row = (s.query(MonthlyReportSetting)
+           .filter(MonthlyReportSetting.tenant_id == tenant_id).first())
+    if row is None:
+        row = MonthlyReportSetting(tenant_id=tenant_id)
+        s.add(row)
+    sec = dict(row.sections) if isinstance(row.sections, dict) else {}
+    row.sections = {**sec, "sent_cleared_at": (now or datetime.utcnow()).isoformat()}
+    s.flush()
+    return n
 
 
 def sent_months(s, tenant_id: int) -> set[str]:
@@ -1027,31 +1184,47 @@ def sent_months(s, tenant_id: int) -> set[str]:
                     MonthlyReportSend.kind == "scheduled").all()}
 
 
+def sent_keys(s, tenant_id: int) -> set[str]:
+    """'<cadence>:<period>' of every automatic send that has gone."""
+    from db import MonthlyReportSend
+    return {f"{(o or {}).get('cadence') or 'month'}:{m}"
+            for m, o in s.query(MonthlyReportSend.month, MonthlyReportSend.options)
+            .filter(MonthlyReportSend.tenant_id == tenant_id,
+                    MonthlyReportSend.kind == "scheduled").all()}
+
+
 def run_due(s, now: Optional[datetime] = None,
             mailer: Optional[Callable[..., None]] = None) -> int:
-    """The daily job: send every carrier's report that is due today. Returns
-    how many went out. One carrier's failure never stops the others."""
+    """The hourly job: send every carrier's report that is due now — every
+    day, week or month, from the hour it picked on its own clock — to the
+    logins it ticked and the addresses it typed. Returns how many went out.
+    One carrier's failure never stops the others."""
     from db import ActivityEvent, MonthlyReportSetting
     now = now or datetime.utcnow()
     sent = 0
-    for cfg in (s.query(MonthlyReportSetting)
+    for row in (s.query(MonthlyReportSetting)
                 .filter(MonthlyReportSetting.auto_send.is_(True)).all()):
-        month = due_now(cfg.send_day, now.date())
-        if month is None:
+        tid = row.tenant_id
+        cfg = settings(s, tid)
+        due = schedule_due(cfg, now)
+        if due is None or f"{due[0]}:{due[1]}" in sent_keys(s, tid):
             continue
-        tid = cfg.tenant_id
+        cadence, period = due
         try:
-            r = send(s, tid, month, kind="scheduled", now=now, mailer=mailer)
+            r = send(s, tid, period, kind="scheduled", now=now, mailer=mailer, cadence=cadence,
+                     user_ids=cfg["user_ids"], emails=cfg["emails"])
         except Exception:  # noqa: BLE001
-            log.exception("operational report: carrier %s, %s failed", tid, month)
+            log.exception("operational report: carrier %s, %s %s failed", tid, cadence, period)
             s.rollback()
             continue
         if r is None:
             continue
+        details = {"month": period, "kind": "scheduled",
+                   "delivered": r["delivered"], "failed": r["failed"]}
+        if cadence != "month":
+            details.update(cadence=cadence, period=r["title"])
         s.add(ActivityEvent(tenant_id=tid, actor="system", action="monthly_report_sent",
-                            target=f"monthly_report:{month}",
-                            details={"month": month, "kind": "scheduled",
-                                     "delivered": r["delivered"], "failed": r["failed"]}))
+                            target=f"monthly_report:{period}", details=details))
         s.commit()
         sent += 1
     return sent

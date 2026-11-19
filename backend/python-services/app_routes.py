@@ -5824,10 +5824,12 @@ def _monthly_delivery_view(s, tid: int, page: Optional[int] = None,
     and `sends_total` counts them all; without it, the newest 24 as before."""
     import report_delivery as rd
     cfg = rd.settings(s, tid)
-    nxt = (rd.next_send(cfg["send_day"], datetime.utcnow().date(), rd.sent_months(s, tid))
+    # Every day, week or month, from the hour picked on the carrier's clock.
+    nxt = (rd.next_run(cfg, datetime.utcnow(), rd.sent_keys(s, tid))
            if cfg["auto_send"] else None)
     out = {"settings": cfg, "recipients": rd.people(s, tid), "next": nxt,
-           "send_days": list(rd.SEND_DAYS)}
+           "send_days": list(rd.SEND_DAYS),
+           "time_zones": [{"key": k, "label": v} for k, v in rd.TIME_ZONES.items()]}
     if page is None:
         out["sends"] = rd.history(s, tid)
         return out
@@ -5851,6 +5853,14 @@ class MonthlyDeliveryBody(BaseModel):
     send_day: Optional[int] = None
     file_format: Optional[str] = None
     delivery: Optional[str] = None
+    # Every day, week or month; the weekday (0 = Monday) for a week; the hour
+    # (0–23) and whose clock; the logins ticked and other addresses typed.
+    cadence: Optional[str] = None
+    week_day: Optional[int] = None
+    send_hour: Optional[int] = None
+    time_zone: Optional[str] = None
+    user_ids: Optional[list[int]] = None
+    emails: Optional[list[str]] = None
 
 
 @router.put("/reports/monthly/delivery")
@@ -5959,6 +5969,26 @@ def monthly_report_file(mga: str, month: Optional[str] = None, format: str = "pd
         fmt = "excel" if format in ("excel", "xlsx") else "pdf"
         name, data, mime = rd.files(pack, fmt, rd.carrier_name(s, tid), " · ".join(scope))[0]
         return _report_file_response(name, data, mime)
+
+
+@router.post("/reports/monthly/sends/clear")
+def clear_monthly_sends(mga: str,
+                        principal: Principal = Depends(require_carrier_admin("clear the sent reports list"))):
+    """Clear the Sent reports list, as the Executive Report's. The sends are
+    hidden from it, not deleted: their records and files are kept, and the
+    schedule never sends one twice."""
+    import report_delivery as rd
+    from audit import actor_columns
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        n = rd.clear_history(s, tid)
+        if n:
+            s.add(ActivityEvent(tenant_id=tid, actor=_actor(principal),
+                                action="monthly_report_sends_cleared",
+                                target="monthly_report:sends", details={"cleared": n},
+                                **actor_columns(principal)))
+        s.commit()
+        return _monthly_delivery_view(s, tid)
 
 
 @router.get("/reports/monthly/sends/{send_id}/file")

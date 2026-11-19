@@ -198,3 +198,17 @@ export function periodRunning(cadence: ReportCadence, period: string): boolean {
   }
   return (period.split("..")[1] ?? "") >= today;
 }
+
+// --- the automatic send (Send & Schedule) -------------------------------------
+
+export const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+
+/** An hour of the day: 9 → "09:00". */
+export const fmtHour = (h: number) => `${String(h).padStart(2, "0")}:00`;
+
+/** "every day", "every Wednesday", "on the 3rd working day of each month". */
+export function scheduleWords(s: { cadence: "day" | "week" | "month"; week_day: number; send_day: number }): string {
+  if (s.cadence === "day") return "every day";
+  if (s.cadence === "week") return `every ${WEEKDAYS[s.week_day] ?? "Monday"}`;
+  return `on the ${ordinal(s.send_day)} working day of each month`;
+}

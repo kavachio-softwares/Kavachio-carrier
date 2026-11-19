@@ -71,7 +71,6 @@ import MonthlyReport from "./pages/MonthlyReport";
 import ExecutiveReport from "./pages/ExecutiveReport";
 import PartnerPerformance from "./pages/PartnerPerformance";
 import ProgrammeManagement from "./pages/ProgrammeManagement";
-import MonthlySendSchedule from "./pages/MonthlySendSchedule";
 import PolicySearch from "./pages/PolicySearch";
 import FinancialSummary from "./pages/FinancialSummary";
 // Open Problems (44) hidden 17 Nov 2026 — page kept, route switched off.
@@ -278,8 +277,9 @@ export default function App() {
             Exception Resolution (MOPR 41) as three tabs of one screen. The old
             paths of the two detail screens open their tab. */}
         <Route path="/monthly-report" element={<MonthlyReport />} />
-        {/* 42.2 — how the report is sent; opened from the Overview, not a tab. */}
-        <Route path="/monthly-report/send-schedule" element={<MonthlySendSchedule />} />
+        {/* 42.2 — how the report is sent is now the Schedule popup and the Sent
+            reports drawer on the report itself; the old page's path opens it. */}
+        <Route path="/monthly-report/send-schedule" element={<Navigate to="/monthly-report" replace />} />
         <Route path="/monthly-report/:tab" element={<MonthlyReport />} />
         <Route path="/data-quality" element={<Navigate to="/monthly-report/data-quality" replace />} />
         <Route path="/exception-resolution" element={<Navigate to="/monthly-report/exception-resolution" replace />} />

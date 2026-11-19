@@ -8,7 +8,7 @@
 // switch as the Executive Report's — Daily, Weekly, Monthly or Custom dates
 // (backend monthly_report.window); Monthly is the report as it always was, and
 // its address (?month=) still opens it. Beside the tabs sit the report's own
-// buttons (MonthlyReportActions): download, Send & Schedule, send now.
+// buttons (MonthlyReportActions): download, Sent reports, Schedule, Send.
 import { useCallback, useMemo, useState } from "react";
 import { Link, Navigate, useParams, useSearchParams } from "react-router-dom";
 import { BarChart3, LayoutDashboard, Timer } from "lucide-react";
