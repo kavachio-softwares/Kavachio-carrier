@@ -55,6 +55,7 @@ from segment_routes import router as segment_router
 # at all because the emailed token is the credential (esign_routes.py).
 from esign_routes import router as esign_router, public_router as esign_public_router
 from audit_routes import router as audit_router
+from audit_history_routes import router as audit_history_router
 # Reinsurance treaties (Phase 26): a treaty's structure and the programmes it
 # protects (carrier side), and the reinsurer's private read-only link, unlocked
 # by an emailed one-time code (/treaty-view/…, no login).
@@ -169,6 +170,7 @@ app.include_router(ceded_router)
 # back, which audit_feed.scope_for decides — so there is no role guard here to
 # fall out of step with it.
 app.include_router(audit_router)
+app.include_router(audit_history_router)
 # The secure correction link — no login, the emailed token is the credential.
 app.include_router(fix_link_router)
 app.include_router(submission_router)
@@ -359,7 +361,8 @@ async def _db_audit_middleware(request, call_next):
                 # A download only when the Download button asked for the file;
                 # a screen loading it to show it is a view (audit.DOWNLOAD_HEADER).
                 action = "download" if request.headers.get(_audit.DOWNLOAD_HEADER) else "view"
-                _asyncio.ensure_future(_audit_access(auth_header, path, ip, action))
+                _asyncio.ensure_future(_audit_access(
+                    auth_header, _audit.access_resource(path, request.query_params), ip, action))
     except Exception:  # noqa: BLE001 — auditing must never break the request
         pass
     return response

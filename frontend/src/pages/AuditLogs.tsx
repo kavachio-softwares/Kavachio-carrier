@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Download, Paperclip, Search } from "lucide-react";
+import { Activity, Download, Eye, Paperclip, Search, ShieldCheck, Users } from "lucide-react";
 import {
   downloadAuditLogs, downloadCorrectionEvidence, getAuditGroup, getAuditLogs, getAuditOptions,
   type AuditOptions, type AuditQuery, type AuditRow,
@@ -11,6 +11,10 @@ import { useServerList } from "../hooks/useServerList";
 import { Pagination } from "../components/Pagination";
 import { fmtDateTime } from "../utils/date";
 import { InfoTip } from "../components/InfoTip";
+import { getTrailSummary, type TrailSummary } from "../api/auditHistory";
+import {
+  ContractHistory, DownloadsViews, Facts, FileVersions, PartnerSubmissions, SidePanel, Tile, tiles,
+} from "./AuditHistoryTabs";
 
 // 200 a page, read by scrolling the table itself (its header stays put); the
 // page controls under it move between pages of 200.
@@ -62,6 +66,18 @@ function rangeDates(key: string, from: string, to: string): { from?: string; to?
   return { from: daysAgo(Number(key)), to: localDay(new Date()) };
 }
 
+/** The tabs, in the order a reader asks: what happened, who looked at what,
+ *  then the histories of files, contracts and versions (audit_history.py). */
+const TABS = [
+  { key: "trail", label: "Audit Trails", sub: "Track all changes, approvals and activities across the system." },
+  { key: "access", label: "Downloads & Views", sub: "Who opened or downloaded which data, and when." },
+  { key: "submissions", label: "Partner Submission History",
+    sub: "Every file a broker owed, across all programmes, and what was done when one was late." },
+  { key: "contracts", label: "Contract History", sub: "Every draft, change, renewal and status change on each contract." },
+  { key: "versions", label: "File Versions", sub: "Every version of every file a broker sent. Earlier versions are always kept." },
+] as const;
+type TabKey = typeof TABS[number]["key"];
+
 /**
  * Audit Logs — who did what, when, and how it ended.
  *
@@ -77,8 +93,16 @@ export default function AuditLogs() {
   const [to, setTo] = useState(localDay(new Date()));
   const [actor, setActor] = useState("");
   // A notice can open this page on one Action type ("?action=contracts").
-  const [search] = useSearchParams();
+  const [search, setSearch] = useSearchParams();
+  const tab: TabKey = (TABS.find(x => x.key === search.get("tab"))?.key ?? "trail") as TabKey;
+  const pickTab = (k: TabKey) => {
+    const next = new URLSearchParams(search);
+    if (k === "trail") next.delete("tab"); else next.set("tab", k);
+    setSearch(next, { replace: true });
+  };
   const [action, setAction] = useState(search.get("action") || "all");
+  const [opened, setOpened] = useState<AuditRow | null>(null);
+  const [sum, setSum] = useState<TrailSummary | null>(null);
   const [evidenceError, setEvidenceError] = useState("");
   const [typed, setTyped] = useState("");
   const q = useDebouncedValue(typed, 300);
@@ -94,6 +118,12 @@ export default function AuditLogs() {
     () => ({ ...rangeDates(range, from, to), actor, action, q }),
     [range, from, to, actor, action, q],
   );
+
+  useEffect(() => {
+    if (tab !== "trail") return;
+    setSum(null);
+    getTrailSummary(query).then(setSum).catch(() => setSum(null));
+  }, [JSON.stringify(query), tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const list = useServerList<AuditRow, { seat?: string }>(
     (page, size) => getAuditLogs(query, page, size)
@@ -121,8 +151,9 @@ export default function AuditLogs() {
         <div className="page-head">
           <div className="t">
             <h2>Audit Logs <InfoTip text={SUBTITLE[seat] ?? "Who did what, when, and how it ended."} /></h2>
+            <p>{TABS.find(x => x.key === tab)?.sub}</p>
           </div>
-          <div className="actions" style={{ display: "flex", gap: 8 }}>
+          {tab === "trail" && <div className="actions" style={{ display: "flex", gap: 8 }}>
             {/* Two formats because they are read two different ways: CSV feeds
                 a system, Excel is what a person opens to filter and keep. */}
             <button className="btn sm" disabled={!!busy || list.total === 0}
@@ -133,8 +164,24 @@ export default function AuditLogs() {
               onClick={() => save("xlsx")}>
               <Download size={13} /> {busy === "xlsx" ? "Preparing…" : "Download Excel"}
             </button>
-          </div>
+          </div>}
         </div>
+
+        <div className="audit-tabs" role="tablist" style={{ display: "flex", gap: 4, flexWrap: "wrap",
+             borderBottom: "1px solid var(--p-border)", marginBottom: 14 }}>
+          {TABS.map(x => (
+            <button key={x.key} type="button" role="tab" aria-selected={tab === x.key} onClick={() => pickTab(x.key)}
+              style={{ background: "none", border: "none", padding: "8px 12px", cursor: "pointer", fontSize: 14,
+                       fontWeight: tab === x.key ? 700 : 500,
+                       color: tab === x.key ? "var(--p-brand, #077282)" : "var(--p-muted)",
+                       borderBottom: `2px solid ${tab === x.key ? "var(--p-brand, #077282)" : "transparent"}`,
+                       marginBottom: -1 }}>{x.label}</button>))}
+        </div>
+
+        {tab === "submissions" ? <PartnerSubmissions />
+          : tab === "contracts" ? <ContractHistory />
+          : tab === "versions" ? <FileVersions />
+          : (<>
 
         <div className="card" style={{ marginBottom: 14 }}>
           {/* flex-end: every control is labelled, so they share one bottom line
@@ -163,24 +210,24 @@ export default function AuditLogs() {
             )}
 
             <label className="fbar-field">
-              <span className="sub">Actor / Role</span>
+              <span className="sub">Person or company</span>
               <select className="fbar-select" aria-label="Role or actor" value={actor}
                 onChange={e => setActor(e.target.value)}>
-                <option value="">Everyone in your reach</option>
+                <option value="">Everyone</option>
                 {opts?.actors.map(a => (
                   <option key={a.key} value={a.key}>{a.label} — {a.role}</option>
                 ))}
               </select>
             </label>
 
-            <label className="fbar-field">
+            {tab === "trail" && <label className="fbar-field">
               <span className="sub">Action type</span>
               <select className="fbar-select" aria-label="Action type" value={action}
                 onChange={e => setAction(e.target.value)}>
                 {(opts?.action_groups ?? [{ key: "all", label: "All actions", actions: [] }])
                   .map(g => <option key={g.key} value={g.key}>{g.label}</option>)}
               </select>
-            </label>
+            </label>}
 
             {/* Labelled like the three dropdowns, or it sits a caption-height
                 higher than them. */}
@@ -201,6 +248,20 @@ export default function AuditLogs() {
               }}>Clear filters</span>
             )}
           </div>
+        </div>
+
+        {tab === "access" ? <DownloadsViews query={query} /> : (<>
+        <div style={tiles(5)}>
+          <Tile icon={Activity} label="Total activities" value={sum?.activities} colour="#7c3aed"
+            info="Everything recorded in these dates that matches the filters." />
+          <Tile icon={Users} label="People" value={sum?.people} colour="#2563eb"
+            info="Different people who did something in these dates." />
+          <Tile icon={Eye} label="Data viewed" value={sum?.viewed} colour="#0d9488"
+            info="Times someone opened a file, a policy, a contract document or a report. See them on Downloads & Views." />
+          <Tile icon={Download} label="Downloads" value={sum?.downloaded} colour="#d97706"
+            info="Times someone saved a file, a contract or a report to their computer." />
+          <Tile icon={ShieldCheck} label="Rule changes" value={sum?.rule_changes} colour="#16a34a"
+            info="Checks that were added, changed, switched on or off, or approved." />
         </div>
 
         {evidenceError && (
@@ -234,7 +295,8 @@ export default function AuditLogs() {
                   </thead>
                   <tbody>
                     {list.items.map(r => (
-                      <tr key={r.id}>
+                      <tr key={r.id} onClick={() => setOpened(r)} style={{ cursor: "pointer" }}
+                        title="Click to see the details">
                         <td className="muted" style={{ whiteSpace: "nowrap" }}>
                           {fmtDateTime(r.at)}
                         </td>
@@ -257,7 +319,7 @@ export default function AuditLogs() {
                               is one click away, exactly as it was recorded. */}
                           {r.group && (
                             <button type="button" className="linkish audit-group-link"
-                              onClick={() => setOpenGroup(r)}>
+                              onClick={e => { e.stopPropagation(); setOpenGroup(r); }}>
                               View all {r.group.count} {r.group.noun ?? "changes"} →
                             </button>
                           )}
@@ -266,7 +328,8 @@ export default function AuditLogs() {
                           {r.evidence && (
                             <button type="button" className="linkish audit-group-link"
                               style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
-                              onClick={() => {
+                              onClick={e => {
+                                e.stopPropagation();
                                 setEvidenceError("");
                                 downloadCorrectionEvidence(r.evidence!.event_id, r.evidence!.filename)
                                   .catch(async e => setEvidenceError(
@@ -298,8 +361,24 @@ export default function AuditLogs() {
             </>
           )}
         </div>
+        </>)}
+        </>)}
       </div>
       <GroupDrawer row={openGroup} query={query} onClose={() => setOpenGroup(null)} />
+      <SidePanel open={!!opened} title="Event details" sub={opened && fmtDateTime(opened.at)}
+        onClose={() => setOpened(null)}>
+        {opened && <Facts rows={[
+          ["Date and time", fmtDateTime(opened.at)],
+          ["Person", <><b>{opened.actor}</b>{opened.actor_role ? ` · ${opened.actor_role}` : ""}</>],
+          ["Organisation", opened.actor_org],
+          ...(showCarrier ? [["Carrier", opened.carrier] as [string, string | null]] : []),
+          ["What they did", opened.action_label],
+          ["What exactly", opened.detail],
+          ["On", opened.target && opened.target !== "—"
+            ? `${opened.target_kind ? `${opened.target_kind}: ` : ""}${opened.target}` : null],
+          ["Result", <span className={`badge ${TONE_CLASS[opened.tone] ?? "b-mut"}`}><span className="d" />{opened.status}</span>],
+        ]} />}
+      </SidePanel>
     </div>
   );
 }

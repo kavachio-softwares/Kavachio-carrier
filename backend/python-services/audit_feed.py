@@ -66,7 +66,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import and_, case, cast, desc, func, or_
+from sqlalchemy import and_, case, cast, desc, func, not_, or_
 from sqlalchemy.dialects.postgresql import JSONB
 
 import audit_names
@@ -687,6 +687,15 @@ _ACCESS_WORDS = [
     (re.compile(r"^/admin/contract-period-evidence/\d+/file"),
      "Downloaded the evidence for a large contract date correction"),
     (re.compile(r"^/audit/export"),              "Downloaded the audit log"),
+    (re.compile(r"^/policies/detail"),           "Opened a policy"),
+    (re.compile(r"^/contracts/\d+/documents/\d+/view"), "Opened a contract document"),
+    (re.compile(r"^/contracts/\d+/documents/\d+/download"), "Downloaded a contract document"),
+    (re.compile(r"^/contracts/\d+/contract\.pdf"), "Downloaded the contract PDF"),
+    (re.compile(r"^/reports/executive/programmes/file"), "Downloaded the Programme Management Report"),
+    (re.compile(r"^/reports/executive/(sends/\d+/)?file"), "Downloaded the Executive Report"),
+    (re.compile(r"^/reports/monthly/(sends/\d+/)?file"), "Downloaded the Operational Report"),
+    (re.compile(r"^/reports/partner-performance/file"), "Downloaded the Partner Performance report"),
+    (re.compile(r"^/reinsurance/bordereaux/\d+/statements/\d+/file"), "Downloaded a reinsurer statement"),
     (re.compile(r"^/dwh"),                       "Opened the data model"),
 ]
 
@@ -699,7 +708,7 @@ def access_words(action: str, resource: Optional[str]) -> str:
     return action_words(action)
 
 
-DOWNLOAD_RESOURCES = r"(/file$|^/audit/export$)"
+DOWNLOAD_RESOURCES = r"(/file$|/download$|\.pdf$|^/audit/export$)"
 
 
 def _access_status(label: str) -> tuple[str, str]:
@@ -871,6 +880,13 @@ _RESOURCE_WORDS = [
     (re.compile(r"^/mapper/(\d+)/file$"),                  "Mapper source file #{id}"),
     (re.compile(r"^/dwh$"),                                "The data model"),
     (re.compile(r"^/audit/export$"),                       "The audit trail"),
+    (re.compile(r"^/contracts/(\d+)/documents/\d+/(view|download)$"), "Contract #{id} · a document"),
+    (re.compile(r"^/contracts/(\d+)/contract\.pdf$"),     "Contract #{id}"),
+    (re.compile(r"^/reports/executive/programmes/file$"),  "Programme Management Report"),
+    (re.compile(r"^/reports/executive/(?:sends/\d+/)?file$"), "Executive Report"),
+    (re.compile(r"^/reports/monthly/(?:sends/\d+/)?file$"), "Operational Report"),
+    (re.compile(r"^/reports/partner-performance/file$"),   "Partner Performance report"),
+    (re.compile(r"^/policies/detail\?policy=(.+)$"),       "Policy {id}"),
 ]
 
 
@@ -1360,6 +1376,11 @@ class Filters:
     # auth_audit. Kept out of the unfiltered feed so the trail reads as things
     # people did; the "Session renewals" action type brings it back.
     include_session_renewals: bool = False
+    # Downloads & Views tab (audit_history): every access row, views too —
+    # the trail itself keeps to genuine downloads. `access_kind` narrows it
+    # to "view" or "download".
+    views: bool = False
+    access_kind: str = ""
 
 
 def _actor_user_col(model):
@@ -2185,8 +2206,12 @@ def _rows(s, sc: Scope, f: Filters, limit: int,
             # were all written as "download", so for those the path decides:
             # a /file (or the audit export) is a download, the exceptions
             # screen loading /export/downloads/{id} or its /data is a view.
-            q = q.filter(AccessLog.action == "download",
-                         AccessLog.resource.op("~")(DOWNLOAD_RESOURCES))
+            downloaded = and_(AccessLog.action == "download",
+                              AccessLog.resource.op("~")(DOWNLOAD_RESOURCES))
+            if not f.views or f.access_kind == "download":
+                q = q.filter(downloaded)
+            elif f.access_kind == "view":
+                q = q.filter(not_(downloaded))
             total += q.count()
             for e in q.order_by(desc(AccessLog.created_at), desc(AccessLog.id)).limit(limit):
                 out.append({

@@ -617,7 +617,27 @@ _ACCESS_PATHS = [
     re.compile(r"^/admin/contract-period-evidence/\d+/file$"),
     # Taking the audit trail out of the building is itself worth a line in it.
     re.compile(r"^/audit/export$"),
+    # Who opened or downloaded which data (task 49.1): a policy, a contract's
+    # documents and PDF, and the report files.
+    re.compile(r"^/policies/detail$"),
+    re.compile(r"^/contracts/\d+/documents/\d+/(view|download)$"),
+    re.compile(r"^/contracts/\d+/contract\.pdf$"),
+    re.compile(r"^/reports/executive/(programmes/|sends/\d+/)?file$"),
+    re.compile(r"^/reports/monthly/(sends/\d+/)?file$"),
+    re.compile(r"^/reports/partner-performance/file$"),
+    re.compile(r"^/reinsurance/bordereaux/\d+/statements/\d+/file$"),
 ]
+
+# Reads whose path alone does not say WHICH data: the query names it.
+_NAMED_BY_QUERY = {"/policies/detail": "policy"}
+
+
+def access_resource(path: str, query) -> str:
+    """The access_log resource for a read: the path, plus the one query value
+    that names what was read ("/policies/detail?policy=P-1")."""
+    key = _NAMED_BY_QUERY.get(path)
+    val = (query.get(key) if key and query is not None else None) or ""
+    return f"{path}?{key}={str(val).strip()[:120]}" if val else path
 
 def is_access_path(path: str) -> bool:
     return any(rx.match(path) for rx in _ACCESS_PATHS)
