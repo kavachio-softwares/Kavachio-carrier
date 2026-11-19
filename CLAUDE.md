@@ -24,7 +24,7 @@ Hierarchy: Kavachio → Carrier (tenant) → Programme → Broker → Contract �
 | `backend/python-services/` | **The live backend.** FastAPI, entry `main.py`. SQLAlchemy ORM in `db.py`, plain-SQL `migrations/`, DuckDB checks, Gemini AI steps, `test_*.py` (pytest). |
 | `frontend/` | React 18 + TypeScript + Vite + Tailwind. Routes in `src/App.tsx`, roles in `src/access.ts` / `src/auth.ts`. |
 | `backend/Microservice/` | Old September split that has drifted. **Do not edit**; fixes there never reach the live app. |
-| `backend/assests/` | Bundled reporting standards (spelled `assests`). |
+| `backend/python-services/assests/` | Bundled reporting standards, e.g. the Lloyd's V5.2 workbook (spelled `assests`). Must stay inside `backend/python-services/`: the Docker image is built from that folder only. |
 
 ## Commands
 
