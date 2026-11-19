@@ -243,19 +243,22 @@ async def _loop() -> None:
             except Exception:  # noqa: BLE001 — a bad run must not kill the loop
                 log.exception("C-9 sweep run failed; will retry next cycle")
             # Its own step: a report that fails to send must not cost the
-            # deadline reminders, nor they the report.
-            try:
-                n = await loop.run_in_executor(None, _send_monthly_reports)
-                if n:
-                    log.info("Monthly report: sent for %s carrier(s)", n)
-            except Exception:  # noqa: BLE001
-                log.exception("Monthly report run failed; will retry next cycle")
-            try:
-                n = await loop.run_in_executor(None, _send_executive_reports)
-                if n:
-                    log.info("Executive report: sent for %s carrier(s)", n)
-            except Exception:  # noqa: BLE001
-                log.exception("Executive report run failed; will retry next cycle")
+            # deadline reminders, nor they the report. Phase 2 reports are not
+            # sent at all while PHASE2_ENABLED is off (phase2.py).
+            from phase2 import phase2_enabled
+            if phase2_enabled():
+                try:
+                    n = await loop.run_in_executor(None, _send_monthly_reports)
+                    if n:
+                        log.info("Monthly report: sent for %s carrier(s)", n)
+                except Exception:  # noqa: BLE001
+                    log.exception("Monthly report run failed; will retry next cycle")
+                try:
+                    n = await loop.run_in_executor(None, _send_executive_reports)
+                    if n:
+                        log.info("Executive report: sent for %s carrier(s)", n)
+                except Exception:  # noqa: BLE001
+                    log.exception("Executive report run failed; will retry next cycle")
             # Sleep until the next scheduled hour, then run again.
             await asyncio.sleep(_seconds_until_next_run(datetime.now(timezone.utc), hour))
     except asyncio.CancelledError:

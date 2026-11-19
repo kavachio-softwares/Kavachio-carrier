@@ -127,6 +127,18 @@ def _program_access(s, p: Principal, program_id: int) -> tuple[Program, int]:
     return prog, prog.tenant_id
 
 
+TREATY = "insurer_reinsurer"
+
+
+def _treaties_on() -> bool:
+    """Reinsurance treaties (insurer ↔ reinsurer contracts) are Phase 2. While
+    PHASE2_ENABLED is off (phase2.py) they do not exist as far as this module
+    is concerned: not listed, not offered, not created, and every route on
+    one answers 404 — so no signing link, renewal or email can start."""
+    from phase2 import phase2_enabled
+    return phase2_enabled()
+
+
 def _contract_access(s, p: Principal, contract_id: int) -> Contract:
     """Fetch a contract the caller is allowed to see.
 
@@ -138,7 +150,7 @@ def _contract_access(s, p: Principal, contract_id: int) -> Contract:
     """
     assert_can_open_contract(p)
     c = s.get(Contract, contract_id)
-    if not c:
+    if not c or ((c.contract_type or "") == TREATY and not _treaties_on()):
         raise HTTPException(404, "contract not found")
     if p.is_broker:
         # A broker sees only its OWN contracts — a shared programme carries
@@ -1490,7 +1502,10 @@ def contract_types(_p: Principal = Depends(current_principal)):
     cannot disagree. Adding a mandatory field is a one-line change in
     contract_types.py and both sides pick it up.
     """
-    return {"types": ct.public_spec(), "default": ct.DEFAULT_TYPE,
+    types = ct.public_spec()
+    if not _treaties_on():
+        types = [t for t in types if t.get("key") != TREATY]
+    return {"types": types, "default": ct.DEFAULT_TYPE,
             "lifecycle": list(ct.LIFECYCLE),
             # The limits you agreed — each a question, an answer, and what
             # happens when a file breaks it. Served, not restated client-side.
@@ -1626,6 +1641,10 @@ def list_contracts(
             query = query.filter(Contract.broker_party_id == counterparty_id)
         if contract_type:
             query = query.filter(Contract.contract_type == contract_type)
+        if not _treaties_on():
+            # NULL is kept: an untyped legacy row is not a treaty.
+            query = query.filter(or_(Contract.contract_type.is_(None),
+                                     Contract.contract_type != TREATY))
         if treaty_type:
             from db import Treaty
             query = query.join(Treaty, Treaty.contract_id == Contract.id) \
@@ -1890,6 +1909,9 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
       * a BROKER gets a draft to finish and submit, and the DB trigger — not
         this code — marks it pending the carrier's decision.
     """
+    # A treaty is Phase 2 (see _treaties_on): refused while it is switched off.
+    if (body.contract_type or "") == TREATY and not _treaties_on():
+        raise HTTPException(400, "Reinsurance treaties are not available.")
     # Raising one is the same act as holding one: a contract Kavachio could
     # create is a contract it could not then open (_contract_access), which is
     # not a state worth having.
@@ -2291,7 +2313,7 @@ def wording_preview(body: WordingPreviewIn,
             dropped_sections=body.dropped_sections,
             dropped_terms=body.dropped_terms)
 
-    if body.treaty and (body.contract_type or "") == "insurer_reinsurer":
+    if body.treaty and (body.contract_type or "") == "insurer_reinsurer" and _treaties_on():
         # The treaty's clauses, from the structure as it stands on screen.
         # Lenient: a half-typed panel previews what it has.
         import treaty_types as tt

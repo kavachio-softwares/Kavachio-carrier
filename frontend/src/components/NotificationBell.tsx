@@ -5,6 +5,7 @@ import { Bell, X } from "lucide-react";
 import { currentMga, isBrokerSeat } from "../auth";
 import { useCarrierSeat } from "../hooks/useCarrierSeat";
 import { getActivity, type ActivityEvent } from "../api/activity";
+import { phase2Enabled } from "../features";
 import { listPrograms, type ProgramLite } from "../api/calendar";
 import { flowUrl } from "./ProgrammeStepper";
 
@@ -143,7 +144,13 @@ export const NOTIFY: Record<string, {
     seat: "user",
     label: "Broker turned down", tone: "#c0392b", to: "/brokers/requests" },
 };
-export const NOTIFY_ACTIONS = Object.keys(NOTIFY);
+/** Late-file case events (MOPR 39.2) are Phase 2: not asked for, so not
+ *  shown, while the Phase 2 switch is off (features.ts). A function, not a
+ *  constant: the switch is read after this module loads. */
+const PHASE2_NOTIFY = new Set(["submission_delinquent", "submission_case_reopened",
+  "submission_dispute_raised", "submission_dispute_waiting"]);
+export const notifyActions = (): string[] =>
+  Object.keys(NOTIFY).filter(k => phase2Enabled() || !PHASE2_NOTIFY.has(k));
 /** Every outstanding reminder, not a recent-activity sample: a deadline stays
  *  true until it is met, so the list must not have a tail that falls off. */
 export const NOTIFY_LIMIT = 500;
@@ -244,7 +251,7 @@ export default function NotificationBell({
     // worth making.
     if (isBrokerSeat()) return;
     let live = true;
-    getActivity(mga, NOTIFY_LIMIT, NOTIFY_ACTIONS)
+    getActivity(mga, NOTIFY_LIMIT, notifyActions())
       .then(e => { if (live) setEvents(e); }).catch(() => {});
     return () => { live = false; };
   }, [mga]);

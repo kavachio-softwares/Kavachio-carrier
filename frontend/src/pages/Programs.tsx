@@ -27,6 +27,7 @@ import { Button } from "../components/ui/Button";
 import { Sk } from "../components/ui/Skeleton";
 import { getHierarchy, onProgramme, type HierarchyProgramme } from "../api/hierarchy";
 import { getTreatyCounts } from "../api/treaty";
+import { phase2Enabled } from "../features";
 import { Pagination } from "../components/Pagination";
 import { ProgrammeStepper, flowUrl, nextStep, programmeSteps, reinsuranceUrl } from "../components/ProgrammeStepper";
 import { fmtDate, localDayStart, localDayEnd } from "../utils/date";
@@ -128,7 +129,10 @@ export default function Programs() {
   // than in the red the stepper keeps for what stops files.
   const [treatyCounts, setTreatyCounts] = useState<Record<string, number>>({});
   const [treatiesInUse, setTreatiesInUse] = useState<Record<string, number>>({});
+  // Reinsurance is Phase 2: no column, and nothing asked, while it is off.
+  const showReinsurance = phase2Enabled();
   useEffect(() => {
+    if (!showReinsurance) return;
     getTreatyCounts().then(r => { setTreatyCounts(r.counts); setTreatiesInUse(r.inUse); })
       .catch(() => setTreatyCounts({}));
   }, []);
@@ -260,7 +264,7 @@ export default function Programs() {
                     <th>Programme</th>
                     {/* The programme's two sides, as on Configure Program. */}
                     <th>Broker</th>
-                    <th>Reinsurance</th>
+                    {showReinsurance && <th>Reinsurance</th>}
                     {/* Named for what the button is: the one thing that moves
                         this programme along the steps beside it. */}
                     <th className="text-right">Next step</th>
@@ -310,11 +314,13 @@ export default function Programs() {
                         {/* Each pill opens its own step for this programme. */}
                         <ProgrammeStepper programme={p} />
                       </td>
+                      {showReinsurance && (
                       <td className="whitespace-nowrap align-middle">
                         <ReinsurancePill to={reinsuranceUrl(p.id)}
                           treaties={treatyCounts[String(p.id)] ?? 0}
                           inUse={treatiesInUse[String(p.id)] ?? 0} />
                       </td>
+                      )}
                       <td className="whitespace-nowrap text-right align-middle">
                         {next ? (
                           <Button className="!px-3 !py-1.5 !text-[12.5px] !font-semibold" title={next.hint}
@@ -348,9 +354,12 @@ export default function Programs() {
             <p className="mt-3 border-t border-border pt-3 text-xs text-ink-muted">
               <b className="font-medium text-ink">Broker</b>: Brokers → Contract → Setup — green
               is done, red is what's stopping files.{" "}
+              {showReinsurance && <>
               <b className="font-medium text-ink">Reinsurance</b>: the treaties protecting the
               programme and how many have their reinsurance bordereau set up — optional,
-              and irrespective of the brokers. Click a row to go to where its brokers are
+              and irrespective of the brokers.{" "}
+              </>}
+              Click a row to go to where its brokers are
               up to, or click any pill to open it.
             </p>
           </Card>

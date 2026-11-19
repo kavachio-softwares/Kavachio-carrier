@@ -21,7 +21,7 @@ import { currentMga, isBrokerSeat, isKavachioAdmin } from "../auth";
 import { getActivity, type ActivityEvent } from "../api/activity";
 import { listPrograms, type ProgramLite } from "../api/calendar";
 import {
-  NOTIFY, NOTIFY_ACTIONS, NOTIFY_LIMIT, NOTIF_CHANGED, dismissNotifs, dismissedIds,
+  NOTIFY, notifyActions, NOTIFY_LIMIT, NOTIF_CHANGED, dismissNotifs, dismissedIds,
 } from "./NotificationBell";
 
 /** "just now" / "3h ago" / "2d ago" — matches the bell's wording. */
@@ -60,7 +60,7 @@ export default function DeadlineReminderCard() {
     // renders nothing anyway.
     if (isKavachioAdmin() || isBrokerSeat()) return;
     let live = true;
-    getActivity(mga, NOTIFY_LIMIT, NOTIFY_ACTIONS)
+    getActivity(mga, NOTIFY_LIMIT, notifyActions())
       .then(e => { if (live) setEvents(e); })
       .catch(() => { /* a missed reminder must never break the app shell */ });
     listPrograms()

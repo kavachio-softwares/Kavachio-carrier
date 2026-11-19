@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import Layout from "./components/Layout";
 import ResultPopup from "./components/ResultPopup";
+import { phase2Enabled } from "./features";
 import GlobalErrorPopup from "./components/GlobalErrorPopup";
 import Login from "./pages/Login";
 import ResetPassword from "./pages/ResetPassword";
@@ -170,7 +171,8 @@ export default function App() {
       {/* A reinsurer's private, read-only view of a treaty. No Layout, no
           session: the emailed token finds the link and the one-time code
           emailed with it unlocks it — reinsurers have no seat in Kavachio. */}
-      <Route path="/treaty-view" element={<TreatyView />} />
+      {/* Phase 2 — no route at all while the switch is off (features.ts). */}
+      {phase2Enabled() && <Route path="/treaty-view" element={<TreatyView />} />}
       {/* /welcome is the tenant-admin first-run wizard — it has no Layout shell,
           so it carries the guards itself. */}
       <Route path="/welcome" element={<RequireAuth><RequireAccess><Welcome /></RequireAccess></RequireAuth>} />

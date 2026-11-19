@@ -11,6 +11,13 @@ from sqlalchemy.orm import sessionmaker
 import db
 import programme_rules as pr
 
+
+@pytest.fixture(autouse=True)
+def _phase2_on(monkeypatch):
+    """These are Phase 2 behaviours, which PHASE2_ENABLED switches off by
+    default (phase2.py) — so they are tested with it on."""
+    monkeypatch.setenv("PHASE2_ENABLED", "true")
+
 TID, PROG = 7, 1
 
 

@@ -13,6 +13,7 @@ import { getHierarchy } from "../api/hierarchy";
 import { readyForSetupUrl } from "../components/ProgrammeStepper";
 import { SETUP_STATUS as RI_STATUS } from "./ReinsuranceSetups";
 import { listSetups, type SetupListItem } from "../api/ceded";
+import { phase2Enabled } from "../features";
 import { Modal } from "../components/ui/Modal";
 
 /** The two kinds of bordereau setup a carrier has, as the list names them. */
@@ -82,7 +83,11 @@ export default function BordereauSetups() {
   void setParams;
   // The treaties' setups — one per live treaty, few enough to filter here.
   const [riItems, setRiItems] = useState<SetupListItem[] | null>(null);
+  // Reinsurance setups are Phase 2: none listed, no type filter, and the
+  // "What are you setting up?" step skipped while the switch is off.
+  const p2 = phase2Enabled();
   useEffect(() => {
+    if (!p2) { setRiItems([]); return; }
     listSetups().then(setRiItems).catch(() => setRiItems([]));
   }, [mga]);
   // "What are you setting up?" — asked before a new setup is started.
@@ -165,7 +170,9 @@ export default function BordereauSetups() {
   const shut = noSetups && !readyUrl;
   const startBroker = () => nav(noSetups && readyUrl ? readyUrl : "/direct/setup");
   const newSetup = (
-    <button type="button" className="btn pri" onClick={() => setChoosing(true)}>
+    <button type="button" className="btn pri" disabled={!p2 && shut}
+      title={!p2 && shut ? "Finish a programme first — it needs a broker and a signed contract (Programmes → Configure Program)." : undefined}
+      onClick={() => p2 ? setChoosing(true) : startBroker()}>
       <FileSpreadsheet size={15} /> Bordereau Setup
     </button>
   );
@@ -176,7 +183,9 @@ export default function BordereauSetups() {
         <div className="page-head">
           <div className="t">
             <h2>Bordereau Setups
-              <InfoTip text="All your setups: broker bordereaux (files brokers send you) and reinsurance bordereaux (statements you send reinsurers). Open one to review it." />
+              <InfoTip text={p2
+                ? "All your setups: broker bordereaux (files brokers send you) and reinsurance bordereaux (statements you send reinsurers). Open one to review it."
+                : "All your setups: the bordereaux your brokers send you. Open one to review it."} />
             </h2>
           </div>
           <div className="actions">{newSetup}</div>
@@ -192,13 +201,13 @@ export default function BordereauSetups() {
                 options: [{ value: "", label: "All programmes" },
                   ...programOptions.map(p => ({ value: String(p.id), label: p.name }))],
               },
-              {
+              ...(p2 ? [{
                 key: "type", ariaLabel: "Filter by setup type",
-                value: setupType, onChange: v => setSetupType(v as "" | SetupType),
+                value: setupType, onChange: (v: string) => setSetupType(v as "" | SetupType),
                 options: [{ value: "", label: "All setup types" },
                   { value: "broker", label: "Broker bordereau" },
                   { value: "reinsurance", label: "Reinsurance bordereau" }],
-              },
+              }] : []),
               {
                 key: "status", ariaLabel: "Filter by status",
                 value: status, onChange: setStatus,

@@ -14,6 +14,7 @@ import { LoadingOverlay } from "../components/Busy";
 import BdxInlineReview from "../components/BdxInlineReview";
 import ResultsPanel from "../components/ResultsPanel";
 import PreviousSubmissionPanel from "../components/PreviousSubmissionPanel";
+import { phase2Enabled } from "../features";
 import Modal from "../components/ui/Modal";
 import { fmtDateTime, periodLabel } from "../utils/date";
 
@@ -79,7 +80,8 @@ export default function UploadExceptions() {
   // `?tab=previous` open on them.
   const [tab, setTab] = useState<"exceptions" | "results" | "previous">(
     params.get("tab") === "results" ? "results"
-      : params.get("tab") === "previous" ? "previous" : "exceptions");
+      // Previous Submission (plan 23) is Phase 2: no tab while it is off.
+      : params.get("tab") === "previous" && phase2Enabled() ? "previous" : "exceptions");
 
   // Where "back" goes. This used to be a hardcoded /direct, which is the
   // CARRIER's Process Bordereau — a broker reviewing their own run was sent to
@@ -423,9 +425,11 @@ export default function UploadExceptions() {
             <button role="tab" className={tab === "results" ? "on" : ""} onClick={() => setTab("results")}>
               Check Summary
             </button>
-            <button role="tab" className={tab === "previous" ? "on" : ""} onClick={() => setTab("previous")}>
-              Previous Submission
-            </button>
+            {phase2Enabled() && (
+              <button role="tab" className={tab === "previous" ? "on" : ""} onClick={() => setTab("previous")}>
+                Previous Submission
+              </button>
+            )}
           </div>
         )}
 

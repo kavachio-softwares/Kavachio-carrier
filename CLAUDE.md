@@ -50,6 +50,7 @@ Docker: `backend/python-services/Dockerfile` (python 3.12, Tesseract OCR, `uvico
 - `DATABASE_URL` is the only database setting. `VITE_API_URL` is baked into the frontend at build time.
 - AI runs on Google Cloud Agent Platform (formerly Vertex AI), US region, through `gemini_service.get_client()` only; there is no `GEMINI_API_KEY` any more. Set `GOOGLE_APPLICATION_CREDENTIALS` (service-account key JSON; relative paths resolve from `backend/python-services`), and optionally `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` (default `us`). The key file is gitignored and dockerignored: mount it, never commit it.
 - `JWT_SECRET` and `INTAKE_KEY_PEPPER` fall back to insecure dev values when unset. Both must be set on any real deployment, and changing either later breaks existing logins, links, API keys and SFTP passwords.
+- `PHASE2_ENABLED` (default **off**) hides every Phase 2 feature: screens, links and tabs in the UI (`frontend/src/features.ts`, `phase2: true` rules in `access.ts`) and 404 on Phase 2 API routes (`phase2.py`). New Phase 2 work goes behind it. Audit Logs are not behind it.
 - **Do not add, remove or rename `.env` keys** unless the user asks. **Do not add `XYZ_ENABLED` feature switches** — new features ship on. Existing switches are listed in `PROJECT_CONTEXT.md` §4.
 - No hardcoded values: derive from the setup mapping, data model, contract terms (`contract_types.py`, served to the UI, never restated) or env. Report a config gap; don't paper over it.
 

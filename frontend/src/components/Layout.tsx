@@ -8,6 +8,7 @@ import {
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
+import { phase2Enabled } from "../features";
 import { BrokerCarrierSwitch } from "./BrokerCarrierSwitch";
 import { BrokerOrgCard } from "./BrokerOrgCard";
 import { api, getDeduped } from "../api/client";
@@ -27,7 +28,11 @@ import { InfoTip as UiInfoTip } from "./ui/InfoTip";
 // carrier holds the same `carrier_admin` DB role, so the carrier admin is told
 // apart from a carrier user by the organisation's owner pointer, which arrives
 // with the brand rather than with the token (see hooks/useCarrierSeat).
-type Item = { to: string; label: string; icon: React.ElementType; carrierAdminOnly?: boolean };
+// `phase2` marks an entry that Phase 2 brought onto the sidebar although its
+// screen is older (Contracts): hidden while the Phase 2 switch is off. A
+// Phase 2 SCREEN needs no flag here — its ROUTE_ACCESS rule hides it.
+type Item = { to: string; label: string; icon: React.ElementType; carrierAdminOnly?: boolean;
+  phase2?: boolean };
 
 // Nav grouped to match the prototype's sidebar. All existing destinations are
 // preserved; each item is shown only when the current role may actually open it
@@ -195,7 +200,9 @@ const GROUPS: {
       // Broker contracts and reinsurance treaties, one list: its Type filter
       // narrows it to either. Between Programmes and Bordereau Setup, as a
       // contract hangs off a programme and a setup needs a contract.
-      { to: "/contracts", label: "Contracts", icon: FileCheck },
+      // Shown since Phase 2 (treaties live in it); hidden with Phase 2 off,
+      // as it was before — the Dashboard's tile still opens it.
+      { to: "/contracts", label: "Contracts", icon: FileCheck, phase2: true },
       // Signatures is NOT a sidebar entry. Watching a round is watching a
       // contract, so it is reached from Contracts ("Signature history") and
       // from the contract's own record, filtered to that contract. A top-level
@@ -306,7 +313,8 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // tile, so — like /files — it keeps Dashboard lit.
   if (under("/brokers")) return "/home";
   // A contract, a new one and Signatures all belong to Contracts.
-  if (under("/contracts")) return "/contracts";
+  // With Phase 2 off Contracts has no sidebar entry, so the Dashboard stays lit.
+  if (under("/contracts")) return phase2Enabled() ? "/contracts" : "/home";
   // An output template is part of a Bordereau Setup, and that is where the user
   // came from — highlighting anything else while they review a template they
   // opened from the setup screen makes the sidebar lie about where they are.
@@ -442,7 +450,8 @@ export default function Layout() {
           title: g.carrierUserTitle && seat === "user" ? g.carrierUserTitle : g.title,
           items: g.items.filter(
             i => canAccessPath(i.to)
-              && (!i.carrierAdminOnly || addsCarrierUsers(seat))),
+              && (!i.carrierAdminOnly || addsCarrierUsers(seat))
+              && (!i.phase2 || phase2Enabled())),
         }))
         .filter(g => g.items.length > 0);
   // Sections start closed; a heading opens or closes its links. The section

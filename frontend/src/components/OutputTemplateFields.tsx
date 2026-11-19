@@ -36,6 +36,7 @@ import {
 } from "../api/outputTemplate";
 import { errText } from "../utils/directSetup";
 import { getAddTogetherFields } from "../api/finance";
+import { phase2Enabled } from "../features";
 import { InfoTip } from "./InfoTip";
 
 const ADD_TOGETHER_TIP =
@@ -91,7 +92,9 @@ export default function OutputTemplateFields({
   // that two or more fields of the same sheet feed.
   const [moneyFields, setMoneyFields] = useState<Set<string>>(new Set());
   useEffect(() => {
-    getAddTogetherFields().then(f => setMoneyFields(new Set(f))).catch(() => {});
+    // The "Add together" tick feeds the Financial Summary — Phase 2, so no
+    // tick (nothing asked) while the switch is off.
+    if (phase2Enabled()) getAddTogetherFields().then(f => setMoneyFields(new Set(f))).catch(() => {});
   }, []);
   const shared = useMemo(() => {
     const n = new Map<string, number>();

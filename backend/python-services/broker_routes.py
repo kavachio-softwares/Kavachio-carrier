@@ -16,6 +16,7 @@ import datetime as dt
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from phase2 import require_phase2  # Phase 2 routes 404 while switched off
 from pydantic import BaseModel
 from sqlalchemy import String, and_, func, or_
 
@@ -1754,7 +1755,7 @@ def _own_period(s, p: Principal, expected_id: int):
     return e, bid
 
 
-@router.get("/broker/calendar/{expected_id}/case")
+@router.get("/broker/calendar/{expected_id}/case", dependencies=[Depends(require_phase2)])
 def broker_calendar_case(expected_id: int,
                          p: Principal = Depends(current_principal)):
     """MOPR 39.2 — the case on one of this broker's late files: where it
@@ -1770,7 +1771,7 @@ class BrokerDisputeBody(BaseModel):
     note: Optional[str] = None
 
 
-@router.post("/broker/calendar/{expected_id}/dispute")
+@router.post("/broker/calendar/{expected_id}/dispute", dependencies=[Depends(require_phase2)])
 def broker_calendar_dispute(expected_id: int, body: BrokerDisputeBody,
                             p: Principal = Depends(current_principal)):
     """MOPR 39.2 — the broker says a late mark is wrong. The case goes In

@@ -1683,7 +1683,10 @@ def sweep_overdue(session, today: Optional[date] = None,
     # Delinquent, more time running out, a dispute waiting on the carrier).
     # Here so every caller of this sweep (the daily job, opening a calendar)
     # does both.
-    cases = sweep_cases(session, today=today, tenant_id=tenant_id)
+    # Late-file cases are Phase 2: no case moves (and so no bell or Audit Logs
+    # rows about them) while PHASE2_ENABLED is off (phase2.py).
+    from phase2 import phase2_enabled
+    cases = sweep_cases(session, today=today, tenant_id=tenant_id) if phase2_enabled() else {}
     # `newly_late` keeps its name: the scheduler logs it and the tests read it.
     return {"newly_late": len(newly), "rows": newly,
             "newly_due_today": len(newly_today), "due_today": newly_today,
@@ -1942,7 +1945,7 @@ def calendar_rows(session, tenant_id: Optional[int], today: Optional[date] = Non
             "chased_at": e.chased_at.isoformat() if e.chased_at else None,
             "chase_count": e.chase_count or 0,
             # MOPR 39.2 — what is being done about it, if it is missing.
-            "case": case_dict(e),
+            "case": _case_view(e),
         })
     return out
 
@@ -2161,6 +2164,13 @@ class BoardFilters:
                     or self.frequencies or self.stages)
 
 
+def _case_view(e) -> Optional[dict]:
+    """A row's late-file case (MOPR 39.2) — None while Phase 2 is switched off
+    (phase2.py), so the calendars' answers carry nothing of a hidden feature."""
+    from phase2 import phase2_enabled
+    return case_dict(e) if phase2_enabled() else None
+
+
 def board_filter_options(session, tenant_id: Optional[int]) -> dict:
     """The programme and broker choices for the board's filters, from the whole
     calendar rather than the filtered one — picking a broker must not shrink
@@ -2225,6 +2235,10 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
     alone), and the per-row and per-programme lookups run only for what a
     filter keeps.
     """
+    # Late-file cases are Phase 2: no case filter and no case counts while it
+    # is switched off (phase2.py; rows carry no case either — _case_view).
+    from phase2 import phase2_enabled
+    phase2_on = phase2_enabled()
     today = today or datetime.utcnow().date()
     f = filters or BoardFilters()
     needle = f.q.strip().lower()
@@ -2311,7 +2325,8 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
         # A row with no broker owes nothing: it has no arrival status or case.
         if f.statuses and (e.broker_party_id is None or status_of[e.id] not in f.statuses):
             return False
-        if f.cases and (e.broker_party_id is None or (e.case_state or "none") not in f.cases):
+        if (f.cases and phase2_on
+                and (e.broker_party_id is None or (e.case_state or "none") not in f.cases)):
             return False
         return True
 
@@ -2382,7 +2397,7 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             # has no user account — the screen says so rather than pretending.
             "contacts": contacts.get(e.broker_party_id, []),
             # MOPR 39.2 — what is being done about it, if it is missing.
-            "case": case_dict(e),
+            "case": _case_view(e),
         }
 
     # The four ways a due file can stand (MOPR 39.1): arrived on time, arrived
@@ -2494,7 +2509,7 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
         "months": months,
         "rows": rows,
         "counts": counts,
-        "case_counts": case_counts,
+        "case_counts": case_counts if phase2_on else None,
         "programme_count": len(programmes_in_month),
         "schedules": schedule_rows,
         "rows_total": len(all_rows),

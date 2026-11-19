@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Plus, Search } from "lucide-react";
 import { AddReinsurerModal } from "../components/treaty/AddReinsurerModal";
+import { phase2Enabled } from "../features";
 import { api } from "../api/client";
 import { currentMga, isTenantAdmin } from "../auth";
 import { Pagination } from "../components/Pagination";
@@ -82,7 +83,8 @@ export default function Parties() {
               <p>Your directory of carriers, and of the reinsurers you cede to.</p>
             </>)}
           </div>
-          {isAdmin && (
+          {/* Reinsurers are kept for treaties — Phase 2, hidden while it is off. */}
+          {isAdmin && phase2Enabled() && (
             <div className="actions">
               {/* Adding a CARRIER is done in Users & Roles and nowhere else —
                   it is a company with a seat. A reinsurer has no seat: it is a

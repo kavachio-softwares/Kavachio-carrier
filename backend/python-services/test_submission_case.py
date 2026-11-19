@@ -10,6 +10,13 @@ import pytest
 
 import submission_case as sc
 
+
+@pytest.fixture(autouse=True)
+def _phase2_on(monkeypatch):
+    """These are Phase 2 behaviours, which PHASE2_ENABLED switches off by
+    default (phase2.py) — so they are tested with it on."""
+    monkeypatch.setenv("PHASE2_ENABLED", "true")
+
 BROKER = {"actor": "broker:1", "user_id": 50, "role": "broker_admin", "broker_party_id": None}
 CARRIER = {"actor": "carrier@example.com", "user_id": 7, "role": "carrier_admin",
            "broker_party_id": None}

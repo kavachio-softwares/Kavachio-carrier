@@ -19,6 +19,7 @@ import { ArrivalsCard } from "../components/ArrivalsCard";
 import { getReinsuranceDashboard, type ReinsuranceDashboard } from "../api/treaty";
 import BrokerPerformance from "../components/BrokerPerformance";
 import ProgrammeOverview, { type SelectedProgramme } from "../components/ProgrammeOverview";
+import { phase2Enabled } from "../features";
 import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
 import { clickedDayIndex } from "../components/BrokerCharts";
 
@@ -211,7 +212,7 @@ export default function Home() {
   // bordereaux of the Monthly Activity month beside Bordereaux Processed.
   const [rei, setRei] = useState<ReinsuranceDashboard | null>(null);
   useEffect(() => {
-    if (userRole() !== "carrier_admin") return;
+    if (userRole() !== "carrier_admin" || !phase2Enabled()) return;
     let live = true;
     getReinsuranceDashboard(period === ALL ? undefined : period, programId)
       .then(d => { if (live) setRei(d); }).catch(() => { if (live) setRei(null); });
@@ -273,7 +274,8 @@ export default function Home() {
     // Reinsurers are parties too — kept in the Party directory (/parties), not
     // on /brokers. Counted the way that screen counts them when filtered to
     // reinsurers (inactive included), so the tile and the list agree.
-    api.get<{ total: number }>("/parties", {
+    // Phase 2 (reinsurance): not counted while the switch is off.
+    if (phase2Enabled()) api.get<{ total: number }>("/parties", {
       params: { mga, party_type: "reinsurer", include_inactive: true, page: 1, page_size: 1 },
     })
       .then(r => setReinsurerCount(r.data?.total ?? 0))
@@ -287,7 +289,7 @@ export default function Home() {
     // carrier's own reinsurers — so the tile says which is which.
     listContractsPaged({ page: 1, page_size: 1, contract_type: "insurer_broker" })
       .then(r => setBrokerCount(r.total)).catch(() => setBrokerCount(null));
-    listContractsPaged({ page: 1, page_size: 1, contract_type: "insurer_reinsurer" })
+    if (phase2Enabled()) listContractsPaged({ page: 1, page_size: 1, contract_type: "insurer_reinsurer" })
       .then(r => setTreatyCount(r.total)).catch(() => setTreatyCount(null));
   }, [mga, carrierSeat]);
 
@@ -716,7 +718,7 @@ export default function Home() {
         </div>
 
         {/* Programme rules sent and not yet approved by everyone (carrier only). */}
-        {role === "carrier_admin" && <RulesWaitingCard side="carrier" />}
+        {role === "carrier_admin" && phase2Enabled() && <RulesWaitingCard side="carrier" />}
 
         {/* KPI tiles — wired to /dashboard/stats (see API notes for the new fields).
 
@@ -737,7 +739,11 @@ export default function Home() {
             <>
               {cell(3, <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="" />)}
 
-              {seat !== "user" && (
+              {/* Phase 2 off: brokers only, as before reinsurers were parties. */}
+              {seat !== "user" && !phase2Enabled() && (
+                cell(3, <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="" />)
+              )}
+              {seat !== "user" && phase2Enabled() && (
                 cell(3, <StatCard title="Parties" icon={Users} subtitle=""
                   value={partyCount == null || reinsurerCount == null
                     ? fmt(partyCount ?? reinsurerCount) : fmt(partyCount + reinsurerCount)}
@@ -753,7 +759,13 @@ export default function Home() {
               {/* Two kinds of contract, two numbers: with brokers (the business
                   coming in) and with reinsurers (the risk passed on). One total
                   left a carrier guessing which it was looking at. */}
-              {cell(3, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText}
+              {/* Phase 2 off: no treaties, so one number — the broker contracts. */}
+              {!phase2Enabled() && cell(3, <StatCard title="Contracts" value={fmt(brokerCount)} icon={FileText}
+                onClick={() => nav("/contracts")}
+                subtitle={expiringSoon
+                  ? `${expiringSoon} ${expiringSoon === 1 ? "contract" : "contracts"} expiring in the next ${expiringDays} days`
+                  : ""} />)}
+              {phase2Enabled() && cell(3, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText}
                 onClick={() => nav("/contracts")}
                 split={[
                   { label: "Broker contracts", value: fmt(brokerCount),
@@ -907,7 +919,7 @@ export default function Home() {
               one row per programme, worst first. Carrier only — it reads the Open
               Problems list, which is the carrier's. Clicking a row picks the
               programme for every card in this block. */}
-          {carrierAdmin && (
+          {carrierAdmin && phase2Enabled() && (
             <ProgrammeOverview mga={mga} period={period} periodLabel={periodLabel}
               selected={pickedProgramme} onSelect={setPickedProgramme} />
           )}

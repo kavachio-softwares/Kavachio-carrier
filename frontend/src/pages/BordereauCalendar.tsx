@@ -30,6 +30,7 @@ import NotificationBell from "../components/NotificationBell";
 import { InfoTip } from "../components/InfoTip";
 import { ExportFileViewer } from "../components/ExportFileViewer";
 import { CaseModal, caseBadge } from "../components/CaseModal";
+import { phase2Enabled } from "../features";
 import { Pagination } from "../components/Pagination";
 import { ListFilterBar } from "../components/ListFilterBar";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
@@ -58,7 +59,10 @@ const NO_CHASE = new Set<string>(["in_dispute", "extended", "resolved"]);
 const chaseable = (r: BoardRow) => MISSING.has(r.status) && !NO_CHASE.has(r.case?.state ?? "");
 /** A row with a case to open: one already going, or a late file the daily
  *  check is about to open one for. */
-const hasCase = (r: BoardRow) => !!r.case?.state || MISSING.has(r.status);
+const hasCase = (r: BoardRow) => phase2Enabled() && (!!r.case?.state || MISSING.has(r.status));
+/** Late-file cases (MOPR 39.2) are Phase 2: no Case column, filter or button
+ *  while the Phase 2 switch is off (features.ts). */
+const showCases = () => phase2Enabled();
 /** The case button says what a click is for: something to do, or only
  *  something to read. Kavachio staff can only read. */
 const caseVerb = (r: BoardRow, platform: boolean): { label: string; pri: boolean } =>
@@ -425,7 +429,7 @@ export default function BordereauCalendar() {
 
         {/* ---- MOPR 39.2: the same month's late files by where their case
              stands. Counted on the server from the same rows as the tiles. */}
-        {board?.case_counts && (
+        {showCases() && board?.case_counts && (
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8,
             margin: "-6px 0 16px" }}>
             <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--p-muted)",
@@ -490,9 +494,9 @@ export default function BordereauCalendar() {
               { key: "status", ariaLabel: "Arrival status", value: fStatus,
                 onChange: v => setFStatus(v as CalendarStatus | ""),
                 options: [{ value: "", label: "All arrival statuses" }, ...STATUS_CHOICES] },
-              { key: "case", ariaLabel: "Case", value: fCase,
-                onChange: v => setFCase(v as CaseState | "none" | ""),
-                options: [{ value: "", label: "All cases" }, ...CASE_CHOICES] },
+              ...(showCases() ? [{ key: "case", ariaLabel: "Case", value: fCase,
+                onChange: (v: string) => setFCase(v as CaseState | "none" | ""),
+                options: [{ value: "", label: "All cases" }, ...CASE_CHOICES] }] : []),
             ]}
             onClear={clearFilters} active={monthFiltered} />
 
@@ -502,17 +506,17 @@ export default function BordereauCalendar() {
                 <tr>
                   {platform && <th>Carrier</th>}
                   <th>Programme</th><th>Broker</th><th>Contract</th><th>Period</th><th>Due by</th>
-                  <th>Received On</th><th>Arrival Status</th><th>Case</th>
+                  <th>Received On</th><th>Arrival Status</th>{showCases() && <th>Case</th>}
                   <th>Version</th><th>Action</th>
                 </tr>
               </thead>
               <tbody>
                 {loading && (
-                  <tr><td colSpan={platform ? 11 : 10} style={{ padding: "18px 12px", textAlign: "center" }}
+                  <tr><td colSpan={(platform ? 11 : 10) - (showCases() ? 0 : 1)} style={{ padding: "18px 12px", textAlign: "center" }}
                     className="muted">Loading…</td></tr>
                 )}
                 {!loading && worstFirst.length === 0 && (
-                  <tr><td colSpan={platform ? 11 : 10} style={{ padding: "18px 12px", textAlign: "center" }}
+                  <tr><td colSpan={(platform ? 11 : 10) - (showCases() ? 0 : 1)} style={{ padding: "18px 12px", textAlign: "center" }}
                     className="muted">
                     {monthFiltered ? (<>
                       No file due this month matches these filters.{" "}
@@ -596,7 +600,7 @@ export default function BordereauCalendar() {
                           </div>
                         )}
                       </td>
-                      <td>
+                      {showCases() && <td>
                         {(() => {
                           const cb = caseBadge(r.case);
                           if (!cb) return <span className="muted">—</span>;
@@ -609,7 +613,7 @@ export default function BordereauCalendar() {
                             </>
                           );
                         })()}
-                      </td>
+                      </td>}
                       <td>
                         {r.version_count === 0
                           ? <span className="muted">—</span>

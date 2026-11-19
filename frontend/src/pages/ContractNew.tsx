@@ -37,6 +37,7 @@ import { canAccessPath } from "../access";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import AddContractModal from "../components/AddContractModal";
 import { UploadTreatyModal } from "../components/treaty/UploadTreatyModal";
+import { phase2Enabled } from "../features";
 import {
   EMPTY_TREATY, TreatyEditor, firstTreatyError, treatyForSave,
 } from "../components/treaty/TreatyEditor";
@@ -142,7 +143,10 @@ export default function ContractNew() {
   const [sigLayout, setSigLayout] = useState<SignatureLayout | null>(null);
   // ?type=insurer_reinsurer arrives from the Treaties list and a programme's
   // Reinsurance page, so "Raise a treaty" opens on the treaty already.
-  const [typeKey, setTypeKey] = useState(params.get("type") ?? "");
+  // A reinsurance treaty is Phase 2: while the switch is off the type is not
+  // offered at all, and a ?type=insurer_reinsurer link opens a broker contract.
+  const [typeKey, setTypeKey] = useState(
+    params.get("type") === "insurer_reinsurer" && !phase2Enabled() ? "" : params.get("type") ?? "");
   // A treaty asks only the limits a treaty has, worded for a reinsurer — and
   // checks them on its reinsurance bordereau, not on the brokers' files.
   const treatyLimits = typeKey === "insurer_reinsurer";
@@ -180,6 +184,7 @@ export default function ContractNew() {
   const [treatyProgs, setTreatyProgs] = useState<number[]>([]);
   const [treatyErrors, setTreatyErrors] = useState<Record<string, string>>({});
   useEffect(() => {
+    if (!phase2Enabled()) { setTreatyTypes([]); return; }
     getTreatyTypes().then(setTreatyTypes).catch(() => setTreatyTypes([]));
   }, []);
 
@@ -249,7 +254,7 @@ export default function ContractNew() {
   useEffect(() => {
     getContractTypes()
       .then(d => {
-        setSpecs(d.types);
+        setSpecs(phase2Enabled() ? d.types : d.types.filter(t => t.key !== "insurer_reinsurer"));
         setLimitSpec(d.agreed_limits);
         setLimitGroups(d.limit_groups);
         setTermSpec(d.term);

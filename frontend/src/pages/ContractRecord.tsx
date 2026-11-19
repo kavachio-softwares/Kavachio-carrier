@@ -17,6 +17,7 @@ import TreatyPlacementCard from "../components/treaty/TreatyPlacementCard";
 import TreatyBasisPanel from "../components/treaty/TreatyBasisPanel";
 import { ACCESS_EVENT_LABEL, isLoopback } from "../components/treaty/ReinsurerSharing";
 import { getReinsurerAccess, type AccessEvent } from "../api/treaty";
+import { phase2Enabled } from "../features";
 import { TreatyWordingRules } from "../components/treaty/TreatyWordingRules";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { canAccessPath } from "../access";
@@ -454,7 +455,7 @@ function ContractRecordView() {
       })
       .catch(e => setErr(e?.response?.data?.detail || "Could not load this contract."));
     getApprovalHistory(id).then(setHistory).catch(() => setHistory([]));
-    if (!isBrokerSeat()) {
+    if (!isBrokerSeat() && phase2Enabled()) {
       getReinsurerAccess(id).then(a => setAccessEvents(a.events)).catch(() => setAccessEvents([]));
     }
     // Its own call and its own failure: a round that cannot be read must never

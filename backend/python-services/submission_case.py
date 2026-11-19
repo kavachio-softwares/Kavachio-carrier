@@ -306,9 +306,13 @@ def on_file_received(session, e, received_on: date) -> bool:
     if e.case_state not in OPEN:
         return False
     e.case_resolution = FILE_RECEIVED
+    # A case left open from before Phase 2 was switched off still closes, so
+    # it is right when it comes back on — but silently: no bell or Audit Logs
+    # row about a feature that is hidden (phase2.py).
+    from phase2 import phase2_enabled
     _move(session, e, RESOLVED, "file_received", on=received_on,
           reason=FILE_RECEIVED, note=f"File received on {received_on:%d %b %Y}",
-          activity="submission_case_resolved")
+          activity="submission_case_resolved" if phase2_enabled() else None)
     return True
 
 

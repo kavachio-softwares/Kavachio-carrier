@@ -24,6 +24,8 @@ import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
 import { api } from "../api/client";
 import { InfoTip } from "../components/InfoTip";
 import { RulesWaitingCard } from "../components/RulesWaitingCard";
+import { canAccessPath } from "../access";
+import { phase2Enabled } from "../features";
 import { ChartCard, StatCard } from "../components/StatCard";
 import { NotCountedBadge, SupersededTag } from "../components/ContractTag";
 
@@ -134,10 +136,14 @@ export default function BrokerDashboard() {
             </h2>
           </div>
           {/* Policies has no sidebar entry: this is its way in. */}
-          <div className="actions">
-            <Link className="btn" to="/policies">Policy Explorer</Link>
-            <Link className="btn" to="/financial-summary">Financial Summary</Link>
-          </div>
+          {/* Both are Phase 2 — gone, with their row, while it is off. */}
+          {(canAccessPath("/policies") || canAccessPath("/financial-summary")) && (
+            <div className="actions">
+              {canAccessPath("/policies") && <Link className="btn" to="/policies">Policy Explorer</Link>}
+              {canAccessPath("/financial-summary") && (
+                <Link className="btn" to="/financial-summary">Financial Summary</Link>)}
+            </div>
+          )}
         </div>
 
         {note && <div className="note ok" style={{ marginBottom: 16 }}>{note}</div>}
@@ -178,7 +184,7 @@ export default function BrokerDashboard() {
         )}
 
         {/* Programme rules the carrier sent, waiting for this broker's answer. */}
-        <RulesWaitingCard side="broker" />
+        {phase2Enabled() && <RulesWaitingCard side="broker" />}
 
         <div style={grid(5)}>
           <StatCard title="Carriers" value={c.carriers} icon={Building2}

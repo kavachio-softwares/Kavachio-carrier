@@ -65,6 +65,7 @@ import { fetchContractOriginal, fetchDocument, getContract } from "../api/contra
 import { getProgrammeTreaties } from "../api/treaty";
 import ProgrammeTreatiesStep from "../components/treaty/ProgrammeTreatiesStep";
 import ProgrammeRulesPanel from "../components/ProgrammeRulesPanel";
+import { phase2Enabled } from "../features";
 import { SetupTabs, useSetupTab, type SetupTab } from "../components/SetupTabs";
 import { Pagination } from "../components/Pagination";
 import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
@@ -213,7 +214,7 @@ export default function AddProgram() {
   const [treatyCount, setTreatyCount] = useState<number | null>(null);
   const [treatiesInUse, setTreatiesInUse] = useState(0);
   useEffect(() => {
-    if (programId == null) return;
+    if (programId == null || !phase2Enabled()) return;
     getProgrammeTreaties(programId).then(d => setTreatyCount(d.live_count))
       .catch(() => setTreatyCount(null));
   }, [programId]);
@@ -548,7 +549,9 @@ export default function AddProgram() {
   // The programme is common to both; then two sides: the brokers' flow, and
   // the carrier's own reinsurance — apart, as neither waits on the other.
   // Both open once the programme is saved.
-  const sides: SetupTab[] = [
+  // Reinsurance and Programme Rules are Phase 2: only the Broker side while
+  // the Phase 2 switch is off (features.ts).
+  const allSides: SetupTab[] = [
     { key: "broker", label: "Broker",
       info: "The brokers who send you business for this programme, their contracts and their bordereau setups.",
       disabled: !locked, disabledReason: "Configure the programme first" },
@@ -561,6 +564,7 @@ export default function AddProgram() {
       info: "Rules you set once for this programme. The brokers or reinsurers you choose approve each one, and it checks their files once they do.",
       disabled: !locked, disabledReason: "Configure the programme first" },
   ];
+  const sides = phase2Enabled() ? allSides : allSides.filter(t => t.key === "broker");
   const [wantSide, setSide] = useSetupTab(sides);
   const side = locked ? wantSide : "broker";
   // Whichever section is open is the current step, unless it is already done.
@@ -720,12 +724,14 @@ export default function AddProgram() {
             reinsurance. Shown before the programme is saved, shut, so it
             reads as what comes next. */}
         <div className="mb-2 text-base font-semibold">
-          <Step n={2}>Set it up for brokers and reinsurance</Step>
+          <Step n={2}>{sides.length > 1 ? "Set it up for brokers and reinsurance" : "Set it up for brokers"}</Step>
         </div>
-        <SetupTabs tabs={sides} current={side} onChange={setSide} />
+        {sides.length > 1 && <SetupTabs tabs={sides} current={side} onChange={setSide} />}
         {!locked && (
           <div className="rounded border border-dashed border-border px-3 py-4 text-center text-sm text-ink-muted">
-            Configure the programme first — then assign its brokers, or set up its reinsurance.
+            {sides.length > 1
+              ? "Configure the programme first — then assign its brokers, or set up its reinsurance."
+              : "Configure the programme first — then assign its brokers."}
           </div>
         )}
 

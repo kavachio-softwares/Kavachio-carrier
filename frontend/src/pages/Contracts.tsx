@@ -28,6 +28,7 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useServerList } from "../hooks/useServerList";
 import { ListFilterBar } from "../components/ListFilterBar";
 import { UploadTreatyModal } from "../components/treaty/UploadTreatyModal";
+import { phase2Enabled } from "../features";
 import { Pagination } from "../components/Pagination";
 import AddContractModal from "../components/AddContractModal";
 import { InfoTip } from "../components/InfoTip";
@@ -113,8 +114,12 @@ export default function Contracts() {
   // ?type=insurer_reinsurer opens the list on the reinsurance treaties — the
   // dashboard's Contracts tile links there. Re-read when the URL changes, as
   // a link to this list while it is open keeps the same page mounted.
-  const [type, setType] = useState(params.get("type") ?? "");
+  const [typeChosen, setType] = useState(params.get("type") ?? "");
   useEffect(() => { setType(params.get("type") ?? ""); }, [params]);
+  // Reinsurance treaties are Phase 2: while the switch is off the list is the
+  // broker contracts only, with no type filter and no treaty actions.
+  const p2 = phase2Enabled();
+  const type = p2 ? typeChosen : "insurer_broker";
   // The type is kept in the address, so the sidebar lights the matching
   // Contracts entry (All Contracts / Broker Contracts / Treaties).
   function chooseType(t: string) {
@@ -155,6 +160,7 @@ export default function Contracts() {
   // before anything is picked. Whole-book counts, like the dashboard tile.
   const [kindCounts, setKindCounts] = useState<Record<string, number | null>>({});
   useEffect(() => {
+    if (!p2) return;
     for (const k of ["", "insurer_broker", "insurer_reinsurer"]) {
       listContractsPaged({ page: 1, page_size: 1, contract_type: k || undefined })
         .then(r => setKindCounts(c => ({ ...c, [k]: r.total })))
@@ -196,7 +202,7 @@ export default function Contracts() {
     filterKey, PAGE_SIZE,
   );
 
-  const filtersActive = !!(programme || lifecycle || type
+  const filtersActive = !!(programme || lifecycle || (p2 && type)
                            || treatyType || q || waiting);
 
   // Surfaced above the table because it is the one thing on this screen that
@@ -212,9 +218,11 @@ export default function Contracts() {
         <div className="page-head">
           <div className="t">
             <h2>Contracts
-              <InfoTip text={"Every contract you hold: broker contracts with the brokers "
-                + "who send you business, and reinsurance treaties with the "
-                + "reinsurers you cede risk to."} />
+              <InfoTip text={p2
+                ? "Every contract you hold: broker contracts with the brokers "
+                  + "who send you business, and reinsurance treaties with the "
+                  + "reinsurers you cede risk to."
+                : "Every contract you hold with the brokers who send you business."} />
             </h2>
           </div>
           <div className="actions">
@@ -275,7 +283,7 @@ export default function Contracts() {
               // the sidebar saying Treaties over something else.
               // Which kind of contract — with the count of each, so the split
               // shows without opening anything.
-              ...([{
+              ...(p2 ? [{
                 key: "type", ariaLabel: "Filter by contract type",
                 // Kept in the address so the sidebar lights the matching
                 // Contracts entry (All / Broker Contracts / Treaties).
@@ -285,7 +293,7 @@ export default function Contracts() {
                   label: kindCounts[t.key] != null
                     ? `${t.label} (${kindCounts[t.key]})` : t.label,
                 })),
-              }]),
+              }] : []),
               ...(treaties ? [{
                 key: "treaty_type", ariaLabel: "Filter by treaty type",
                 value: treatyType, onChange: setTreatyType,

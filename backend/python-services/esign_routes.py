@@ -602,7 +602,7 @@ def create_envelope(body: EnvelopeIn, request: Request,
         contract = None
         if body.contract_id:
             contract = s.get(Contract, body.contract_id)
-            if not contract:
+            if not contract or _treaty_hidden(s, body.contract_id):
                 raise HTTPException(404, "contract not found")
             if not p.is_platform_admin and contract.tenant_id != tenant_id:
                 raise HTTPException(404, "not found")
@@ -924,6 +924,17 @@ def _my_recipient(env: EsignEnvelope, key: str, email: str | None):
     return next((r for r in mine if r.party_key == key), None)
 
 
+def _treaty_hidden(s, contract_id: Optional[int]) -> bool:
+    """A reinsurance treaty while Phase 2 is switched off (phase2.py). Its
+    signing rounds then do not exist: no round is started or sent, and a
+    signing link already emailed to a reinsurer answers like an expired one."""
+    from phase2 import phase2_enabled
+    if not contract_id or phase2_enabled():
+        return False
+    c = s.get(Contract, contract_id)
+    return c is not None and (c.contract_type or "") == "insurer_reinsurer"
+
+
 def _contract_for_signing(s, p: Principal, contract_id: int) -> Contract:
     """The contract, if this caller is a party to it.
 
@@ -934,7 +945,7 @@ def _contract_for_signing(s, p: Principal, contract_id: int) -> Contract:
     """
     missing = HTTPException(404, "contract not found")
     c = s.get(Contract, contract_id)
-    if not c:
+    if not c or _treaty_hidden(s, contract_id):
         raise missing
     if p.is_broker:
         bpid = resolve_broker_party_id(s, p)
@@ -1401,6 +1412,13 @@ def list_envelopes(p: Principal = Depends(require_role("carrier_admin")),
     with SessionLocal() as s:
         rows_q = (s.query(EsignEnvelope)
                   .filter(EsignEnvelope.tenant_id == p.tenant_id))
+        from phase2 import phase2_enabled
+        if not phase2_enabled():
+            # A treaty's rounds are Phase 2 (_treaty_hidden): not listed.
+            treaty_ids = s.query(Contract.id).filter(
+                Contract.contract_type == "insurer_reinsurer")
+            rows_q = rows_q.filter(or_(EsignEnvelope.contract_id.is_(None),
+                                       ~EsignEnvelope.contract_id.in_(treaty_ids)))
         if contract_id is not None:
             rows_q = rows_q.filter(EsignEnvelope.contract_id == contract_id)
         if status:
@@ -1420,7 +1438,7 @@ def list_envelopes(p: Principal = Depends(require_role("carrier_admin")),
 
 def _load_envelope(s, envelope_id: int, p: Principal) -> EsignEnvelope:
     env = s.get(EsignEnvelope, envelope_id)
-    if not env:
+    if not env or _treaty_hidden(s, env.contract_id):
         raise HTTPException(404, "not found")
     if not p.is_platform_admin and env.tenant_id != p.tenant_id:
         raise HTTPException(404, "not found")       # never confirm it exists
@@ -1618,7 +1636,7 @@ def _by_token(s, token: str) -> tuple[EsignEnvelope, EsignRecipient]:
     if exp and exp < _now():
         raise dead
     env = s.get(EsignEnvelope, rec.envelope_id)
-    if not env or env.status in ("voided",):
+    if not env or env.status in ("voided",) or _treaty_hidden(s, env.contract_id):
         raise dead
     return env, rec
 

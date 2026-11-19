@@ -31,6 +31,7 @@ from auth_deps import require_role, current_principal, Principal
 # when the module is imported. carrier_scope imports only auth_deps and db,
 # so there is no cycle to avoid.
 from carrier_scope import require_carrier_admin, is_carrier_admin_seat, carrier_approvals_enabled
+from phase2 import phase2_enabled, require_phase2  # Phase 2 routes 404 while switched off
 
 router = APIRouter()
 
@@ -1876,10 +1877,11 @@ def program_schedule_put(program_id: int, body: ScheduleBody,
         if changes:
             changed_by = _actor(principal)
             # The brokers whose due dates moved are told (after the commit —
-            # the change stands whether or not the mail goes).
+            # the change stands whether or not the mail goes). A Phase 2
+            # email (MOPR 39.3): not sent while PHASE2_ENABLED is off.
             told = notify_brokers_of_new_dates(
                 s, p, changes, result, _carrier_label(s, p.tenant_id),
-                changed_by=changed_by)
+                changed_by=changed_by) if phase2_enabled() else 0
             _log(mga, changed_by, "submission_schedule_updated",
                  target=str(program_id), principal=principal,
                  details={"program_name": p.name, "changes": changes, "reason": why,
@@ -2209,7 +2211,7 @@ def _acting_carrier(principal: Principal) -> None:
                                  "the carrier does.")
 
 
-@router.get("/calendar/{expected_id}/case")
+@router.get("/calendar/{expected_id}/case", dependencies=[Depends(require_phase2)])
 def calendar_case(expected_id: int,
                   principal: Principal = Depends(current_principal)):
     """A late file's case, as the carrier sees it."""
@@ -2219,7 +2221,7 @@ def calendar_case(expected_id: int,
         return _case_payload(s, e, principal, side="carrier", carrier_admin=admin)
 
 
-@router.post("/calendar/{expected_id}/case/dispute")
+@router.post("/calendar/{expected_id}/case/dispute", dependencies=[Depends(require_phase2)])
 def calendar_case_dispute(
         expected_id: int, body: CaseDisputeBody,
         principal: Principal = Depends(require_carrier_admin("enter a dispute for a broker"))):
@@ -2243,7 +2245,7 @@ def calendar_case_dispute(
         return _case_payload(s, e, principal, side="carrier", carrier_admin=True)
 
 
-@router.post("/calendar/{expected_id}/case/decision")
+@router.post("/calendar/{expected_id}/case/decision", dependencies=[Depends(require_phase2)])
 def calendar_case_decision(
         expected_id: int, body: CaseDecisionBody,
         principal: Principal = Depends(require_carrier_admin("decide a late file's case"))):
@@ -5644,7 +5646,7 @@ def _window_words(w: dict) -> dict:
             "title": monthly_report.period_title(w["cadence"], w["period"])}
 
 
-@router.get("/reports/data-quality")
+@router.get("/reports/data-quality", dependencies=[Depends(require_phase2)])
 def report_data_quality(mga: str, month: Optional[str] = None,
                         program_id: Optional[int] = None,
                         broker_party_id: Optional[int] = None,
@@ -5724,7 +5726,7 @@ def _report_filter_lists(s, tid: int) -> dict:
                               key=lambda b: (b["name"] or "").lower())}
 
 
-@router.get("/reports/exception-resolution")
+@router.get("/reports/exception-resolution", dependencies=[Depends(require_phase2)])
 def report_exception_resolution(mga: str, month: Optional[str] = None,
                                 program_id: Optional[int] = None,
                                 broker_party_id: Optional[int] = None,
@@ -5797,7 +5799,7 @@ def _monthly_pack(s, tid: int, month: Optional[str], cadence: Optional[str],
     return monthly_report.name_rows(s, pack)
 
 
-@router.get("/reports/monthly")
+@router.get("/reports/monthly", dependencies=[Depends(require_phase2)])
 def report_monthly(mga: str, month: Optional[str] = None,
                    program_id: Optional[int] = None,
                    broker_party_id: Optional[int] = None,
@@ -5837,7 +5839,7 @@ def _monthly_delivery_view(s, tid: int, page: Optional[int] = None,
     return out
 
 
-@router.get("/reports/monthly/delivery")
+@router.get("/reports/monthly/delivery", dependencies=[Depends(require_phase2)])
 def report_monthly_delivery(mga: str, page: Optional[int] = None, page_size: int = 10,
                             principal: Principal = Depends(current_principal)):
     """MOPR 42.2 — how the Monthly Report is sent, and what has been sent."""
@@ -5853,7 +5855,7 @@ class MonthlyDeliveryBody(BaseModel):
     delivery: Optional[str] = None
 
 
-@router.put("/reports/monthly/delivery")
+@router.put("/reports/monthly/delivery", dependencies=[Depends(require_phase2)])
 def save_monthly_delivery(body: MonthlyDeliveryBody, mga: str,
                           principal: Principal = Depends(require_carrier_admin("change how the operational report is sent"))):
     """MOPR 42.2 — save Send & Schedule. Each change is kept in the Audit Logs
@@ -5891,7 +5893,7 @@ class MonthlySendBody(BaseModel):
     file_format: Optional[str] = None
 
 
-@router.post("/reports/monthly/send")
+@router.post("/reports/monthly/send", dependencies=[Depends(require_phase2)])
 def send_monthly_report(body: MonthlySendBody, mga: str,
                         principal: Principal = Depends(require_carrier_admin("send the operational report"))):
     """MOPR 42.2 — send a month's report now (default: last month) to the
@@ -5936,7 +5938,7 @@ def _report_file_response(name: str, data: bytes, mime: str):
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
-@router.get("/reports/monthly/file")
+@router.get("/reports/monthly/file", dependencies=[Depends(require_phase2)])
 def monthly_report_file(mga: str, month: Optional[str] = None, format: str = "pdf",
                         program_id: Optional[int] = None,
                         broker_party_id: Optional[int] = None,
@@ -5961,7 +5963,7 @@ def monthly_report_file(mga: str, month: Optional[str] = None, format: str = "pd
         return _report_file_response(name, data, mime)
 
 
-@router.get("/reports/monthly/sends/{send_id}/file")
+@router.get("/reports/monthly/sends/{send_id}/file", dependencies=[Depends(require_phase2)])
 def monthly_report_sent_file(send_id: int, mga: str, format: str = "pdf",
                              principal: Principal = Depends(current_principal)):
     """MOPR 42.2 — a report as it was sent: the numbers kept with it, so the
@@ -5983,7 +5985,7 @@ class FixTargetBody(BaseModel):
     days: int
 
 
-@router.put("/reports/exception-resolution/target")
+@router.put("/reports/exception-resolution/target", dependencies=[Depends(require_phase2)])
 def set_fix_target(body: FixTargetBody, mga: str,
                    principal: Principal = Depends(require_carrier_admin("change the fix target"))):
     """MOPR 41.2 — the carrier's target for fixing a problem, in days. The
@@ -6005,7 +6007,7 @@ def set_fix_target(body: FixTargetBody, mga: str,
         return {"target_days": new, "was": old}
 
 
-@router.get("/reports/open-problems")
+@router.get("/reports/open-problems", dependencies=[Depends(require_phase2)])
 def report_open_problems(mga: str, program_id: Optional[int] = None,
                          broker_party_id: Optional[int] = None,
                          kind: Optional[str] = Query(None, alias="type"),
@@ -6227,7 +6229,7 @@ PROGRAMME_STATUS_ORDER = ("files_missing", "waiting_on_you", "exceptions_open",
                           "contract_ended", "contract_ending", "on_track", "setup_missing")
 
 
-@router.get("/dashboard/programme-overview")
+@router.get("/dashboard/programme-overview", dependencies=[Depends(require_phase2)])
 def dashboard_programme_overview(
         mga: str,
         month: Optional[str] = None,

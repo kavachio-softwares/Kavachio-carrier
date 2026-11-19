@@ -20,6 +20,7 @@ import { getBrokerCalendar, getBrokerCalendarVersions, type BrokerCalendar as Bo
 import type { SubmissionVersionRow } from "../api/calendar";
 import { ExportFileViewer } from "../components/ExportFileViewer";
 import { CaseModal, caseBadge } from "../components/CaseModal";
+import { phase2Enabled } from "../features";
 import { useBrokerCarrierId } from "../brokerCarrier";
 import { canAccessPath } from "../access";
 import { InfoTip } from "../components/InfoTip";
@@ -71,7 +72,9 @@ const DONE = new Set(["on_time", "received_late"]);
 // MOPR 39.2 — a late file has a case: one already going, or one the daily
 // check is about to open. Only Overdue and Delinquent can be disputed, once.
 const LATE = new Set(["overdue", "never_arrived"]);
-const hasCase = (r: BrokerCalendarRow) => !!r.case?.state || LATE.has(r.status);
+// Late-file cases (MOPR 39.2) are Phase 2: no Case column or button while the
+// Phase 2 switch is off (features.ts).
+const hasCase = (r: BrokerCalendarRow) => phase2Enabled() && (!!r.case?.state || LATE.has(r.status));
 const canDispute = (r: BrokerCalendarRow) => !r.case?.dispute_locked
   && (r.case?.state ? ["overdue", "delinquent"].includes(r.case.state) : LATE.has(r.status));
 
@@ -172,7 +175,7 @@ export default function BrokerCalendar() {
   // One carrier chosen in the sidebar: every row is theirs, so the column
   // would say the same thing on every line.
   const showCarrier = carrierId == null;
-  const cols = showCarrier ? 10 : 9;
+  const cols = (showCarrier ? 10 : 9) - (phase2Enabled() ? 0 : 1);
   // The contract name, opening the contract — "—" when there is none yet.
   const contractCell = (id?: number | null, name?: string | null) =>
     id == null ? <span className="muted">—</span>
@@ -269,7 +272,7 @@ export default function BrokerCalendar() {
                   {showCarrier && <th>Carrier</th>}
                   {/* No Broker column: every row here is the signed-in broker's own. */}
                   <th>Programme</th><th>Contract</th><th>Period</th><th>Due by</th>
-                  <th>Sent On</th><th>Arrival Status</th><th>Case</th><th>Version</th><th>Action</th>
+                  <th>Sent On</th><th>Arrival Status</th>{phase2Enabled() && <th>Case</th>}<th>Version</th><th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -314,7 +317,7 @@ export default function BrokerCalendar() {
                           </div>
                         )}
                       </td>
-                      <td>
+                      {phase2Enabled() && <td>
                         {(() => {
                           const cb = caseBadge(r.case);
                           if (!cb) return <span className="muted">—</span>;
@@ -331,7 +334,7 @@ export default function BrokerCalendar() {
                             </>
                           );
                         })()}
-                      </td>
+                      </td>}
                       <td>
                         {r.version_count === 0
                           ? <span className="muted">—</span>

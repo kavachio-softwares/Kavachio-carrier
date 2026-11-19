@@ -160,11 +160,14 @@ app.include_router(segment_router)
 # could swallow it.
 app.include_router(esign_public_router)
 app.include_router(esign_router)
-app.include_router(treaty_public_router)
-app.include_router(programme_rule_public_router)
-app.include_router(treaty_router)
-app.include_router(ceded_public_router)
-app.include_router(ceded_router)
+# Phase 2 routers answer 404 while PHASE2_ENABLED is off (phase2.py).
+from phase2 import require_phase2, features as _phase2_features
+_PHASE2 = [Depends(require_phase2)]
+app.include_router(treaty_public_router, dependencies=_PHASE2)
+app.include_router(programme_rule_public_router, dependencies=_PHASE2)
+app.include_router(treaty_router, dependencies=_PHASE2)
+app.include_router(ceded_public_router, dependencies=_PHASE2)
+app.include_router(ceded_router, dependencies=_PHASE2)
 # Audit Logs (/audit/…). Every seat has one; what differs is whose rows come
 # back, which audit_feed.scope_for decides — so there is no role guard here to
 # fall out of step with it.
@@ -175,11 +178,18 @@ app.include_router(submission_router)
 # ITD handling: a setup's ITD settings, a file's row comparison, a feed's
 # running total (itd_routes.py).
 app.include_router(itd_router)
-app.include_router(policy_router)
-app.include_router(financial_router)
-app.include_router(executive_router)
-app.include_router(partner_performance_router)
-app.include_router(programme_rule_router)
+app.include_router(policy_router, dependencies=_PHASE2)
+app.include_router(financial_router, dependencies=_PHASE2)
+app.include_router(executive_router, dependencies=_PHASE2)
+app.include_router(partner_performance_router, dependencies=_PHASE2)
+app.include_router(programme_rule_router, dependencies=_PHASE2)
+
+
+@app.get("/features")
+def get_features():
+    """Which optional parts of the product are switched on — read by the
+    screens before they draw (no login: it names switches, no data)."""
+    return _phase2_features()
 
 
 def _mark_deprecated_aliases() -> None:
@@ -4221,7 +4231,7 @@ def _export_previous_submission(s, export_id: int, principal) -> tuple:
     return r, vds.screen(s, export_id)
 
 
-@app.get("/export/downloads/{export_id}/previous-submission")
+@app.get("/export/downloads/{export_id}/previous-submission", dependencies=_PHASE2)
 def export_download_previous_submission(export_id: int,
                                         principal: Principal = Depends(current_principal)):
     """The "Previous Submission" tab (plan 23): this file against the last
@@ -4239,7 +4249,7 @@ def export_download_previous_submission(export_id: int,
                         "rows": len(sh["entries"])} for sh in scr["sheets"]]}
 
 
-@app.get("/export/downloads/{export_id}/previous-submission/rows")
+@app.get("/export/downloads/{export_id}/previous-submission/rows", dependencies=_PHASE2)
 def export_download_previous_submission_rows(export_id: int, sheet: str | None = None,
                                              outcome: str | None = None,
                                              q: str | None = None,
@@ -4276,7 +4286,7 @@ def export_download_previous_submission_rows(export_id: int, sheet: str | None =
             "offset": offset, "rows": rows[offset:offset + limit]}
 
 
-@app.get("/export/downloads/{export_id}/previous-submission.csv")
+@app.get("/export/downloads/{export_id}/previous-submission.csv", dependencies=_PHASE2)
 def export_download_previous_submission_csv(export_id: int,
                                             principal: Principal = Depends(current_principal)):
     """The tab as CSV: one line per value that differs, for every row that is

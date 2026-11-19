@@ -490,8 +490,11 @@ def for_broker_run(s, tenant_id: int, governing: list, structure: Optional[dict]
     """The programme rules that check this file: those applying to any of its
     governing contracts, compiled against the setup's own output template.
     Shaped as validation_rule rows for duckdb_validation.run_validation; ids
-    are negative (never a validation_rule id) and the SQL is not cached."""
-    if not governing or missing_tables(s):
+    are negative (never a validation_rule id) and the SQL is not cached.
+    None while Phase 2 is switched off (phase2.py): programme rules are a
+    Phase 2 feature, so they check nothing then — approved ones included."""
+    from phase2 import phase2_enabled
+    if not phase2_enabled() or not governing or missing_tables(s):
         return []
     import contract_rules as cr
     from app_routes import _template_fields_from_structure
@@ -536,7 +539,8 @@ def for_treaty(s, c) -> list[dict]:
     """The programme rules that check this treaty's statements, as treaty rules."""
     import treaty_rules as trr
     from db import TreatyProgramme
-    if missing_tables(s):
+    from phase2 import phase2_enabled
+    if not phase2_enabled() or missing_tables(s):
         return []
     progs = {r[0] for r in s.query(TreatyProgramme.program_id)
              .filter(TreatyProgramme.contract_id == c.id)} | ({c.program_id} if c.program_id else set())
