@@ -15,7 +15,7 @@ type TenantRow = {
   created_at?: string | null; modified_at?: string | null;
 };
 type U = { id: number; email: string; full_name: string; role: string; status: string; last_login_at?: string | null;
-  /** The organisation's owner — its Carrier Admin. Every other carrier_admin row is a Carrier User. */
+  /** The organisation's owner. Not used here: this tab lists brokers only. */
   is_owner?: boolean };
 type Program = {
   id: number; name: string; product_line?: string | null; status?: string | null;
@@ -324,7 +324,12 @@ export default function TenantDetail() {
     isAdmin ? userFilterKey : "disabled",
     PAGE_SIZE,
   );
-  const userPageRows = userItems;
+  // This tab lists brokers only. The server already leaves the carrier's own
+  // logins out (`kind: "broker"`); this guard keeps them off the screen even
+  // when the API it talks to predates that filter, and takes them out of the
+  // count too, so the tab never says 3 while listing 1.
+  const userPageRows = userItems.filter(u => normalizeRole(u.role) === "broker_admin");
+  const userShownTotal = userTotal - (userItems.length - userPageRows.length);
   const userFiltersActive = userQ !== "" || userStatusFilter !== "";
   function clearUserFilters() { setUserQ(""); setUserStatusFilter(""); }
 
@@ -403,7 +408,7 @@ export default function TenantDetail() {
             Details
           </button>
           <button className={tab === "users" ? "on" : ""} onClick={() => setTab("users")}>
-            Users ({userTotal})
+            Users ({userShownTotal})
           </button>
           <button className={tab === "pc" ? "on" : ""} onClick={() => setTab("pc")}>
             Programs &amp; Contracts
@@ -462,7 +467,7 @@ export default function TenantDetail() {
                   </span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                  <span className="muted">Users</span><span>{userTotal}</span>
+                  <span className="muted">Users</span><span>{userShownTotal}</span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
                   <span className="muted">Created</span><span>{fmtDateTime(t?.created_at)}</span>
@@ -500,10 +505,8 @@ export default function TenantDetail() {
                     return (
                       <tr key={u.id}>
                         <td><b>{u.full_name}</b><div className="sub">{u.email}</div></td>
-                        <td><span className={`badge ${role === "carrier_admin" ? "b-info" : "b-mut"}`}>
-                          <span className="d" />
-                          {role === "carrier_admin" && !u.is_owner ? "Carrier User" : (ROLE_LABEL[role] ?? role)}
-                          </span></td>
+                        <td><span className="badge b-mut">
+                          <span className="d" />{ROLE_LABEL[role] ?? role}</span></td>
                         <td><span className={`badge ${us.cls}`}><span className="d" />{us.label}</span></td>
                         <td className="muted">{fmtDateTime(u.last_login_at)}</td>
                       </tr>
@@ -511,12 +514,12 @@ export default function TenantDetail() {
                   })}
                 </tbody>
               </table>
-              {userTotal === 0 && !userFiltersActive && <div className="empty">No brokers with a login for this carrier yet.</div>}
-              {userTotal === 0 && userFiltersActive && <div className="empty">No users match the filters.</div>}
+              {userShownTotal === 0 && !userFiltersActive && <div className="empty">No brokers with a login for this carrier yet.</div>}
+              {userShownTotal === 0 && userFiltersActive && <div className="empty">No users match the filters.</div>}
             </div>
-            {userTotal > 0 && (
+            {userShownTotal > 0 && (
               <Pagination page={userPage} pageCount={userPageCount} pageSize={PAGE_SIZE}
-                totalItems={userTotal} onPageChange={setUserPage} noun="users" />
+                totalItems={userShownTotal} onPageChange={setUserPage} noun="users" />
             )}
           </div>
         )}

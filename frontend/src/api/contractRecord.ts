@@ -200,6 +200,9 @@ export type ContractRecord = {
   contract_type: string | null;
   contract_type_label: string | null;
   filename: string | null;
+  /** The uploaded contract's own file is held — fetchContractOriginal can
+   *  open it, for the carrier and for the contract's broker. */
+  has_original?: boolean;
   programme: { id: number; name: string; code?: string } | null;
   counterparty: { id: number; name: string; party_type: string } | null;
   output_template: { id: number; name: string; version: number } | null;

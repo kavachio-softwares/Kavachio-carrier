@@ -821,6 +821,10 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         "contract_type_label": (ct.CONTRACT_TYPES[ctype]["label"]
                                 if known_type else (ctype or None)),
         "filename": c.filename,
+        # The file an uploaded contract was read from is still held, so
+        # GET /contracts/{id}/original can hand it over — to the carrier and
+        # to the contract's own broker alike (_contract_access).
+        "has_original": bool(c.blob_ref or c.blob),
         # The short codes a broker writes in an email subject or file name
         # instead of the names (intake_service.programme_code).
         "code": _codes().contract_code(c),
@@ -1543,6 +1547,10 @@ def counterparties(party_type: str = Query(..., description="broker | reinsurer"
     """
     if p.is_broker:
         raise HTTPException(403, "insufficient role")
+    # Reinsurers are for treaties — Phase 2 (see _treaties_on): no such list
+    # while it is switched off.
+    if party_type == "reinsurer" and not _treaties_on():
+        raise HTTPException(404, "Not Found")
     with SessionLocal() as s:
         tid = (p.tenant_id if not p.is_platform_admin
                else (s.get(Program, program_id).tenant_id if program_id else None))

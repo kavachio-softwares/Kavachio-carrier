@@ -641,7 +641,7 @@ export default function Home() {
   };
 
   const recentCard = (
-    <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)", color: "white", border: "none", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/runs?from=home")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgba(15,23,42,0.4), 0 4px 6px -4px rgba(15,23,42,0.4)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}>
+    <div className="card" style={{ flex: 1, padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)", color: "white", border: "none", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/runs?from=home")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgba(15,23,42,0.4), 0 4px 6px -4px rgba(15,23,42,0.4)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}>
       <div>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
           <div style={{ width: 40, height: 40, borderRadius: 8, backgroundColor: "rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -759,8 +759,10 @@ export default function Home() {
               {/* Two kinds of contract, two numbers: with brokers (the business
                   coming in) and with reinsurers (the risk passed on). One total
                   left a carrier guessing which it was looking at. */}
-              {/* Phase 2 off: no treaties, so one number — the broker contracts. */}
-              {!phase2Enabled() && cell(3, <StatCard title="Contracts" value={fmt(brokerCount)} icon={FileText}
+              {/* Phase 2 off: no treaties, so one number — the Contracts list's
+                  own total, which leaves treaties out then (and keeps untyped
+                  legacy contracts in, as the list does). */}
+              {!phase2Enabled() && cell(3, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText}
                 onClick={() => nav("/contracts")}
                 subtitle={expiringSoon
                   ? `${expiringSoon} ${expiringSoon === 1 ? "contract" : "contracts"} expiring in the next ${expiringDays} days`
@@ -1039,42 +1041,24 @@ export default function Home() {
           </div>
         )}
 
-        {/* ONE month for the cards below — Overdue Bordereaux (carrier admin),
-            and Bordereaux Processed. They used to count the current
-            month only; this lets a carrier look back a month at a time, or at
-            every month together. The cards still open their full lists. */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
-                      gap: 12, marginBottom: 12 }}>
-          <div style={{ display: "flex", alignItems: "center" }}>
-            <h3 style={{ margin: 0, fontSize: 16 }}>Monthly Activity</h3>
-            <InfoTip text={(carrierAdmin ? "Overdue Bordereaux and Bordereaux Processed"
-              : "The cards below") + " count the month and year picked here. All Months "
-              + "counts the whole year; All Years counts everything."} />
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {/* With All Years there is no one year to take a month of. */}
-            <select className="fbar-select" aria-label="Month"
-              value={year === ALL ? ALL : month} disabled={year === ALL}
-              onChange={e => setMonth(e.target.value)}>
-              <option value={ALL}>All Months</option>
-              {MONTH_NAMES.map((name, i) => (
-                <option key={name} value={pad2(i + 1)}>{name}</option>
-              ))}
-            </select>
-            <select className="fbar-select" aria-label="Year"
-              value={year} onChange={e => setYear(e.target.value)}>
-              <option value={ALL}>All Years</option>
-              {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
-            </select>
-          </div>
-        </div> 
+        {/* The cards below — Overdue Bordereaux (carrier admin) and Bordereaux
+            Processed — count the month and year picked in the Activity bar at
+            the top of this block. They had a second, identical pair of boxes
+            here; one pair is enough. The cards still open their full lists. */}
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
+          <h3 style={{ margin: 0, fontSize: 16 }}>Monthly Activity</h3>
+          <InfoTip text={(carrierAdmin ? "Overdue Bordereaux and Bordereaux Processed"
+            : "The cards below") + " count the month and year picked at the top of "
+            + "Activity. All Months counts the whole year; All Years counts everything."} />
+        </div>
 
           {carrierAdmin ? (
             /* Overdue Bordereaux on the left, Bordereaux Processed and
-               Reinsurance Bordereaux (and Reinsurance) on the right. Each card keeps
-             its own height. */
+               Reinsurance Bordereaux (and Reinsurance) on the right. The two
+               columns share one height: Bordereaux Processed stretches to
+               match Overdue Bordereaux. */
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24,
-                        alignItems: "start" }}>
+                        alignItems: "stretch" }}>
               <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                 <ArrivalsCard onTime={due?.on_time} late={due?.late}
                   overdue={due?.overdue} never={due?.never}

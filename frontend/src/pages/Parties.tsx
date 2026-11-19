@@ -32,8 +32,12 @@ export default function Parties() {
   const [params] = useSearchParams();
   // Opened as ?type=reinsurer (the dashboard's Reinsurers count, the treaty
   // screens) the page IS the reinsurer list: no carriers, no type filter.
-  const onlyReinsurers = params.get("type") === "reinsurer";
-  const [type, setType] = useState(params.get("type") ?? "");
+  // Reinsurers are kept for treaties — Phase 2: while it is off this is the
+  // carrier directory only, as before (features.ts).
+  const p2 = phase2Enabled();
+  const onlyReinsurers = p2 && params.get("type") === "reinsurer";
+  const [type, setType] = useState(
+    params.get("type") === "reinsurer" && !p2 ? "" : params.get("type") ?? "");
   const [adding, setAdding] = useState(false);
   const [status, setStatus] = useState("");
   const dq = useDebouncedValue(q, 300);
@@ -79,8 +83,9 @@ export default function Parties() {
               <h2>Reinsurers</h2>
               <p>The reinsurers you cede risk to.</p>
             </>) : (<>
-              <h2>Carriers &amp; Reinsurers</h2>
-              <p>Your directory of carriers, and of the reinsurers you cede to.</p>
+              <h2>{p2 ? <>Carriers &amp; Reinsurers</> : "Carriers"}</h2>
+              <p>{p2 ? "Your directory of carriers, and of the reinsurers you cede to."
+                     : "Your directory of carriers."}</p>
             </>)}
           </div>
           {/* Reinsurers are kept for treaties — Phase 2, hidden while it is off. */}
@@ -101,7 +106,7 @@ export default function Parties() {
           <div className="card-h" style={{ gap: 14, flexWrap: "wrap" }}>
             <div className="search">
               <Search className="ic" />
-              <input placeholder={onlyReinsurers ? "Search reinsurers…" : "Search carriers and reinsurers…"} value={q}
+              <input placeholder={onlyReinsurers ? "Search reinsurers…" : p2 ? "Search carriers and reinsurers…" : "Search carriers…"} value={q}
                 onChange={e => setQ(e.target.value)} />
             </div>
             {!onlyReinsurers && (
@@ -109,7 +114,7 @@ export default function Parties() {
                 value={type} onChange={e => setType(e.target.value)}>
                 <option value="">All Types</option>
                 <option value="carrier">Carriers</option>
-                <option value="reinsurer">Reinsurers</option>
+                {p2 && <option value="reinsurer">Reinsurers</option>}
               </select>
             )}
             <select className="fbar-select" aria-label="Filter by status"
