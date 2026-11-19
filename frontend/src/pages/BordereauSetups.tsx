@@ -248,9 +248,9 @@ export default function BordereauSetups() {
               <table>
                 <thead>
                   <tr>
-                    <th>Programme / Treaty</th>
+                    <th>{p2 ? "Programme / Treaty" : "Programme"}</th>
                     <th>Setup type</th>
-                    <th>Broker / Treaty type</th>
+                    <th>{p2 ? "Broker / Treaty type" : "Broker"}</th>
                     <th>Status</th>
                     <th>Modified</th>
                     <th>Actions</th>

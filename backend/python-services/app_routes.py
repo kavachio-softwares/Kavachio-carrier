@@ -1406,6 +1406,29 @@ def my_carrier_party(mga: str, p: Principal = Depends(current_principal)):
                 "legal_name": (party.legal_name if party else None) or mga}
 
 
+REINSURER_PARTY = "reinsurer"
+
+
+def _reinsurers_on() -> bool:
+    """Reinsurers exist only for treaties, which are Phase 2. While
+    PHASE2_ENABLED is off (phase2.py) a reinsurer party does not exist as far
+    as these routes are concerned: not listed, not opened, not edited, no
+    contacts, and none created."""
+    return phase2_enabled()
+
+
+def _hide_reinsurer(party) -> None:
+    """404 — exactly as for a party that does not exist — for a reinsurer
+    while Phase 2 is off."""
+    if party is not None and (party.party_type or "") == REINSURER_PARTY and not _reinsurers_on():
+        raise HTTPException(404, "party not found")
+
+
+def _refuse_reinsurer_type(party_type) -> None:
+    if (party_type or "") == REINSURER_PARTY and not _reinsurers_on():
+        raise HTTPException(400, "Reinsurers are not available.")
+
+
 @router.get("/parties")
 def parties_list(
     mga: str,
@@ -1449,6 +1472,10 @@ def parties_list(
             ))
         if party_type:
             query = query.filter(Party.party_type == party_type)
+        if not _reinsurers_on():
+            # NULL is kept: an untyped row is not a reinsurer.
+            query = query.filter(or_(Party.party_type.is_(None),
+                                     Party.party_type != REINSURER_PARTY))
         if scope:
             query = query.filter(Party.scope == scope)
 
@@ -1476,6 +1503,7 @@ def parties_create(mga: str, body: PartyBody,
         # user the tenant row already exists, so no _ensure_tenant create is
         # needed; the party_scope_tenant_chk constraint is satisfied.)
         tenant_id = resolve_tenant_id(s, principal, mga)
+        _refuse_reinsurer_type(body.party_type)
         p = Party(tenant_id=tenant_id,
                   **body.model_dump(exclude_unset=True))
         s.add(p); s.commit(); s.refresh(p)
@@ -1490,6 +1518,7 @@ def parties_get(party_id: int, principal: Principal = Depends(current_principal)
         p = s.get(Party, party_id)
         if not p:
             raise HTTPException(404, "party not found")
+        _hide_reinsurer(p)
         assert_tenant_owns(principal, p.tenant_id)
         return _party_dict(p, _tenant_name(s, p.tenant_id))
 
@@ -1501,7 +1530,10 @@ def parties_update(party_id: int, body: PartyBody,
         p = s.get(Party, party_id)
         if not p:
             raise HTTPException(404, "party not found")
+        _hide_reinsurer(p)
         assert_tenant_owns(principal, p.tenant_id)
+        # Nor may an existing party be turned into one.
+        _refuse_reinsurer_type(body.model_dump(exclude_unset=True).get("party_type"))
         for k, v in body.model_dump(exclude_unset=True).items():
             setattr(p, k, v)
         s.commit(); s.refresh(p)
@@ -1525,6 +1557,7 @@ def party_contacts_list(party_id: int, principal: Principal = Depends(current_pr
         party = s.get(Party, party_id)
         if not party:
             raise HTTPException(404, "party not found")
+        _hide_reinsurer(party)
         assert_tenant_owns(principal, party.tenant_id)
         rows = s.query(PartyContact).filter(PartyContact.party_id == party_id).all()
         return [{"id": c.id, "full_name": c.full_name, "title": c.title,
@@ -1538,6 +1571,7 @@ def party_contacts_create(party_id: int, body: PartyContactBody,
         p = s.get(Party, party_id)
         if not p:
             raise HTTPException(404, "party not found")
+        _hide_reinsurer(p)
         assert_tenant_owns(principal, p.tenant_id)
         c = PartyContact(party_id=party_id, tenant_id=p.tenant_id, **body.model_dump())
         s.add(c); s.commit(); s.refresh(c)
@@ -1565,6 +1599,7 @@ def party_contacts_delete(party_id: int, contact_id: int,
         c = s.get(PartyContact, contact_id)
         if not c or c.party_id != party_id:
             raise HTTPException(404, "contact not found")
+        _hide_reinsurer(s.get(Party, party_id))
         assert_tenant_owns(principal, c.tenant_id)
         _c_tenant_id = c.tenant_id
         s.delete(c); s.commit()
@@ -1588,6 +1623,7 @@ def party_programs_list(party_id: int, principal: Principal = Depends(current_pr
         party = s.get(Party, party_id)
         if not party:
             raise HTTPException(404, "party not found")
+        _hide_reinsurer(party)
         assert_tenant_owns(principal, party.tenant_id)
         programs = s.query(Program).filter(Program.party_id == party_id).order_by(Program.name).all()
         result = []
@@ -2763,23 +2799,22 @@ async def program_contract_upload(
 
 
         # -------------------------------------------------
-        # Persist the raw contract file to blob storage (Azure/Azurite) when
-        # enabled. Historically the uploaded file was discarded after
-        # extraction; with blob storage on we now retain it and record the
-        # pointer on the contract row (blob_ref) below. Non-fatal on failure.
+        # Keep the contract file as it arrived, so the carrier AND the broker
+        # can open it from the contract page (GET /contracts/{id}/original).
+        # It used to be kept only when Azure blob storage was on, so on a
+        # server storing files in the database (STORAGE_BACKEND=db) it was
+        # thrown away after its clauses were read. store_or_keep is the same
+        # choice every other upload makes: Azure → blob_ref, otherwise the
+        # bytes on the row. Non-fatal on failure.
         # -------------------------------------------------
-        contract_blob_ref = None
-        if storage.is_azure():
-            try:
-                contract_blob_ref = storage.build_key(
-                    "contracts", tenant_id, contract_filename)
-                await run_in_threadpool(
-                    storage.put_bytes, contract_blob_ref, contents,
-                    contract_content_type or "application/octet-stream",
-                )
-            except Exception as blob_exc:                # noqa: BLE001 — best-effort
-                contract_blob_ref = None
-                print(f"[Contract] blob persist failed (non-fatal): {blob_exc}")
+        contract_blob_ref, contract_blob = None, None
+        try:
+            contract_blob_ref, contract_blob = await run_in_threadpool(
+                storage.store_or_keep, "contracts", tenant_id, contract_filename,
+                contents, contract_content_type or "application/octet-stream")
+        except Exception as blob_exc:                    # noqa: BLE001 — best-effort
+            contract_blob_ref, contract_blob = None, None
+            print(f"[Contract] file persist failed (non-fatal): {blob_exc}")
 
         # -------------------------------------------------
         # Auto-activate within Program scope.
@@ -2832,6 +2867,8 @@ async def program_contract_upload(
                     new_c.status = "active"
                     if contract_blob_ref:
                         new_c.blob_ref = contract_blob_ref
+                    elif contract_blob is not None:
+                        new_c.blob = contract_blob
                     if schedule_key is not None:
                         new_c.schedule_key = schedule_key
                     else:
@@ -3399,6 +3436,11 @@ def program_contracts_list(program_id: int,
         if broker_party_id is not None:
             q = q.filter(or_(Contract.broker_party_id == broker_party_id,
                              Contract.broker_party_id.is_(None)))
+        if not phase2_enabled():
+            # A treaty is Phase 2 (phase2.py): not on the programme's list while
+            # it is switched off. NULL is kept: an untyped contract is not one.
+            q = q.filter(or_(Contract.contract_type.is_(None),
+                             Contract.contract_type != "insurer_reinsurer"))
         total = q.order_by(None).count()
         ordered = q.order_by(Contract.id.desc())
         if page is not None:
@@ -6675,6 +6717,9 @@ def program_management_carriers(
                 Party.scope == "global"),
             or_(Party.is_active.is_(True), Party.is_active.is_(None)),
         )
+        if not _reinsurers_on():
+            base = base.filter(or_(Party.party_type.is_(None),
+                                   Party.party_type != REINSURER_PARTY))
         if q:
             ql = f"%{q.lower()}%"
             base = base.filter(or_(
