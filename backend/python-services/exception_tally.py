@@ -68,6 +68,87 @@ def export_tally(r) -> dict:
     }
 
 
+def correction_bases(s, export_ids) -> dict[int, int]:
+    """{export id: the export of the file as the broker SENT it} for each run
+    that is a correction — a Fix & Validate or secure-link version.
+
+    A correction goes in as the next version of its submission and is checked
+    again from scratch, so the exceptions the broker resolved stay on the
+    version before it and the new one reads "0 exceptions, 0 resolved". The
+    work done lives on the version the corrections started from: walk back
+    over correction versions to the last version that came in as a file
+    (upload, email, SFTP, API). Runs that are not corrections are absent."""
+    from submission_service import CORRECTION_SOURCES, load
+
+    vers = export_versions(s, export_ids)
+    out: dict[int, int] = {}
+    threads: dict = {}
+    for eid, v in vers.items():
+        ref = v.get("submission_ref")
+        if not ref:
+            continue
+        if ref not in threads:
+            try:
+                threads[ref] = load(s, ref)
+            except Exception:  # noqa: BLE001 — a list never fails on one submission
+                threads[ref] = None
+        th = threads[ref]
+        if th is None:
+            continue
+        chain = [x for x in th.versions if x.export_id]
+        at = next((i for i in range(len(chain) - 1, -1, -1)
+                   if chain[i].export_id == eid), None)
+        if at is None or chain[at].source not in CORRECTION_SOURCES:
+            continue
+        while at > 0 and chain[at].source in CORRECTION_SOURCES:
+            at -= 1
+        base = chain[at].export_id
+        if base and base != eid:
+            out[eid] = base
+    return out
+
+
+def with_earlier_fixes(now: dict, base: dict | None) -> dict:
+    """One file's tally (export_tally of its newest version) with the
+    exceptions resolved on the versions before it counted in.
+
+    exceptions  what the file had as the broker sent it (`base`), or what the
+                newest version has, if that is more;
+    open        still open on the newest version;
+    put_right   exceptions − open — "9 of 9 resolved", the rule Partner
+                Performance uses for "problems fixed while cleaning".
+    Rows stay the newest version's."""
+    if not base:
+        return now
+    found = max(base["exceptions"], now["exceptions"])
+    return {**now, "exceptions": found, "put_right": max(0, found - now["open"])}
+
+
+def submission_tallies(s, exports) -> dict[int, dict]:
+    """{export id: export_tally with earlier fixes counted} for these export
+    ROWS — what a list of live files shows. One base export is read at a time
+    and let go: the exceptions column runs to megabytes."""
+    exports = [r for r in exports if r is not None]
+    bases = correction_bases(s, [r.id for r in exports])
+    cache: dict = {}
+    return {r.id: tally_with_fixes(s, r, bases, cache) for r in exports}
+
+
+def tally_with_fixes(s, r, bases: dict[int, int], cache: dict) -> dict:
+    """One row of submission_tallies, for loops that read their exports one
+    at a time: `bases` from correction_bases, `cache` any dict kept across
+    the loop (a base export's tally, read once)."""
+    from db import OutputExport
+
+    b = bases.get(r.id)
+    if b and b not in cache:
+        row = s.get(OutputExport, b)
+        cache[b] = export_tally(row) if row is not None else None
+        if row is not None:
+            s.expunge(row)
+    return with_earlier_fixes(export_tally(r), cache.get(b) if b else None)
+
+
 def current_export_ids(s, *, broker_party_id: int | None = None,
                        tenant_id: int | None = None,
                        include_replaced: bool = False) -> set[int]:
