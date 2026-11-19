@@ -28,12 +28,12 @@ sample.xlsx + mga ─► /mapper/generate ─► saved Mapper + categorized prop
 3. **Embed** every header and every canonical-field description with
    `sentence-transformers/all-MiniLM-L6-v2`. Cosine similarity gives the
    **top-5 canonical candidates** per source header.
-4. **Finalize** with **Gemini** (`gemini-2.5-flash` via `google-genai`): the
+4. **Finalize** with **Gemini** (`gemini-3.5-flash` on Agent Platform / Vertex AI via `google-genai`): the
    LLM receives the canonical data model, the source headers, and the
    embedding candidates, and returns a conservative
    `{canonical_field: source_header | null}` mapping. It is told to use any
    header at most once and to return `null` when unsure.
-5. **Fallback**: if no `GEMINI_API_KEY` is configured, a greedy top-1 cosine
+5. **Fallback**: if Google Cloud AI is not configured, a greedy top-1 cosine
    assignment is used (threshold 0.35).
 6. **Categorize each SOURCE COLUMN** by its mapping score. Buckets are
    indexed by the source header, so the total number of entries equals the
@@ -166,11 +166,25 @@ backend/
 cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # set GEMINI_API_KEY
+cp .env.example .env        # set GOOGLE_APPLICATION_CREDENTIALS (see below)
 python main.py              # serves on http://0.0.0.0:8000
 ```
 
 Storage is SQLite (`bdx.db` in the working directory), created on first run.
+
+### AI (Gemini on Google Cloud Agent Platform / Vertex AI)
+
+All AI calls go through `contract_upload_services/gemini_service.get_client()`.
+They run on the GCP project's Agent Platform in the US region; there is no API key any more.
+
+| Variable | Meaning |
+| --- | --- |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to the service-account key JSON. A relative path resolves from `backend/python-services`. Unset = Application Default Credentials (`gcloud auth application-default login`, or the VM's service account). |
+| `GOOGLE_CLOUD_PROJECT` | GCP project. Defaults to the key file's `project_id`; required with ADC. |
+| `GOOGLE_CLOUD_LOCATION` | Defaults to `us` (US multi-region). `us-central1` returns 404 for the 3.5 models. |
+
+The key file is a secret: it is gitignored, and should be mounted into the container, not baked into the image.
+`agent_platform_test.py` is a standalone smoke test of the same client (`python agent_platform_test.py basic`).
 
 ---
 
@@ -566,7 +580,7 @@ Additionally:
 | Web framework        | FastAPI + Uvicorn                                         |
 | Excel parsing        | pandas + openpyxl                                         |
 | Embeddings           | `sentence-transformers/all-MiniLM-L6-v2` (local)          |
-| LLM                  | Gemini `gemini-2.5-flash` via `google-genai`              |
+| LLM                  | Gemini `gemini-3.5-flash` on Agent Platform (Vertex AI)   |
 | Mapping execution    | `glom`                                                    |
 | Persistence / DWH    | SQLAlchemy + SQLite                                       |
 

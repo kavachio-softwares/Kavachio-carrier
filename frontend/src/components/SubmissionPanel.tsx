@@ -97,8 +97,7 @@ export default function SubmissionPanel({ arrivalId, onChanged, onOpenVersion }:
     <>
       <div className="sub-h">
         Broker Follow-Up
-        <InfoTip text={"The broker is told the result on the channel they used and by email, with a secure link "
-          + "to resolve exceptions. Each correction is a new version, checked again. Only the broker can resolve an exception."} />
+        <InfoTip text="The broker gets the result by email and on their channel, with a secure link to fix exceptions. Only the broker can resolve them; each fix is a new version." />
       </div>
       <div className="kv"><span className="k">Version</span>
         <span className="v">Version {doc.this_file_version}

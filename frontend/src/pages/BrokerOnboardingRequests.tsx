@@ -299,10 +299,7 @@ export default function BrokerOnboardingRequests() {
             <h2>
               Broker onboarding
               <InfoTip text={isAdmin
-                ? "Brokers your carrier users want to bring on. Nothing has been "
-                  + "sent to any of them — they hear from Kavachio only once you "
-                  + "approve. Approving sends the invitation; what they may send "
-                  + "you is still settled by the bordereau setup approval."
+                ? "Brokers your carrier users want to bring on. Nothing is sent to them until you approve; approving sends the invitation."
                 : "Brokers you asked to bring on, and what the carrier "
                   + "decided. Nothing reaches a broker until they approve it."} />
             </h2>

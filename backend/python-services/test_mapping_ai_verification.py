@@ -53,7 +53,7 @@ ANSWER = {
 def env(tmp_path, monkeypatch):
     log = tmp_path / "decisions.log"
     monkeypatch.setenv("KAVACHIO_DECISION_LOG", str(log))
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-key")
     # No cached answers here: ai_cache would reach the database.
     monkeypatch.setenv("KAVACHIO_AI_CACHE_COLUMN_CANDIDATES", "0")
     for k in ("KAVACHIO_MAPPING_AUTO_CONFIDENCE", "KAVACHIO_MAPPING_REVIEW_CONFIDENCE",
@@ -145,10 +145,12 @@ def test_unusable_answer_and_missing_key(monkeypatch):
     d = by["Settlement Currency"]
     assert d["status"] == sm.AI_UNAVAILABLE and "MAX_TOKENS" in d["ai_error"]
 
-    monkeypatch.delenv("GEMINI_API_KEY")
+    from contract_upload_services.gemini_service import AI_NOT_CONFIGURED
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT")
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
     _, by, prompts = run(monkeypatch)
     assert prompts == []
-    assert by["Settlement Currency"]["ai_error"] == "GEMINI_API_KEY is not set"
+    assert by["Settlement Currency"]["ai_error"] == AI_NOT_CONFIGURED
 
 
 def test_existing_mappings_preserved(monkeypatch):

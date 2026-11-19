@@ -5,6 +5,7 @@ import { Bell, X } from "lucide-react";
 import { currentMga, isBrokerSeat } from "../auth";
 import { useCarrierSeat } from "../hooks/useCarrierSeat";
 import { getActivity, type ActivityEvent } from "../api/activity";
+import { phase2Enabled } from "../features";
 import { listPrograms, type ProgramLite } from "../api/calendar";
 import { flowUrl } from "./ProgrammeStepper";
 
@@ -31,6 +32,23 @@ export const NOTIFY: Record<string, {
   submission_overdue:   { label: "Bordereau overdue",   tone: "#c0392b", to: "/calendar" },
   submission_due_today: { label: "Bordereau due today", tone: "#b7791f", to: "/calendar" },
   submission_due_soon:  { label: "Bordereau due soon",  tone: "#2c6fbb", to: "/calendar" },
+  // MOPR 39.2 — the case on a late file. Each lands on the Bordereau Calendar
+  // month the file was due in, where its case opens from the row.
+  submission_delinquent: {
+    label: "Bordereau delinquent", tone: "#c0392b", to: "/bordereau-calendar",
+    link: d => d.due_date ? `/bordereau-calendar?month=${String(d.due_date).slice(0, 7)}` : null },
+  submission_case_reopened: {
+    label: "Extra time ran out", tone: "#c0392b", to: "/bordereau-calendar",
+    link: d => d.due_date ? `/bordereau-calendar?month=${String(d.due_date).slice(0, 7)}` : null },
+  // Only the carrier admin decides a dispute, so only they are told.
+  submission_dispute_raised: {
+    seat: "admin",
+    label: "Dispute to decide", tone: "#b7791f", to: "/bordereau-calendar",
+    link: d => d.due_date ? `/bordereau-calendar?month=${String(d.due_date).slice(0, 7)}` : null },
+  submission_dispute_waiting: {
+    seat: "admin",
+    label: "Dispute still waiting", tone: "#b7791f", to: "/bordereau-calendar",
+    link: d => d.due_date ? `/bordereau-calendar?month=${String(d.due_date).slice(0, 7)}` : null },
   // A broker's file came in for a programme with no live Bordereau Setup. The
   // file is kept and runs by itself once a setup is live, so this is the cue to
   // build one — straight to that step. Amber: nothing is late, a file waits.
@@ -126,7 +144,13 @@ export const NOTIFY: Record<string, {
     seat: "user",
     label: "Broker turned down", tone: "#c0392b", to: "/brokers/requests" },
 };
-export const NOTIFY_ACTIONS = Object.keys(NOTIFY);
+/** Late-file case events (MOPR 39.2) are Phase 2: not asked for, so not
+ *  shown, while the Phase 2 switch is off (features.ts). A function, not a
+ *  constant: the switch is read after this module loads. */
+const PHASE2_NOTIFY = new Set(["submission_delinquent", "submission_case_reopened",
+  "submission_dispute_raised", "submission_dispute_waiting"]);
+export const notifyActions = (): string[] =>
+  Object.keys(NOTIFY).filter(k => phase2Enabled() || !PHASE2_NOTIFY.has(k));
 /** Every outstanding reminder, not a recent-activity sample: a deadline stays
  *  true until it is met, so the list must not have a tail that falls off. */
 export const NOTIFY_LIMIT = 500;
@@ -227,7 +251,7 @@ export default function NotificationBell({
     // worth making.
     if (isBrokerSeat()) return;
     let live = true;
-    getActivity(mga, NOTIFY_LIMIT, NOTIFY_ACTIONS)
+    getActivity(mga, NOTIFY_LIMIT, notifyActions())
       .then(e => { if (live) setEvents(e); }).catch(() => {});
     return () => { live = false; };
   }, [mga]);

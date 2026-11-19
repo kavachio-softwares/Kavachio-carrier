@@ -13,7 +13,7 @@ declare module "axios" {
 // No VITE_API_URL → API on port 8000 of whatever host served the page, so
 // localhost and LAN-IP access (e.g. http://192.168.2.92:5173) both work.
 const baseURL = import.meta.env.VITE_API_URL ??
-  `${window.location.protocol}//${window.location.hostname}:8000`;
+  `${window.location.protocol}//${window.location.hostname}:8080`;
 
 export const api = axios.create({ baseURL });
 
@@ -294,8 +294,10 @@ api.interceptors.response.use(
     // person holding that link may have no account here at all, so refreshing
     // a token they never had and then bouncing them to /login would throw a
     // signer off a contract mid-signature. Their page handles the 401 itself.
+    // The reinsurer's treaty link (/treaty-view/…) is the same kind of page:
+    // no account behind it, and its 401 means "enter the code".
     const isPublicSigning = typeof cfg?.url === "string"
-      && cfg.url.includes("/esign/sign/");
+      && (cfg.url.includes("/esign/sign/") || cfg.url.includes("/treaty-view/"));
 
     if (status === 401 && cfg && !cfg._retry && !isAuthCall && !isPublicSigning) {
       cfg._retry = true;

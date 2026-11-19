@@ -109,17 +109,11 @@ export default function AdminUsers() {
         {c && (
           <div className="tiles three" style={{ marginBottom: 18 }}>
             <Tile k="Users" v={c.total}
-              info="Everyone with a login, across the two seats beside this one. Not Kavachio's own account — there is exactly one of those, and it is Us, not a seat to review." />
+              info="Everyone with a carrier or broker login. Kavachio's own account is not counted." />
             <Tile k="Carrier" v={c.carrier_admins}
-              info={`The one person accountable for each carrier — its recognised `
-                + `owner. Not every carrier has named one yet (${c.carriers} carriers `
-                + `have people at all; only ${c.carrier_admins} of them have an owner `
-                + `on record), which is why this can read lower than the number of `
-                + `carrier organisations beside it.`} />
+              info={`The owner of each carrier. ${c.carrier_admins} of the ${c.carriers} carriers with people have an owner on record so far.`} />
             <Tile k="Broker" v={c.broker_admins}
-              info={`The first person a carrier invited at a broker. Unlike carriers, `
-                + `every broker they work with currently has exactly one — which is `
-                + `why this matches the number of broker organisations beside it.`} />
+              info="The first person a carrier invited at each broker. Every broker currently has one." />
           </div>
         )}
 

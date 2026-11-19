@@ -13,6 +13,8 @@ import { CheckCircle2 } from "lucide-react";
 import { LoadingOverlay } from "../components/Busy";
 import BdxInlineReview from "../components/BdxInlineReview";
 import ResultsPanel from "../components/ResultsPanel";
+import PreviousSubmissionPanel from "../components/PreviousSubmissionPanel";
+import { phase2Enabled } from "../features";
 import Modal from "../components/ui/Modal";
 import { fmtDateTime, periodLabel } from "../utils/date";
 
@@ -72,10 +74,14 @@ export default function UploadExceptions() {
   // row, failed cells highlighted and actionable in place). The modal viewer is
   // still used elsewhere; here the review happens inline.
   const [bdxOpen, setBdxOpen] = useState(false);
-  // Exceptions (decide and fix) or Results (every row, the counts, every
-  // version). Only an output has Results; `?tab=results` opens on it.
-  const [tab, setTab] = useState<"exceptions" | "results">(
-    params.get("tab") === "results" ? "results" : "exceptions");
+  // Exceptions (decide and fix), Results (every row, the counts, every
+  // version) or Previous Submission (this version against the last one sent
+  // to the carrier). Only an output has the last two; `?tab=results` and
+  // `?tab=previous` open on them.
+  const [tab, setTab] = useState<"exceptions" | "results" | "previous">(
+    params.get("tab") === "results" ? "results"
+      // Previous Submission (plan 23) is Phase 2: no tab while it is off.
+      : params.get("tab") === "previous" && phase2Enabled() ? "previous" : "exceptions");
 
   // Where "back" goes. This used to be a hardcoded /direct, which is the
   // CARRIER's Process Bordereau — a broker reviewing their own run was sent to
@@ -93,6 +99,8 @@ export default function UploadExceptions() {
     if (fromParam === "direct") return { to: "/direct", label: "Process Bordereau" };
     if (fromParam === "files") return { to: "/files", label: "Files Received" };
     if (fromParam === "calendar") return { to: "/bordereau-calendar", label: "Bordereau Calendar" };
+    if (fromParam === "policies") return { to: "/policies", label: "Policy Explorer" };
+    if (fromParam === "partner") return { to: "/partner-performance", label: "Partner Performance" };
     if (isBrokerSeat()) return { to: "/broker/bordereau", label: "Process Bordereau" };
     // A carrier seat no longer has a Process Bordereau screen to go back to,
     // and sending them to one access.ts now refuses would bounce them to their
@@ -417,11 +425,18 @@ export default function UploadExceptions() {
             <button role="tab" className={tab === "results" ? "on" : ""} onClick={() => setTab("results")}>
               Check Summary
             </button>
+            {phase2Enabled() && (
+              <button role="tab" className={tab === "previous" ? "on" : ""} onClick={() => setTab("previous")}>
+                Previous Submission
+              </button>
+            )}
           </div>
         )}
 
         {downloadId && tab === "results" && !loading && data ? (
           <ResultsPanel exportId={downloadId} uploadId={uploadId} fromParam={fromParam} />
+        ) : downloadId && tab === "previous" && !loading && data ? (
+          <PreviousSubmissionPanel exportId={downloadId} />
         ) : loading ? null : !data ? (
           err ? null : (
             <div className="card pad">

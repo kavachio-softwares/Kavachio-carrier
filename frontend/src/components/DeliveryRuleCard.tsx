@@ -64,9 +64,7 @@ export default function DeliveryRuleCard({ programId, canEdit }: {
       <div className="mb-3 flex items-center gap-2">
         <ShieldCheck size={16} className="text-navy" />
         <h3 className="text-sm font-semibold text-ink">Exception Delivery Rule</h3>
-        <InfoTip text={"A broker's file reaches you once the exceptions this rule holds back are fixed "
-          + "or answered by the broker. Each check's own severity decides. At the deadline the system "
-          + "acts automatically, so a file never waits for ever."} />
+        <InfoTip text="A broker's file reaches you once the exceptions this rule holds back are fixed or answered. At the deadline it acts automatically." />
       </div>
       <div className="grid gap-4 text-sm md:grid-cols-3">
         <div>

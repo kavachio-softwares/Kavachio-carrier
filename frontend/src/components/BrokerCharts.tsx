@@ -151,7 +151,9 @@ function RankedRow({ r, max, unit, linkTo }: {
   const openPct = share ? (whole ? (r.value / whole) * 100 : 0) : (r.value / max) * 100;
   const row = (
     <div style={{ display: "grid",
-                  gridTemplateColumns: share ? "140px 1fr 96px" : "140px 1fr 40px",
+                  // The value column grows to its number: 40px held exception
+                  // counts, but a money total ("2,095,000") ran out of the card.
+                  gridTemplateColumns: share ? "140px 1fr 96px" : "140px 1fr minmax(40px, max-content)",
                   alignItems: "center", gap: 12 }}>
       <span style={{ fontSize: 13, color: "var(--p-ink)", overflow: "hidden",
                      textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -179,8 +181,8 @@ function RankedRow({ r, max, unit, linkTo }: {
       ) : (
         <span style={{ fontSize: 13, fontWeight: 600, textAlign: "right",
                        fontVariantNumeric: "tabular-nums",
-                       color: r.value ? "var(--p-ink)" : "var(--p-faint)" }}>
-          {r.value}
+                       color: r.value ? "var(--p-ink)" : "var(--p-faint)", whiteSpace: "nowrap" }}>
+          {r.value.toLocaleString("en-GB", { maximumFractionDigits: 2 })}
         </span>
       )}
     </div>

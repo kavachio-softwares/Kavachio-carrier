@@ -70,7 +70,12 @@ router = APIRouter()
 # The kinds of document a contract can hold. See ContractDocument for what each
 # one MEANS — the difference between a reference and an endorsement is the whole
 # reason this is not a single blob column.
-DOC_KINDS = ("contract", "reference", "endorsement", "evidence")
+# A treaty also carries its schedule and amendments (26.3); "contract" marked
+# as the signed copy is its signed treaty wording.
+DOC_KINDS = ("contract", "reference", "endorsement", "evidence", "schedule", "amendment",
+             # One reinsurer's signed line slip on a master treaty — the evidence
+             # its signature is recorded against (treaty_placement).
+             "signed_line")
 
 
 def _doc_visible(d: ContractDocument, p: Principal | None) -> bool:
@@ -122,6 +127,18 @@ def _program_access(s, p: Principal, program_id: int) -> tuple[Program, int]:
     return prog, prog.tenant_id
 
 
+TREATY = "insurer_reinsurer"
+
+
+def _treaties_on() -> bool:
+    """Reinsurance treaties (insurer ↔ reinsurer contracts) are Phase 2. While
+    PHASE2_ENABLED is off (phase2.py) they do not exist as far as this module
+    is concerned: not listed, not offered, not created, and every route on
+    one answers 404 — so no signing link, renewal or email can start."""
+    from phase2 import phase2_enabled
+    return phase2_enabled()
+
+
 def _contract_access(s, p: Principal, contract_id: int) -> Contract:
     """Fetch a contract the caller is allowed to see.
 
@@ -133,7 +150,7 @@ def _contract_access(s, p: Principal, contract_id: int) -> Contract:
     """
     assert_can_open_contract(p)
     c = s.get(Contract, contract_id)
-    if not c:
+    if not c or ((c.contract_type or "") == TREATY and not _treaties_on()):
         raise HTTPException(404, "contract not found")
     if p.is_broker:
         # A broker sees only its OWN contracts — a shared programme carries
@@ -241,11 +258,24 @@ def _missing_references(c: Contract, docs: list[ContractDocument]) -> list[str]:
     return missing
 
 
-def _doc_dict(d: ContractDocument) -> dict:
+def _doc_dict(d: ContractDocument, names: Optional[dict] = None) -> dict:
+    ex = d.extracted if isinstance(d.extracted, dict) else {}
     return {
         "id": d.id,
         "kind": d.kind,
         "filename": d.filename,
+        "version": d.version,
+        "party_id": d.party_id,
+        "uploaded_by": (names or {}).get(d.uploaded_by_user_id),
+        # Whether it opens and can be read — checked when a wording is attached.
+        "validation": ex.get("validation"),
+        # A treaty endorsement whose terms and clauses are on the treaty: read
+        # and applied, or drafted in Kavachio (applied when it was made).
+        "endorsement_applied": d.kind == "endorsement"
+                               and bool(ex.get("review") or ex.get("endorsement_number")),
+        # Where it stands with the reinsurers — used only once all approved.
+        "endorsement_approval": (((ex.get("approval") or {}).get("status") or "draft")
+                                 if d.kind == "endorsement" else None),
         "satisfies_reference": d.satisfies_reference,
         "effective_from": str(d.effective_from) if d.effective_from else None,
         # The signed copy, as opposed to a draft. Reported from outside — see
@@ -257,6 +287,14 @@ def _doc_dict(d: ContractDocument) -> dict:
         # cannot be re-read, and a screen offering "download" for it lies.
         "has_file": bool(d.blob_ref or d.blob),
     }
+
+
+def _uploader_names(s, docs) -> dict:
+    ids = {d.uploaded_by_user_id for d in docs if d.uploaded_by_user_id}
+    if not ids:
+        return {}
+    return {u.id: (u.full_name or u.email)
+            for u in s.query(AppUser).filter(AppUser.id.in_(ids))}
 
 
 def _store_authored_clauses(s, c: Contract, sections: list[dict] | None) -> int:
@@ -858,7 +896,7 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         "created_at": _iso_utc(c.created_at),
 
         # ── documents ──
-        "documents": [_doc_dict(d) for d in docs] if with_docs else None,
+        "documents": [_doc_dict(d, _uploader_names(s, docs)) for d in docs] if with_docs else None,
         # Does this contract HAVE a wording — not "is there a file". A contract
         # written here has one: its sections, structured, on this record and
         # typeset on its page. Tying this to a blob was what made an authored
@@ -951,11 +989,24 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         # carrier ends up believing a file is being measured against terms
         # nothing has ever looked at. See _checks_summary.
         "checks": _checks_summary(s, c, rule_counts),
+        # A reinsurance treaty's type, headline, placement and programmes
+        # (treaty_routes.record_summary). NULL on an insurer ↔ broker contract.
+        "treaty": _treaty_summary(s, c),
     }
 
 
+def _treaty_summary(s, c: Contract) -> Optional[dict]:
+    if (c.contract_type or "") != "insurer_reinsurer":
+        return None
+    import treaty_routes
+    return treaty_routes.record_summary(s, c)
+
+
 def _checks_setup_info(s, c: Contract) -> Optional[dict]:
-    """See contract_checks.state. Never what stops a contract opening."""
+    """See contract_checks.state. Never what stops a contract opening.
+    None for a treaty: its checks come from the reinsurance setup."""
+    if (c.contract_type or "") == "insurer_reinsurer":
+        return None
     try:
         import contract_checks
         return contract_checks.state(s, c, _effective_lifecycle(c))
@@ -996,6 +1047,8 @@ def _rule_tallies(s, contract_ids: list[int]) -> dict[int, dict]:
         "  rule_spec->>'source' = 'contract_terms') AS term_keys "
         "FROM validation_rule WHERE contract_id = ANY(:ids) "
         "AND rule_status IS DISTINCT FROM 'disabled' "
+        # A treaty's reinsurance rules have their own screen (Treaty Rules).
+        "AND COALESCE(rule_spec->>'source', '') <> 'reinsurance' "
         "GROUP BY contract_id"), {"ids": list(contract_ids)}).mappings().all()
     return {int(r["contract_id"]): {
                 "total": int(r["total"]),
@@ -1248,6 +1301,11 @@ def _allowed_actions(c: Contract, missing: list[str],
     carrier_voice = _speaks_for_carrier(p)
     unsigned = ["carrier", "counterparty"] if unsigned is None else unsigned
     my_side = "counterparty" if is_broker else "carrier"
+    # A treaty is agreed only by every reinsurer approving it on its link
+    # (treaty_routes.send_treaty_for_approval) — never by the carrier settling
+    # it alone. So no skip, no self-acceptance, and no signing a draft.
+    treaty = (c.contract_type or "") == "insurer_reinsurer"
+    sign_states = ("agreed", "signed") if treaty else ("draft", "agreed", "signed")
 
     return {
         # The carrier revises while the ball is with it — including after the
@@ -1303,11 +1361,11 @@ def _allowed_actions(c: Contract, missing: list[str],
         # review" is not the answer to it. Offering it there was a button that
         # 409'd with "a pending contract's terms have already been out".
         "skip_review": (is_carrier and not blocked and state == "draft"
-                        and not signed_copy_due),
+                        and not signed_copy_due and not treaty),
         # An uploaded contract's way up to the carrier admin. It has no terms to
         # negotiate and no broker to ask, so it does not go out for review — it
         # goes to the one person who can accept it on the carrier's behalf.
-        "submit_for_approval": (is_carrier and not blocked
+        "submit_for_approval": (is_carrier and not blocked and not treaty
                                 and state == "draft" and _is_uploaded(c)),
         # …and the admin's answer to it. Review and accept, in one act: there is
         # no signature to give on a contract that was executed before it got
@@ -1367,7 +1425,7 @@ def _allowed_actions(c: Contract, missing: list[str],
         # sign it": the screen said yes and the API said no, and nothing on
         # either told you which was wrong. An uploaded contract is accepted
         # (accept_contract), never signed.
-        "sign": (state in ("draft", "agreed", "signed")
+        "sign": (state in sign_states
                  and my_side in unsigned
                  and (not is_broker or "carrier" not in unsigned)
                  and (not is_broker or broker_voice)
@@ -1378,7 +1436,7 @@ def _allowed_actions(c: Contract, missing: list[str],
         # since a reinsurer has no seat here. Still a signing act, and still
         # the carrier's word, so it is the carrier admin's too.
         "record_signature": (is_carrier and carrier_voice
-                             and state in ("draft", "agreed", "signed")
+                             and state in sign_states
                              and "counterparty" in unsigned and has_wording),
         "terminate": state in ("active", "expired") and is_carrier,
         # renewal_gate: expired or terminated, or active within the renewal
@@ -1444,7 +1502,10 @@ def contract_types(_p: Principal = Depends(current_principal)):
     cannot disagree. Adding a mandatory field is a one-line change in
     contract_types.py and both sides pick it up.
     """
-    return {"types": ct.public_spec(), "default": ct.DEFAULT_TYPE,
+    types = ct.public_spec()
+    if not _treaties_on():
+        types = [t for t in types if t.get("key") != TREATY]
+    return {"types": types, "default": ct.DEFAULT_TYPE,
             "lifecycle": list(ct.LIFECYCLE),
             # The limits you agreed — each a question, an answer, and what
             # happens when a file breaks it. Served, not restated client-side.
@@ -1531,6 +1592,8 @@ def list_contracts(
     program_id: Optional[int] = Query(None),
     counterparty_id: Optional[int] = Query(None),
     contract_type: Optional[str] = Query(None),
+    treaty_type: Optional[str] = Query(
+        None, description="quota_share | surplus | xol | stop_loss | facultative"),
     lifecycle: Optional[str] = Query(None),
     waiting: Optional[str] = Query(
         None, description='"mine" — only contracts it is YOUR side\'s move on'),
@@ -1578,6 +1641,14 @@ def list_contracts(
             query = query.filter(Contract.broker_party_id == counterparty_id)
         if contract_type:
             query = query.filter(Contract.contract_type == contract_type)
+        if not _treaties_on():
+            # NULL is kept: an untyped legacy row is not a treaty.
+            query = query.filter(or_(Contract.contract_type.is_(None),
+                                     Contract.contract_type != TREATY))
+        if treaty_type:
+            from db import Treaty
+            query = query.join(Treaty, Treaty.contract_id == Contract.id) \
+                .filter(Treaty.treaty_type == treaty_type)
         if q:
             like = f"%{q.strip()}%"
             query = query.filter(or_(Contract.name.ilike(like),
@@ -1720,6 +1791,11 @@ class ContractIn(BaseModel):
     # `send_for_review` is still honoured when this is absent, so nothing that
     # called the old shape changes behaviour.
     create_as: Optional[str] = None
+    # A reinsurance treaty's structure (Phase 26.1) — its type, layers and
+    # panel, in treaty_types' shape — and the programmes it protects besides
+    # the one it is raised on (26.2). Ignored on an insurer ↔ broker contract.
+    treaty: Optional[dict] = None
+    program_ids: Optional[list[int]] = None
 
 
 def _bad_fields(e: ct.ContractTypeError):
@@ -1833,6 +1909,9 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
       * a BROKER gets a draft to finish and submit, and the DB trigger — not
         this code — marks it pending the carrier's decision.
     """
+    # A treaty is Phase 2 (see _treaties_on): refused while it is switched off.
+    if (body.contract_type or "") == TREATY and not _treaties_on():
+        raise HTTPException(400, "Reinsurance treaties are not available.")
     # Raising one is the same act as holding one: a contract Kavachio could
     # create is a contract it could not then open (_contract_access), which is
     # not a state worth having.
@@ -1864,6 +1943,15 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
             # send is discarded, so it cannot file under someone else.
             payload["counterparty_party_id"] = resolve_broker_party_id(s, p)
 
+        # A treaty's counterparty IS the lead on its panel. Taken from there
+        # when one is starred, so the contract and its panel cannot name two
+        # different reinsurers as the one the treaty is with.
+        if body.contract_type == "insurer_reinsurer" and body.treaty:
+            import treaty_types as _tt
+            lead = _tt.lead_of(body.treaty)
+            if lead is not None:
+                payload["counterparty_party_id"] = lead
+
         try:
             clean = ct.validate(body.contract_type, payload)
         except ct.ContractTypeError as e:
@@ -1871,6 +1959,14 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
 
         counterparty_id = clean.get("counterparty_party_id")
         _check_counterparty(s, p, spec, body.program_id, counterparty_id, tenant_id)
+
+        # The treaty is checked BEFORE the contract row exists, so a panel that
+        # adds up to 120% refuses the create rather than leaving a treaty with
+        # no structure behind it.
+        import treaty_routes as tr
+        is_treaty = body.contract_type == tr.REINSURER
+        treaty_clean = (tr.validate_for_create(s, tenant_id, body.treaty)
+                        if is_treaty and body.treaty else None)
 
         if body.output_template_id:
             tmpl = s.get(ExportTemplate, body.output_template_id)
@@ -1904,7 +2000,10 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
         c.executed_date = _as_date(clean.get("executed_date"))
         c.notice_period_days = clean.get("notice_period_days")
         c.premium_cap_amount = clean.get("premium_cap_amount")
-        c.commercial_terms = ct.clean_agreed_limits(body.agreed_limits) or None
+        # A treaty keeps only the limits a treaty has (contract_types.TREATY_LIMITS).
+        c.commercial_terms = (ct.treaty_limits(body.agreed_limits)
+                              if (c.contract_type or "") == "insurer_reinsurer"
+                              else ct.clean_agreed_limits(body.agreed_limits)) or None
         if body.renews_contract_id is not None:
             # Must be a contract the caller can actually see, and one nobody has
             # renewed already — two renewals of the same contract would leave
@@ -1915,7 +2014,7 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
             if existing:
                 raise HTTPException(409, {
                     "message": f"That contract has already been renewed — see "
-                               f"contract {existing.id}.",
+                               f"\"{existing.name or existing.filename or 'its renewal'}\".",
                     "errors": {"renews_contract_id": "already renewed"}})
             c.renews_contract_id = prior.id
         if body.wording_sections:
@@ -1938,6 +2037,12 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
                 type_label=ctx["type_label"],
                 dropped_sections=body.dropped_sections,
                 dropped_terms=body.dropped_terms)
+            if treaty_clean:
+                # The clauses the preview wrote from the structure, rewritten
+                # from the structure actually being saved — the two cannot
+                # differ, whatever the client sent.
+                import treaty_types as _tt
+                kept = _tt.merge_sections(kept, _tt.build_sections(treaty_clean))
             authored_sections = kept
             c.wording_sections = {
                 "sections": kept,
@@ -2012,6 +2117,10 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
 
         s.add(c)
         s.flush()
+        if is_treaty:
+            if treaty_clean:
+                tr.save_structure(s, c, treaty_clean, p.user_id)
+            tr.set_programmes(s, c, body.program_ids)
         if c.lifecycle == "in_review":
             # The thread starts at the moment the terms go out, so the broker's
             # answer has something to answer.
@@ -2051,7 +2160,15 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
             _store_authored_clauses(s, c, authored_sections)
             s.commit()
         _notify_contract_raised(s, c, p)
-        return _record(s, c, p=p)
+        # A treaty goes to its reinsurers to approve the moment it exists:
+        # nothing is agreed, and the carrier signs nothing, until they all have.
+        sent = None
+        if is_treaty and treaty_clean and _effective_lifecycle(c) == "draft":
+            sent = tr.send_on_create(s, c, p)
+        rec = _record(s, c, p=p)
+        if sent is not None:
+            rec["approval_sent"] = sent
+        return rec
 
 
 
@@ -2154,6 +2271,8 @@ class WordingPreviewIn(BaseModel):
     # meant.
     dropped_sections: Optional[list] = None
     dropped_terms: Optional[list] = None
+    # A treaty's structure, so its clauses are in the wording being previewed.
+    treaty: Optional[dict] = None
 
 
 @router.post("/contract-wording/preview")
@@ -2193,6 +2312,14 @@ def wording_preview(body: WordingPreviewIn,
             sections, values=body.values, limits=limits, type_label=type_label,
             dropped_sections=body.dropped_sections,
             dropped_terms=body.dropped_terms)
+
+    if body.treaty and (body.contract_type or "") == "insurer_reinsurer" and _treaties_on():
+        # The treaty's clauses, from the structure as it stands on screen.
+        # Lenient: a half-typed panel previews what it has.
+        import treaty_types as tt
+        treaty = tt.validate(body.treaty, strict=False)
+        if treaty.get("treaty_type"):
+            sections = tt.merge_sections(sections, tt.build_sections(treaty))
 
     tokens = cw.token_values(
         values=body.values, limits=limits,
@@ -2441,7 +2568,9 @@ def update_contract(contract_id: int, body: dict,
         # Both are absent-means-unchanged, so a screen saving one field does not
         # wipe the other.
         if "agreed_limits" in body:
-            c.commercial_terms = ct.clean_agreed_limits(body["agreed_limits"]) or None
+            c.commercial_terms = (ct.treaty_limits(body["agreed_limits"])
+                                  if (c.contract_type or "") == "insurer_reinsurer"
+                                  else ct.clean_agreed_limits(body["agreed_limits"])) or None
         retied: list[str] = []
         added: list[str] = []
         if "wording_sections" in body:
@@ -3073,6 +3202,10 @@ def submit_for_approval(contract_id: int, body: AcceptNote = AcceptNote(),
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
         state = _effective_lifecycle(c)
+        if (c.contract_type or "") == "insurer_reinsurer":
+            raise HTTPException(409, "a treaty's terms are agreed by its reinsurers, not settled here. "
+                     "Send it to them for approval — once every reinsurer has "
+                     "approved, it is agreed and you can sign it.")
         if state != "draft":
             raise HTTPException(
                 409, f"only a draft goes up for approval — this one is {state}.")
@@ -3282,6 +3415,10 @@ def skip_review(contract_id: int, body: ReviewRequest = ReviewRequest(),
         # a second press would have written a second `review_skipped` row and
         # reported success. A skip is a fact about a contract, not a setting,
         # and it happens once.
+        if (c.contract_type or "") == "insurer_reinsurer":
+            raise HTTPException(409, "a treaty's terms are agreed by its reinsurers, not settled here. "
+                     "Send it to them for approval — once every reinsurer has "
+                     "approved, it is agreed and you can sign it.")
         state = _effective_lifecycle(c)
         if state != "draft":
             raise HTTPException(
@@ -3704,6 +3841,10 @@ class EndorsementIn(BaseModel):
     # Sections as the builder left them, when the carrier has edited the
     # generated wording. Absent means "use what you generate".
     sections: Optional[list] = None
+    # A treaty's calculation basis it changes — [{term, layer, value}]: cession,
+    # lines, a layer's attachment or limit, the ceding commission. Each
+    # becomes a dated term from `effective_from` (treaty_basis).
+    basis: list = []
 
 
 def _endorsement_context(s, c: Contract, body: EndorsementIn):
@@ -3713,6 +3854,12 @@ def _endorsement_context(s, c: Contract, body: EndorsementIn):
     old = c.commercial_terms or {}
     new = ct.clean_agreed_limits(body.agreed_limits)
     changes = cw.derive_endorsement_changes(old, new)
+    if body.basis and (c.contract_type or "") == "insurer_reinsurer":
+        import treaty_basis as tb
+        try:
+            changes = changes + tb.endorsement_changes(s, c, body.basis, body.effective_from)
+        except tb.BasisError as e:
+            raise HTTPException(400, {"message": str(e), "errors": e.errors})
     number = 1 + (s.query(ContractDocument)
                   .filter(ContractDocument.contract_id == c.id,
                           ContractDocument.kind == "endorsement")
@@ -3745,6 +3892,10 @@ def endorsement_preview(contract_id: int, body: EndorsementIn,
             "changes": changes,
             "sections": sections,
             "current_limits": old,
+            # A treaty's terms an endorsement can change, as in force on its date.
+            "basis": (__import__("treaty_basis").endorsable(
+                s, c, _as_date(body.effective_from))
+                if (c.contract_type or "") == "insurer_reinsurer" else []),
             "contract": {"id": c.id, "name": c.name or c.filename,
                          "inception_dt": str(c.inception_dt) if c.inception_dt else None,
                          "expiry_dt": str(c.expiry_dt) if c.expiry_dt else None},
@@ -3758,9 +3909,100 @@ def endorsement_create(contract_id: int, body: EndorsementIn,
     change to a running contract is now a mid-term change (mid_term_routes.py):
     the broker agrees, both sides sign, and its checks are dated."""
     _require_carrier(p)
-    raise HTTPException(410, "Changes to a running contract are made as a mid-term "
-                             "change now — open the contract and choose Mid-term "
-                             "change.")
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        state = _effective_lifecycle(c)
+        if state not in ("active", "expired"):
+            raise HTTPException(
+                409, f"this contract is {state}. An endorsement changes a "
+                     f"contract that is running — a draft is changed by "
+                     f"editing its terms, and one that has ended is not "
+                     f"changed at all.")
+
+        old, new, changes, number, sections = _endorsement_context(s, c, body)
+        if not changes:
+            raise HTTPException(400, {
+                "message": "Nothing has changed, so there is nothing to "
+                           "endorse. Change a term first.",
+                "errors": {"agreed_limits": "no change"}})
+        basis_moves = [ch["basis"] for ch in changes if ch.get("basis")]
+        if basis_moves and not _as_date(body.effective_from):
+            raise HTTPException(400, {
+                "message": "An endorsement that changes the treaty's calculation basis "
+                           "needs the date it takes effect.",
+                "errors": {"effective_from": "required"}})
+
+        import contract_wording as cw
+        counterparty = (s.get(Party, c.broker_party_id)
+                        if c.broker_party_id else None)
+        from db import Tenant
+        carrier = s.get(Tenant, c.tenant_id) if c.tenant_id else None
+        carrier_name = (getattr(carrier, "legal_name", None)
+                        or getattr(carrier, "tenant_name", None))
+
+        data = cw.compose_endorsement_pdf(
+            contract_name=c.name or c.filename, number=number,
+            carrier_name=carrier_name,
+            counterparty_name=getattr(counterparty, "legal_name", None),
+            effective_from=body.effective_from, sections=sections)
+        filename = f"Endorsement {number} — {(c.name or 'contract').strip()}.pdf"
+
+        # Stored, unlike the wording. See compose_endorsement_pdf: an
+        # endorsement records a change that happened on a date, so it must not
+        # be regenerated later from terms that have moved on since.
+        blob_ref, blob = storage.store_or_keep(
+            "contract-documents", c.tenant_id, filename, data, "application/pdf")
+
+        # Attached ALONGSIDE the wording, not replacing it. Both are active and
+        # rule generation reads the pair, with the endorsed value winning.
+        doc = ContractDocument(
+            tenant_id=c.tenant_id, contract_id=c.id, kind="endorsement",
+            filename=filename, version=f"endorsement-{number}",
+            blob_ref=blob_ref, blob=blob,
+            fingerprint=hashlib.sha256(data).hexdigest(),
+            effective_from=_as_date(body.effective_from),
+            is_active=True, uploaded_by_user_id=p.user_id,
+            extracted={"changes": changes, "note": body.note,
+                       "endorsement_number": number},
+        )
+        s.add(doc)
+
+        # The contract's live terms move to the endorsed values. What they WERE
+        # is not lost — the endorsement document records every from/to, which is
+        # exactly the history somebody asks for later.
+        c.commercial_terms = new or None
+        # A treaty's calculation basis moves FROM the endorsement's date: each
+        # changed term is a dated version, made by this endorsement — earlier
+        # periods keep the terms they were worked out with (treaty_basis).
+        if basis_moves:
+            import treaty_basis as tb
+            s.flush()
+            who = s.get(AppUser, p.user_id) if p.user_id else None
+            for mv in basis_moves:
+                try:
+                    tb.add(s, c, term=mv["term"], layer=mv["layer"], value=mv["value"],
+                           effective_from=body.effective_from,
+                           note=f"Endorsement {number}", source="endorsement",
+                           user_id=p.user_id,
+                           who=(who.full_name or who.email) if who else None,
+                           document_id=doc.id)
+                except tb.BasisError as e:
+                    s.rollback()
+                    raise HTTPException(400, {"message": str(e), "errors": e.errors})
+        # Keep the authored wording's own record of its sections in step with
+        # the terms, so re-composing the contract quotes the endorsed numbers.
+        s.commit()
+        s.refresh(c)
+
+        rec = _record(s, c, p=p)
+        rec["endorsement"] = {
+            "number": number, "document_id": doc.id, "changes": changes,
+            "effective_from": body.effective_from,
+        }
+        # Attaching an endorsement changes what the rules SHOULD be, and the
+        # rules on file were read without it.
+        rec["rules_stale"] = True
+        return rec
 
 
 # =============================================================================
@@ -3830,6 +4072,68 @@ def _signed_envelope(s, contract_id: int):
             .first())
 
 
+def settle_signatures(s, c: Contract) -> tuple[list, bool, Optional[str]]:
+    """After a signature: if both sides have now signed, put the contract in
+    force — or stop at `signed` and say what is in the way. Shared by signing
+    here and a reinsurer signing on its private link (treaty_routes).
+
+    Returns (signatures, both signed, what blocks it or None)."""
+    sigs = _signatures(s, c.id)
+    both = not _unsigned_sides(sigs)
+    blocked_by = None
+    if both:
+        c.executed_date = c.executed_date or _today()
+        docs = s.query(ContractDocument).filter(
+            ContractDocument.contract_id == c.id).all()
+        missing = _missing_references(c, docs)
+        if missing:
+            blocked_by = ("it defers to document(s) nobody has supplied: "
+                          + ", ".join(missing))
+        # A treaty is in force once EVERY reinsurer on it has signed its lines,
+        # not only the lead whose signature is the counterparty's.
+        if not blocked_by and (c.contract_type or "") == "insurer_reinsurer":
+            waiting = _reinsurers_yet_to_sign(s, c)
+            if waiting:
+                blocked_by = "waiting for " + ", ".join(waiting) + " to sign"
+        # Signed by both, but something else genuinely in the way: recorded as
+        # signed and said plainly, rather than activated with a hole in it or
+        # refused after the signature was given.
+        if _effective_lifecycle(c) != "signed":
+            _move(c, "signed")
+        if not blocked_by:
+            _move(c, "active")
+    return sigs, both, blocked_by
+
+
+def _reinsurers_yet_to_sign(s, c: Contract) -> list[str]:
+    """The reinsurers on a treaty that have not signed their lines yet."""
+    import treaty_placement as tp
+    import treaty_routes
+    signed = set(tp.live_signatures(s, c))
+    if c.broker_party_id and "counterparty" not in _unsigned_sides(_signatures(s, c.id)):
+        signed.add(c.broker_party_id)
+    waiting = sorted(treaty_routes._panel_party_ids(s, c) - signed)
+    names = {pt.id: pt.legal_name for pt in
+             s.query(Party).filter(Party.id.in_(waiting or [0]))}
+    return [names.get(pid) or f"reinsurer {pid}" for pid in waiting]
+
+
+def counterparty_signing_block(s, c: Contract) -> Optional[str]:
+    """Why the counterparty cannot sign this contract right now, or None.
+    The same rules as sign_contract, for the reinsurer's signing link."""
+    state = _effective_lifecycle(c)
+    if state in ("in_review", "changes_requested", "pending"):
+        return "its terms are still being settled"
+    if state in ("active", "expired", "terminated", "superseded"):
+        return f"it is {state}, so it is not waiting on a signature"
+    sigs = _signatures(s, c.id)
+    if "counterparty" not in _unsigned_sides(sigs):
+        return "the reinsurer's side has already signed"
+    if "carrier" in _unsigned_sides(sigs):
+        return "the carrier has not signed it yet — the carrier signs first"
+    return None
+
+
 class SignatureIn(BaseModel):
     """One signature. `side` is only accepted from a carrier recording the
     other party's — everybody else signs for their own side and cannot say
@@ -3880,6 +4184,10 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
             raise HTTPException(
                 409, f"this contract is {state} and is not waiting on a "
                      f"signature.")
+        if state == "draft" and (c.contract_type or "") == "insurer_reinsurer":
+            raise HTTPException(409, "a treaty's terms are agreed by its reinsurers, not settled here. "
+                     "Send it to them for approval — once every reinsurer has "
+                     "approved, it is agreed and you can sign it.")
 
         # Counted exactly as _record counts it (see `has_wording` there),
         # blob included. The two had drifted: the record said an old contract
@@ -3965,6 +4273,20 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
                          "it there, so your signature lands on the document "
                          "itself. Open it from the Sign button.")
 
+        # A treaty's counterparty signs OUTSIDE Kavachio — the reinsurer has no
+        # seat here — so the only evidence of that signature is the signed copy
+        # that came back. Recording it without one would leave a treaty in
+        # force on the strength of a name typed into a box.
+        if (body.recorded and side == "counterparty"
+                and (c.contract_type or "") == "insurer_reinsurer"
+                and body.document_id is None):
+            raise HTTPException(400, {
+                "message": "Attach the signed slip or wording the reinsurer "
+                           "sent back, and pick it here. A reinsurer signs "
+                           "outside Kavachio, so that document is the proof "
+                           "of their signature.",
+                "errors": {"document_id": "required for a treaty"}})
+
         doc_id = None
         if body.document_id is not None:
             doc = s.get(ContractDocument, body.document_id)
@@ -3991,27 +4313,7 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
             document_id=doc_id, note=(body.note or "").strip() or None))
         s.flush()
 
-        sigs = _signatures(s, c.id)
-        both = not _unsigned_sides(sigs)
-        blocked_by = None
-        if both:
-            c.executed_date = c.executed_date or _today()
-            docs = s.query(ContractDocument).filter(
-                ContractDocument.contract_id == c.id).all()
-            missing = _missing_references(c, docs)
-            if missing:
-                blocked_by = ("it defers to document(s) nobody has supplied: "
-                              + ", ".join(missing))
-            if blocked_by:
-                # Signed by both, but something else is genuinely in the way.
-                # Recorded as signed and said plainly, rather than activated
-                # with a hole in it or refused after the signature was given.
-                if _effective_lifecycle(c) != "signed":
-                    _move(c, "signed")
-            else:
-                if _effective_lifecycle(c) != "signed":
-                    _move(c, "signed")
-                _move(c, "active")
+        sigs, both, blocked_by = settle_signatures(s, c)
 
         author = c.submitted_by_user_id
         s.commit()
@@ -4024,6 +4326,11 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
         if side == "carrier":
             _log_contract_event(s, c, p, "contract_signed_off")
             _notify_contract_signed(s, c, p, author)
+            # A treaty: every reinsurer that may now sign its lines is sent
+            # its signing link — the carrier signs first, then they do.
+            if (c.contract_type or "") == "insurer_reinsurer" and not both:
+                import treaty_routes
+                rec["signing_requested"] = treaty_routes.ask_reinsurers_to_sign(s, c, p)
         rec["signature_note"] = (
             f"Signed for the {'carrier' if side == 'carrier' else 'counterparty'}"
             f" by {name}."
@@ -4068,6 +4375,12 @@ def unsign_contract(contract_id: int, signature_id: int,
         if p.is_broker:
             _assert_speaks_for_broker(p, "withdraw a signature")
         s.delete(sg)
+        # On a master treaty the lead's counterparty signature is also its
+        # signature for its own lines — withdrawn together.
+        if sg.side == "counterparty" and (c.contract_type or "") == "insurer_reinsurer" \
+                and c.broker_party_id:
+            import treaty_placement
+            treaty_placement.withdraw(s, c, c.broker_party_id, p.user_id)
         if _effective_lifecycle(c) == "signed":
             c.lifecycle = "agreed" if c.broker_party_id else "draft"
         s.commit()
@@ -4281,6 +4594,53 @@ def _log_gap_confirmed(s, c: Contract, p: Principal, gaps: list[dict]) -> None:
                      principal=p)
     except Exception:  # noqa: BLE001
         pass
+
+
+def clauses_from_renewal_chain(s, contract: Contract) -> Optional[int]:
+    """Give a renewal that has no clauses of its own a copy of the clauses of
+    the nearest contract it renews that has some — its own new rows, so the
+    rules written from them belong to the renewal. Returns that contract's
+    id, or None when nothing up the chain was ever read.
+
+    A renewal carries last year's terms; one made without "renew on the same
+    wording" was given no document, and so nothing to write its rules from.
+    Building a bordereau setup on it then failed outright ("no extracted
+    clauses"). Last year's clauses are the terms it renewed on until a new
+    wording is attached — and attaching one and re-reading it replaces them."""
+    from sqlalchemy import text as _sql
+    seen: set[int] = set()
+    prev_id = contract.renews_contract_id
+    source = None
+    while prev_id and prev_id not in seen:
+        seen.add(prev_id)
+        n = s.execute(_sql(
+            "SELECT COUNT(*) FROM clauses_extracted WHERE contract_id = :c "
+            "AND COALESCE(created_by, '') <> 'contract_wording'"),
+            {"c": prev_id}).scalar() or 0
+        if n:
+            source = prev_id
+            break
+        prev = s.get(Contract, prev_id)
+        prev_id = prev.renews_contract_id if prev is not None else None
+    if source is None:
+        return None
+    skip = {"clause_id", "contract_id", "created_at", "updated_at", "modified_at"}
+    names = [n for n in s.execute(_sql(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = 'clauses_extracted' "
+        "ORDER BY ordinal_position")).scalars().all() if n not in skip]
+    quoted = ", ".join(f'"{n}"' for n in names)
+    s.execute(_sql(
+        f"INSERT INTO clauses_extracted ({quoted}, contract_id) "
+        f"SELECT {quoted}, :new FROM clauses_extracted WHERE contract_id = :old "
+        f"AND COALESCE(created_by, '') <> 'contract_wording' ORDER BY clause_id"),
+        {"new": contract.id, "old": source})
+    # Copied clauses start un-ruled: their rules are written for the renewal.
+    if "rule_generation_status" in names:
+        s.execute(_sql(
+            "UPDATE clauses_extracted SET rule_generation_status = 'in_review', "
+            "generated_rule_count = 0 WHERE contract_id = :c"), {"c": contract.id})
+    return source
 
 
 def _copy_contract_rules(s, old_id: int, new_id: int,
@@ -4526,6 +4886,11 @@ def renew_contract(contract_id: int, body: Renewal,
 
         s.add(new)
         s.flush()
+        if (new.contract_type or "") == "insurer_reinsurer":
+            # Last year's structure and programmes come across; the carrier
+            # edits what moved. See treaty_routes.copy_structure.
+            import treaty_routes
+            treaty_routes.copy_structure(s, old, new)
         if new.wording_sections:
             _store_authored_clauses(
                 s, new, (new.wording_sections or {}).get("sections"))
@@ -4943,7 +5308,7 @@ def list_documents(contract_id: int, p: Principal = Depends(current_principal)):
                 .filter(ContractDocument.contract_id == c.id)
                 .order_by(ContractDocument.created_at.desc()).all())
         return {
-            "documents": [_doc_dict(d) for d in docs if _doc_visible(d, p)],
+            "documents": [_doc_dict(d, _uploader_names(s, docs)) for d in docs if _doc_visible(d, p)],
             "missing_references": _missing_references(c, docs),
             # What the wording ASKED for, whether or not it has been supplied —
             # so the screen can show the request next to the answer.
@@ -4963,6 +5328,8 @@ async def upload_document(
     # which is exactly why it is a flag on the document and not a status the
     # app derives.
     is_executed_copy: bool = Form(default=False),
+    # The reinsurer a signed line slip belongs to (kind "signed_line").
+    party_id: Optional[int] = Form(default=None),
     p: Principal = Depends(current_principal),
 ):
     """Attach a document to a contract.
@@ -5024,10 +5391,26 @@ async def upload_document(
                          f"contract's dates are not corrected that way while it "
                          f"is {state.replace('_', ' ')}.")
 
+        if kind == "signed_line":
+            # Belongs to one reinsurer that writes a line on this treaty.
+            import treaty_placement as tp
+            import treaty_routes as trt
+            st = trt.load_structure(s, c.id, names=False)
+            if not party_id or not tp.lines_of(st, party_id):
+                raise HTTPException(400, "A signed line slip belongs to a reinsurer "
+                                         "with a line on this treaty — choose which.")
         blob_ref, blob = await run_in_threadpool(
             storage.store_or_keep, "contract-documents", c.tenant_id,
             file.filename, data, file.content_type)
 
+        # Each upload of a kind is its next version (v1, v2…) — a replaced
+        # wording is retired, not overwritten, so the versions stay countable.
+        q_before = s.query(ContractDocument).filter(
+            ContractDocument.contract_id == c.id, ContractDocument.kind == kind)
+        if kind == "signed_line":
+            # Versions per reinsurer: each has its own slip.
+            q_before = q_before.filter(ContractDocument.party_id == party_id)
+        n_before = q_before.count()
         if kind == "contract":
             # A contract has ONE wording. The previous is retired rather than
             # deleted, so the rules it produced stay explainable.
@@ -5046,8 +5429,16 @@ async def upload_document(
             effective_from=_as_date(effective_from),
             is_executed_copy=is_executed_copy or None,
             is_active=True, uploaded_by_user_id=p.user_id,
+            version=f"v{n_before + 1}",
+            party_id=party_id if kind == "signed_line" else None,
         )
         s.add(doc)
+        # A signed wording is checked as it arrives (26.3): it counts as the
+        # treaty's signed wording only if it opens.
+        if kind == "contract" and is_executed_copy:
+            s.flush()
+            import treaty_wording
+            treaty_wording.validate(s, doc)
 
         # Keep the contract row's own filename pointing at the live wording —
         # every existing screen reads it, and they should not all have to learn
@@ -5148,6 +5539,33 @@ def download_document(contract_id: int, document_id: int,
             content=data, media_type=_media_type(doc.filename),
             headers={"Content-Disposition":
                      _content_disposition(doc.filename or "document")})
+
+
+@router.get("/contracts/{contract_id}/documents/{document_id}/view")
+async def view_document(contract_id: int, document_id: int,
+                        p: Principal = Depends(current_principal)):
+    """The document as a PDF, to read in the page — a Word file converted on
+    the server (the same conversion signing uses), a PDF as it is. 409 when it
+    cannot be converted: the download is the way to it then."""
+    import esign_pdf
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        doc = s.get(ContractDocument, document_id)
+        if not doc or doc.contract_id != c.id or not _doc_visible(doc, p):
+            raise HTTPException(404, "document not found")
+        data = storage.resolve_bytes(doc.blob_ref, doc.blob)
+        name = doc.filename or "document"
+    if data is None:
+        raise HTTPException(404, "the file for this document is no longer stored")
+    try:
+        pdf = await run_in_threadpool(esign_pdf.ensure_pdf, data, name)
+    except Exception as e:  # noqa: BLE001 — not a format that converts
+        log.info("document %s could not be shown as a PDF: %s", document_id, e)
+        raise HTTPException(409, "This file cannot be shown in the page — download it instead.")
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition":
+                             _content_disposition(f"{stem}.pdf").replace("attachment", "inline", 1)})
 
 
 @router.get("/contracts/{contract_id}/contract.pdf")
@@ -5570,6 +5988,10 @@ def _auto_bind(s, c: Contract, p: Principal) -> Optional[dict]:
     """
     if not (c.commercial_terms or {}):
         return None
+    # A treaty's limits are checked on its reinsurance bordereau
+    # (treaty_rules.from_limits) — never on the brokers' files.
+    if (c.contract_type or "") == "insurer_reinsurer":
+        return None
     try:
         tmpl, level = _resolve_template(s, c)
         if tmpl is None or tmpl.tenant_id != c.tenant_id:
@@ -5594,6 +6016,12 @@ def _bind_checks(s, c: Contract, tmpl: ExportTemplate, p: Principal) -> dict:
     for the automatic path, and only a person who pressed a button needs to be
     told there was nothing to press it for.
     """
+    if (c.contract_type or "") == "insurer_reinsurer":
+        raise HTTPException(409, {
+            "message": "A treaty's agreed limits are checked on its reinsurance "
+                       "bordereau, not on the brokers' files — see Treaty rules "
+                       "on its reinsurance bordereau setup.",
+            "errors": {"agreed_limits": "treaty"}})
     if not (c.commercial_terms or {}):
         raise HTTPException(409, {
             "message": "This contract has no agreed limits to build checks "

@@ -7,22 +7,102 @@ import random
 import threading
 from collections import deque
 from contextlib import contextmanager
+from pathlib import Path
 from google import genai
 from google.genai import types
 
 
-# API key from the environment (GEMINI_API_KEY / GOOGLE_API_KEY). The previous
-# hardcoded key must be rotated; the literal fallback is kept ONLY so existing
-# setups don't break before the env var is configured — remove it once rotated.
-# SECURITY: when the literal fallback is used we log a loud warning so it can't be
-# forgotten. Set GEMINI_API_KEY in the environment/.env and rotate the exposed key.
-_API_KEY = (
-    os.getenv("GEMINI_API_KEY")
-)
-if not (os.getenv("GEMINI_API_KEY")):
-    print("[gemini_service] SECURITY WARNING: using the hardcoded fallback API key. "
-          "Set GEMINI_API_KEY in the environment and rotate the exposed key.")
-client = genai.Client(api_key=_API_KEY)
+# ─────────────────────────────────────────────────────────────────────────────
+# CLIENT — Gemini on Google Cloud's Gemini Enterprise Agent Platform (formerly
+# Vertex AI), US region. Replaces the Gemini Developer API key (GEMINI_API_KEY).
+# Configured by the standard Google Cloud variables:
+#   GOOGLE_APPLICATION_CREDENTIALS  path to a service-account key JSON. A relative
+#                                   path resolves from backend/python-services.
+#                                   Unset = Application Default Credentials (a
+#                                   `gcloud auth application-default login`, or the
+#                                   VM's attached service account).
+#   GOOGLE_CLOUD_PROJECT            the GCP project. Defaults to the key file's
+#                                   project_id; required when using ADC.
+#   GOOGLE_CLOUD_LOCATION           defaults to "us" (US multi-region). "us-central1"
+#                                   returns 404 for the 3.5 models, and "global"
+#                                   carries no US data-residency guarantee.
+# Every module gets its client from get_client(), so auth lives in one place.
+# ─────────────────────────────────────────────────────────────────────────────
+_SERVICE_ROOT = Path(__file__).resolve().parent.parent
+_CLOUD_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+AI_NOT_CONFIGURED = ("AI is not configured: set GOOGLE_APPLICATION_CREDENTIALS "
+                     "or GOOGLE_CLOUD_PROJECT")
+
+
+def _credentials_path():
+    raw = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else _SERVICE_ROOT / path
+
+
+def _gcp_location() -> str:
+    return (os.getenv("GOOGLE_CLOUD_LOCATION") or "").strip() or "us"
+
+
+def ai_configured() -> bool:
+    """True when a Google Cloud project is known for the AI calls — the variable
+    set, or a key file present. Cheap and offline; callers check it before
+    building prompts so an unconfigured PC skips the AI step instead of failing."""
+    if (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip():
+        return True
+    path = _credentials_path()
+    return bool(path and path.is_file())
+
+
+_clients: dict = {}
+_clients_lock = threading.Lock()
+
+
+def get_client(timeout_ms=None):
+    """The shared genai client for Agent Platform, one per HTTP timeout. Loads the
+    service-account key explicitly so the SDK uses exactly that identity and never
+    silently falls back to someone's personal gcloud login."""
+    with _clients_lock:
+        c = _clients.get(timeout_ms)
+        if c is not None:
+            return c
+        credentials, project, creds_desc = None, None, "ADC"
+        path = _credentials_path()
+        if path is not None:
+            if not path.is_file():
+                raise RuntimeError(f"GOOGLE_APPLICATION_CREDENTIALS file not found: {path}")
+            from google.oauth2 import service_account
+            credentials = service_account.Credentials.from_service_account_file(
+                str(path), scopes=_CLOUD_SCOPES)
+            project = credentials.project_id
+            creds_desc = f"service account {credentials.service_account_email}"
+        project = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip() or project
+        location = _gcp_location()
+        c = genai.Client(
+            enterprise=True,
+            project=project,
+            location=location,
+            credentials=credentials,
+            http_options=types.HttpOptions(timeout=timeout_ms) if timeout_ms else None,
+        )
+        print(f"[gemini_service] Agent Platform client: project={project} "
+              f"location={location} creds={creds_desc}"
+              + (f" timeout={timeout_ms}ms" if timeout_ms else ""))
+        _clients[timeout_ms] = c
+        return c
+
+
+class _LazyClient:
+    """Stands in for the module-level `client` so importing this module never
+    needs credentials (tests, a PC without AI set up); the real client is built
+    on first use."""
+    def __getattr__(self, name):
+        return getattr(get_client(), name)
+
+
+client = _LazyClient()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,6 +136,7 @@ _MODEL_CEILINGS = {
     "gemini-2.5-flash": {"input": 1_000_000, "output": 65536},
     "gemini-2.5-flash-lite": {"input": 1_000_000, "output": 65536},
     "gemini-3.5-flash": {"input": 1_000_000, "output": 65536},
+    "gemini-3.5-flash-lite": {"input": 1_000_000, "output": 65536},
     "gemini-2.5-pro": {"input": 1_000_000, "output": 65536},
 }
 
@@ -320,7 +401,8 @@ def _generate_with_retry(kwargs, label, est_tokens, gen_client=None):
 # Models are config, not literals. The IR/compiler stay model-agnostic so a swap
 # or bake-off (Gemini 3.5 Flash, Claude Haiku 4.5) is a one-line env change.
 #   EXTRACTION_MODEL — the default for every call (Pipeline 1 extraction = call
-#                      #1, Stage A classification = call #2). Stays 2.5 Flash.
+#                      #1, Stage A classification = call #2). 3.5 Flash since
+#                      the move to Agent Platform, where 2.5 Flash is retired.
 #   STAGE_B_MODEL    — the Stage B rule-extraction call (the old AJV/Custom calls
 #                      #3 & #4, now one IR call). Uses 3.5 Flash for stronger
 #                      structured extraction.
@@ -333,9 +415,9 @@ def _generate_with_retry(kwargs, label, est_tokens, gen_client=None):
 # temp 0 + a seed make answers MOSTLY repeatable, not always: the same Call 1
 # request was measured returning two different clause sets for one PDF (41 vs 59).
 # A repeatable answer for identical input comes from ai_cache, keyed on the input.
-EXTRACTION_MODEL = os.getenv("KAVACHIO_EXTRACTION_MODEL", "gemini-2.5-flash")
+EXTRACTION_MODEL = os.getenv("KAVACHIO_EXTRACTION_MODEL", "gemini-3.5-flash")
 STAGE_B_MODEL = os.getenv("KAVACHIO_STAGEB_MODEL", "gemini-3.5-flash")
-SMALL_MODEL = os.getenv("KAVACHIO_SMALL_MODEL", "gemini-2.5-flash-lite")
+SMALL_MODEL = os.getenv("KAVACHIO_SMALL_MODEL", "gemini-3.5-flash-lite")
 DETERMINISTIC_SEED = int(os.getenv("KAVACHIO_LLM_SEED", "7"))
 
 # The model every ai_cache entry of the pre-existing kinds (rule_intents,

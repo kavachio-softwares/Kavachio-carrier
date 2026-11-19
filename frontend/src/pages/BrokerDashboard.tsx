@@ -23,6 +23,9 @@ import { RunTrend } from "../components/BrokerCharts";
 import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
 import { api } from "../api/client";
 import { InfoTip } from "../components/InfoTip";
+import { RulesWaitingCard } from "../components/RulesWaitingCard";
+import { canAccessPath } from "../access";
+import { phase2Enabled } from "../features";
 import { ChartCard, StatCard } from "../components/StatCard";
 import { NotCountedBadge, SupersededTag } from "../components/ContractTag";
 
@@ -132,6 +135,15 @@ export default function BrokerDashboard() {
               <InfoTip text={`${d.broker.name} — your team, your carriers, and what needs you today.`} />
             </h2>
           </div>
+          {/* Policies has no sidebar entry: this is its way in. */}
+          {/* Both are Phase 2 — gone, with their row, while it is off. */}
+          {(canAccessPath("/policies") || canAccessPath("/financial-summary")) && (
+            <div className="actions">
+              {canAccessPath("/policies") && <Link className="btn" to="/policies">Policy Explorer</Link>}
+              {canAccessPath("/financial-summary") && (
+                <Link className="btn" to="/financial-summary">Financial Summary</Link>)}
+            </div>
+          )}
         </div>
 
         {note && <div className="note ok" style={{ marginBottom: 16 }}>{note}</div>}
@@ -170,6 +182,9 @@ export default function BrokerDashboard() {
             </div>
           </div>
         )}
+
+        {/* Programme rules the carrier sent, waiting for this broker's answer. */}
+        {phase2Enabled() && <RulesWaitingCard side="broker" />}
 
         <div style={grid(5)}>
           <StatCard title="Carriers" value={c.carriers} icon={Building2}
@@ -220,7 +235,7 @@ export default function BrokerDashboard() {
                         <div>{c.signatures_completed} already signed</div>
                       </>
                     }
-                    info="Contracts with your carriers that need you. Waiting for your review: read the terms and agree them or ask for changes. To sign: terms are agreed and your signature is needed before the contract becomes active. Mid-term changes: your carrier is changing a running contract from a date — read the change and agree it or ask for changes, then sign it after the carrier does. Click to open them."
+                    info={"Contracts that need you: terms to agree or query, contracts to sign, and mid-term changes from your carrier to agree and then sign.\nClick to open them."}
                     tone={c.waiting_on_me > 0 ? "alert" : undefined}
                     onClick={c.waiting_on_me > 0 ? () => setWaitingOpen(true) : undefined} />
           <StatCard title="Exceptions to Review" value={c.agency_exceptions} icon={AlertCircle}
@@ -247,7 +262,7 @@ export default function BrokerDashboard() {
                         </div>
                       </>
                     }
-                    info="Bordereaux you still have to process that are due in the next 30 days. Overdue ones are past their due date, named by the month they report on. Click to open your Bordereau Calendar."
+                    info="Bordereaux you still have to process that are due in the next 30 days, and any overdue. Click to open your Bordereau Calendar."
                     tone={c.files_overdue > 0 ? "alert" : undefined}
                     onClick={() => {
                       const at = c.first_overdue ?? c.next_due;
@@ -267,7 +282,7 @@ export default function BrokerDashboard() {
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
               <ChartCard title="Bordereau Status"
-                info={<InfoTip text={`Your files over the last ${DAYS} days, by result: a clean file, or one with exceptions to review. The blue line (right-hand scale) is how many exceptions were resolved each day. Click a day to see its files.`} />}>
+                info={<InfoTip text={`Your files over the last ${DAYS} days: clean, or with exceptions to review. The blue line is exceptions resolved each day.\nClick a day to see its files.`} />}>
                 {!ins ? <div className="muted">Loading…</div> : <RunTrend data={ins.runs_by_day} audience="broker" showResolved onDayClick={setStatusDay} />}
               </ChartCard>
               <RecentFiles />

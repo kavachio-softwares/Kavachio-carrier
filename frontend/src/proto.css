@@ -90,6 +90,12 @@
 .proto-side .nav{padding:14px 12px;overflow-y:auto;flex:1;min-height:0}
 .proto-side .group{margin:16px 10px 8px;font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:#5C6678;font-weight:700;display:flex;align-items:center;gap:8px}
 .proto-side .group::after{content:"";flex:1;height:1px;background:var(--p-side-line)}
+/* A section heading that opens and closes its links (Layout.tsx). The chevron
+   sits after the rule, at the right-hand end. */
+.proto-side .group-btn{width:calc(100% - 20px);background:none;border:0;padding:4px 0;font-family:inherit;cursor:pointer;text-align:left;border-radius:4px;transition:color .12s}
+.proto-side .group-btn:hover{color:var(--p-side-bright)}
+.proto-side .group-btn:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}
+.proto-side .group-chev{order:1;flex:0 0 auto;transition:transform .15s}
 .proto-side a.item{display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:var(--p-r-sm);color:var(--p-side-ink);font-size:13.5px;font-weight:500;margin-bottom:2px;position:relative;transition:background .12s,color .12s;text-decoration:none}
 .proto-side a.item:hover{background:rgba(255,255,255,.05);color:var(--p-side-bright)}
 .proto-side a.item.active{background:rgba(7,114,130,.16);color:#fff;font-weight:600}
@@ -128,6 +134,8 @@
 .proto-side.collapsed .wscard:hover{background:transparent;box-shadow:none}
 .proto-side.collapsed .wscard-meta,.proto-side.collapsed .wscard-go{display:none}
 .proto-side.collapsed .group{margin:14px 16px;gap:0;font-size:0;letter-spacing:0}
+.proto-side.collapsed .group-btn{width:auto;cursor:default}
+.proto-side.collapsed .group-chev{display:none}
 .proto-side.collapsed a.item{justify-content:center;gap:0;padding:11px 0}
 .proto-side.collapsed .item-label{display:none}
 .proto-side.collapsed .side-user{justify-content:center;gap:0;padding:8px 0}
@@ -178,7 +186,10 @@
 .proto .card-h .ci{width:18px;height:18px;color:var(--p-faint)}
 .proto .card-h .sub{color:var(--p-faint);font-size:12.5px;font-weight:500}
 .proto .card-h .right{margin-left:auto;display:flex;gap:10px;align-items:center}
-.proto .card-h .info-tip{margin-left:-4px}
+/* Only an icon that is itself a header item: the row's 11px gap already
+   spaces it. One inside the title (<h3>Title <InfoTip/></h3>) gets no gap,
+   so pulling it left ran it into the last letter. */
+.proto .card-h > .info-tip{margin-left:-4px}
 .proto .grid{display:grid;gap:18px}
 /* Grid items default to min-width:auto, so a wide child (e.g. a preview table)
    blows its column past the track and makes the whole page scroll sideways.
@@ -194,7 +205,8 @@
 /* ---------------- dashboard: tiles ---------------- */
 .proto .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
 .proto .tiles.t3{grid-template-columns:repeat(3,1fr)}
-@media(max-width:1000px){.proto .tiles,.proto .tiles.t3{grid-template-columns:1fr 1fr}}
+.proto .tiles.t5{grid-template-columns:repeat(5,1fr)}
+@media(max-width:1000px){.proto .tiles,.proto .tiles.t3,.proto .tiles.t5{grid-template-columns:1fr 1fr}}
 /* A ranked-bar row that opens the detail behind its own number. */
 .proto .rb-row{display:block;border-radius:8px;padding:2px 6px;margin:-2px -6px}
 .proto .rb-row:hover{background:var(--p-surface-2)}
@@ -382,24 +394,44 @@
 /* Beside a heading in plain Tailwind screens (e.g. a clause with no column in
    Bordereau Setup) — outside .proto and .setup-tab, so it is sized here too;
    without this the icon has no size and simply does not show. */
-.tip-inline .info-tip{display:inline-flex;vertical-align:middle;outline:none}
+.tip-inline .info-tip{display:inline-flex;vertical-align:middle;outline:none;margin-left:6px}
 .tip-inline .info-tip .ic{width:14px;height:14px;cursor:help;color:#9aa3b2}
 .tip-inline .info-tip:hover .ic,.tip-inline .info-tip:focus .ic{color:#1f3a5f}
+/* Anywhere else (a Tailwind screen outside .proto): a gap from the text
+   before it, and a size, so it neither touches the word nor disappears. */
+.info-tip{display:inline-flex;vertical-align:middle;margin-left:6px;outline:none}
+.info-tip > .ic{width:14px;height:14px;cursor:help}
 .info-tip-bubble{
   position:fixed;
-  width:230px;background:#0E1320;color:#fff;font-size:12px;font-weight:500;line-height:1.5;
-  padding:9px 11px;border-radius:8px;box-shadow:0 18px 44px -12px rgba(8,12,22,.5);
-  white-space:pre-line;z-index:9999;pointer-events:none;animation:info-tip-rise .12s ease;
+  /* Sizes to its text — short notes stay compact, longer ones wrap at 340px
+     (BUBBLE_MAX in InfoTip.tsx) instead of a tall 230px column. */
+  width:max-content;max-width:min(340px, calc(100vw - 16px));
+  background:#0E1320;color:#fff;font-size:12.5px;font-weight:500;line-height:1.55;
+  padding:10px 13px;border-radius:8px;box-shadow:0 18px 44px -12px rgba(8,12,22,.5);
+  text-align:left;overflow-wrap:break-word;
+  z-index:9999;pointer-events:none;animation:info-tip-rise .12s ease;
 }
 .info-tip-bubble[data-placement="above"]::after{
-  content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);
+  content:"";position:absolute;top:100%;left:var(--tip-arrow,50%);transform:translateX(-50%);
   border:5px solid transparent;border-top-color:#0E1320;
 }
 .info-tip-bubble[data-placement="below"]::after{
-  content:"";position:absolute;bottom:100%;left:50%;transform:translateX(-50%);
+  content:"";position:absolute;bottom:100%;left:var(--tip-arrow,50%);transform:translateX(-50%);
   border:5px solid transparent;border-bottom-color:#0E1320;
 }
 @keyframes info-tip-rise{from{opacity:0}to{opacity:1}}
+/* Tooltip text laid out by components/tipText.tsx: one sentence per
+   paragraph with a gap, a bold lead, the "Click …" action set apart last.
+   Literal colours: the bubble is portaled outside .proto, and the Tailwind
+   bubble (ui/InfoTip) is navy — both dark, so the same light tones work. */
+.tip-body{display:flex;flex-direction:column;gap:6px;white-space:normal}
+.tip-body > span{display:block}
+.tip-lead{font-weight:650;color:#fff}
+.tip-text{font-weight:400;color:rgba(255,255,255,.84)}
+.tip-bullet{font-weight:400;color:rgba(255,255,255,.84);position:relative;padding-left:13px}
+.tip-bullet::before{content:"";position:absolute;left:2px;top:.62em;width:5px;height:5px;border-radius:50%;background:rgba(255,255,255,.55)}
+.tip-rule{height:1px;background:rgba(255,255,255,.14);margin:2px 0}
+.tip-action{font-weight:500;color:#9CC9FF}
 
 /* forms */
 .proto .field{margin-bottom:16px}
@@ -445,6 +477,7 @@
 }
 .proto .fbar-select:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
 .proto .fbar-daterange{display:flex;align-items:center;gap:8px}
+.proto .fbar-dlabel{font-size:12.5px;color:var(--p-muted);white-space:nowrap}
 .proto .fbar-date{
   border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);
   padding:7px 10px;font-size:12.5px;color:var(--p-ink);background:var(--p-surface);font-family:inherit;
@@ -1414,6 +1447,26 @@
 .proto .doc-tile .sub{margin-top:3px}
 .proto .doc-tile .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto}
 
+/* Documents as compact rows: a name, one line of what it is, the actions as
+   icons — so the card stays short however many files a contract carries. */
+.proto .doc-list{display:flex;flex-direction:column;border:1px solid var(--p-border);
+  border-radius:var(--p-r-sm);overflow:hidden}
+.proto .doc-row{display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--p-surface)}
+.proto .doc-row + .doc-row{border-top:1px solid var(--p-border)}
+.proto .doc-row:hover{background:var(--p-surface-2)}
+.proto .doc-row .doc-ic{flex:0 0 auto;color:var(--p-muted)}
+.proto .doc-row .doc-main{flex:1 1 auto;min-width:0}
+.proto .doc-row .fn{font-size:12.5px;font-weight:600;color:var(--p-ink);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto .doc-row .meta{font-size:11.5px;color:var(--p-muted);margin-top:1px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto .doc-row .flag{font-size:11px;margin-top:2px}
+.proto .doc-row .flag.warn{color:var(--p-warn-ink)}
+.proto .doc-row .flag.ok{color:var(--p-ok-ink)}
+.proto .doc-row .flag.crit{color:var(--p-crit-ink)}
+.proto .doc-row .doc-acts{flex:0 0 auto;display:flex;align-items:center;gap:2px}
+.proto .doc-row .btn.ic{padding:4px 6px}
+
 /* History as a stepper. It is a sequence — sent, pushed back, revised, agreed,
    signed — and the line down the left is what says so. */
 .proto .hist{list-style:none;margin:0;padding:0 0 0 22px;position:relative}
@@ -1485,6 +1538,7 @@
 .proto .party-nm{display:block;font-weight:600;color:var(--p-ink);text-decoration:none;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .proto .party-nm:hover{color:var(--p-primary);text-decoration:underline}
+.proto span.party-nm:hover{color:var(--p-ink);text-decoration:none}
 .proto .party-dba{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .proto .party-chips{display:inline-flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px}
 .proto .party-chip{font-size:11.5px;font-weight:600;color:var(--p-muted);background:var(--p-surface-2);
@@ -1594,3 +1648,75 @@
    kept at the right edge — four buttons used to wrap Close onto a line alone. */
 .proto .drawer-f.one-row{flex-wrap:nowrap;align-items:center;gap:8px;padding:14px 16px}
 .proto .drawer-f.one-row .btn{white-space:nowrap;padding-left:12px;padding-right:12px;flex:0 0 auto}
+
+/* ── Reinsurance treaties (Phase 26) ─────────────────────────────────────────
+   The tower draws a non-proportional treaty bottom-up: the carrier's retention,
+   then each layer, each band's fill showing how much of it is placed. The split
+   draws a proportional one as ceded against retained. Shared by the create
+   flow, the contract record, the programme panel and the reinsurer's page. */
+.proto .tw{display:flex;flex-direction:column-reverse;gap:4px}
+.proto .tw-band{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;min-height:38px;padding:8px 12px;border-radius:var(--p-r-xs);border:1px solid var(--p-border);background:var(--p-surface-2);overflow:hidden}
+.proto .tw-band.ret{background:repeating-linear-gradient(135deg,var(--p-surface-2) 0 6px,var(--p-surface-3) 6px 12px);color:var(--p-muted)}
+.proto .tw-band .fill{position:absolute;left:0;top:0;bottom:0;background:var(--p-primary-soft);z-index:0}
+.proto .tw-band.full .fill{background:#D3ECEF}
+.proto .tw-band.mine{border-color:var(--p-primary);box-shadow:inset 3px 0 0 var(--p-primary)}
+.proto .tw-band > *:not(.fill){position:relative;z-index:1}
+.proto .tw-band .lbl{font-size:12.5px;font-weight:600;flex:1 1 170px;min-width:0}
+.proto .tw-band .rng{font-family:var(--p-mono);font-size:11.5px;color:var(--p-muted);white-space:nowrap}
+.proto .tw-band .pl{font-size:11.5px;font-weight:600;white-space:nowrap}
+.proto .tw-band .pl.short{color:var(--p-warn-ink)}
+.proto .tw-split{display:flex;height:34px;border-radius:var(--p-r-xs);overflow:hidden;border:1px solid var(--p-border)}
+.proto .tw-split > div{display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;white-space:nowrap;padding:0 8px;min-width:0}
+.proto .tw-split .ced{background:var(--p-primary);color:#fff}
+.proto .tw-split .ret{background:var(--p-surface-3);color:var(--p-muted)}
+.proto .tw-legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11.5px;color:var(--p-muted)}
+.proto .tw-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.proto .placebar{height:6px;border-radius:var(--p-r-pill);background:var(--p-surface-3);overflow:hidden;min-width:80px}
+.proto .placebar > i{display:block;height:100%;background:var(--p-primary)}
+.proto .placebar.short > i{background:var(--p-warn)}
+.proto .placebar.over > i{background:var(--p-crit)}
+.proto .ttype{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+@media(max-width:1100px){.proto .ttype{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.proto .ttype button{text-align:left;border:1px solid var(--p-border-2);background:var(--p-surface);border-radius:var(--p-r-sm);padding:11px 12px;cursor:pointer;display:flex;flex-direction:column;gap:4px;font-family:inherit;color:var(--p-ink)}
+.proto .ttype button b{font-size:13px}
+.proto .ttype button span{font-size:11.5px;color:var(--p-muted);line-height:1.4}
+.proto .ttype button.on{border-color:var(--p-primary);background:var(--p-primary-soft);box-shadow:0 0 0 2px var(--p-primary-soft)}
+.proto .ttype button:disabled{cursor:not-allowed;opacity:.6}
+.proto .tlayer{border:1px solid var(--p-border);border-radius:var(--p-r-sm);padding:14px 16px;margin-bottom:12px;background:var(--p-surface)}
+.proto .tlayer-h{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.proto .tlayer-h input{border:1px solid transparent;background:transparent;font-weight:700;font-size:13.5px;padding:4px 6px;border-radius:var(--p-r-xs);font-family:inherit;color:var(--p-ink);min-width:0;flex:0 1 220px}
+.proto .tlayer-h input:hover{border-color:var(--p-border-2)}
+.proto .tlayer-h input:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .panel-tbl td,.proto .panel-tbl th{vertical-align:middle}
+.proto .panel-tbl input,.proto .panel-tbl select{width:100%;border:1px solid var(--p-border-2);border-radius:var(--p-r-xs);padding:7px 9px;font-size:13px;font-family:inherit;background:var(--p-surface);color:var(--p-ink)}
+.proto .panel-tbl input.bad,.proto .panel-tbl select.bad{border-color:var(--p-crit)}
+.proto .facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:2px 18px}
+.proto .facts .kv{padding:8px 0}
+.proto .evt{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--p-border);font-size:12.5px}
+.proto .evt:last-child{border-bottom:0}
+.proto .evt .t{color:var(--p-faint);font-size:11.5px;white-space:nowrap;min-width:118px}
+.proto .tedit{grid-template-columns:minmax(0,1.7fr) minmax(270px,1fr);align-items:start}
+@media(max-width:1250px){.proto .tedit{grid-template-columns:1fr}}
+.proto .panel-tbl{table-layout:fixed}
+.proto .panel-tbl thead th,.proto .panel-tbl tbody td{padding:8px 6px;text-align:left}
+.proto .panel-tbl thead th:first-child,.proto .panel-tbl tbody td:first-child{padding-left:10px}
+/* The reinsurer's public treaty page (/treaty-view): no app shell, phone-safe. */
+.proto.tv{min-height:100vh}
+.proto .tv-bar{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.96);border-bottom:1px solid var(--p-border);backdrop-filter:blur(6px)}
+.proto .tv-bar-in{max-width:980px;margin:0 auto;padding:12px 16px;display:flex;align-items:center;gap:12px}
+.proto .tv-wrap{max-width:980px;margin:0 auto;padding:22px 16px 60px}
+.proto .tv-gate{max-width:420px;margin:0 auto;padding:48px 16px}
+.proto .tv-digits{display:flex;justify-content:center;gap:8px;margin-top:22px}
+.proto .tv-digits input{width:44px;height:54px;border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);text-align:center;font-size:22px;font-weight:600;font-family:inherit;color:var(--p-ink);background:var(--p-surface)}
+.proto .tv-digits input:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .tv-digits input.bad{border-color:var(--p-crit)}
+.proto .tv-mine{display:inline-flex;align-items:baseline;gap:6px;font-weight:700;font-size:20px;color:var(--p-primary-h)}
+@media(max-width:640px){.proto .tv-digits input{width:38px;height:48px;font-size:19px}}
+.proto .tw-explain{margin:12px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:7px;font-size:13px;line-height:1.5;color:var(--p-muted)}
+.proto .tw-explain li{padding-left:14px;position:relative}
+.proto .tw-explain li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;border-radius:99px;background:var(--p-primary)}
+.proto .tw-explain b{color:var(--p-ink)}
+.proto .panel-tbl input[type=checkbox]{width:auto;flex:0 0 auto}
+
+/* Review Wording & Terms (26.3): document beside its terms, stacked when narrow. */
+@media(max-width:1100px){.proto .wording-review{grid-template-columns:1fr !important}}

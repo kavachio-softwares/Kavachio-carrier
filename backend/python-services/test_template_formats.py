@@ -16,7 +16,7 @@ from datetime import date, datetime
 
 # exporter (where the style copying lives) builds an AI client when imported;
 # nothing here calls it.
-os.environ.setdefault("GEMINI_API_KEY", "test-not-used")
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-not-used")
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles.numbers import is_date_format

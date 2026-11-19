@@ -504,10 +504,28 @@ def _resolve_broker_signer(s, tenant_id: int, broker_party_id: int | None,
     if not party:
         raise HTTPException(404, "that broker is not on file")
     org = party.legal_name or "The broker"
+    # A treaty's other side is its lead REINSURER, which has no seat here: it
+    # signs from the emailed link and its one-time code, as a broker's signer
+    # with no account does. Its signer is the contact the carrier holds for it.
+    reinsurer = (party.party_type or "") == "reinsurer"
+    role = "Reinsurer" if reinsurer else "Broker"
     if given and given.email:
         return SignerIn(side="broker", name=given.name, email=given.email,
-                        title=given.title or "Broker", org=given.org or org,
+                        title=given.title or role, org=given.org or org,
                         broker_party_id=bpid, order=2)
+    if reinsurer:
+        from db import PartyContact
+        ct = (s.query(PartyContact)
+              .filter(PartyContact.party_id == bpid,
+                      PartyContact.email.isnot(None), PartyContact.email != "")
+              .order_by(PartyContact.id).first())
+        if ct is None:
+            raise HTTPException(
+                400, f"{org} has nobody to sign — add a contact with an email "
+                     "on the reinsurer, or name its signer on the contract.")
+        return SignerIn(side="broker", name=ct.full_name or ct.email,
+                        email=ct.email, title=ct.title or role,
+                        org=org, broker_party_id=bpid, order=2)
     admin = (s.query(AppUser)
              .filter(AppUser.broker_party_id == bpid,
                      AppUser.role.in_(db_role_values("broker_admin")),
@@ -584,7 +602,7 @@ def create_envelope(body: EnvelopeIn, request: Request,
         contract = None
         if body.contract_id:
             contract = s.get(Contract, body.contract_id)
-            if not contract:
+            if not contract or _treaty_hidden(s, body.contract_id):
                 raise HTTPException(404, "contract not found")
             if not p.is_platform_admin and contract.tenant_id != tenant_id:
                 raise HTTPException(404, "not found")
@@ -775,6 +793,20 @@ def _build_document(s, body: EnvelopeIn, env: EsignEnvelope, insurer: SignerIn,
             data = esign_pdf.ensure_pdf(data, name)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        if (not esign_pdf.discover_fields(data)
+                and (contract.contract_type or "") == "insurer_reinsurer"):
+            # An uploaded treaty is signed like one written here: on the
+            # document. Its own pages carry no signing boxes, so an execution
+            # page with one for the carrier and one for the lead reinsurer is
+            # added after them; the uploaded pages are left as they are.
+            data = esign_pdf.append_execution_page(
+                data, title=f"Execution of {contract.name or env.title or 'the treaty'}",
+                parties=[
+                    {"title": "Signed for the reinsured", "org": insurer.org,
+                     "key": insurer_key, "name": insurer.name, "role": insurer.title},
+                    {"title": "Signed for the reinsurer", "org": broker.org,
+                     "key": broker_key, "name": broker.name, "role": broker.title},
+                ])
         if not esign_pdf.discover_fields(data):
             raise HTTPException(
                 400, "That wording has no signature blocks in it. Its execution "
@@ -892,6 +924,17 @@ def _my_recipient(env: EsignEnvelope, key: str, email: str | None):
     return next((r for r in mine if r.party_key == key), None)
 
 
+def _treaty_hidden(s, contract_id: Optional[int]) -> bool:
+    """A reinsurance treaty while Phase 2 is switched off (phase2.py). Its
+    signing rounds then do not exist: no round is started or sent, and a
+    signing link already emailed to a reinsurer answers like an expired one."""
+    from phase2 import phase2_enabled
+    if not contract_id or phase2_enabled():
+        return False
+    c = s.get(Contract, contract_id)
+    return c is not None and (c.contract_type or "") == "insurer_reinsurer"
+
+
 def _contract_for_signing(s, p: Principal, contract_id: int) -> Contract:
     """The contract, if this caller is a party to it.
 
@@ -902,7 +945,7 @@ def _contract_for_signing(s, p: Principal, contract_id: int) -> Contract:
     """
     missing = HTTPException(404, "contract not found")
     c = s.get(Contract, contract_id)
-    if not c:
+    if not c or _treaty_hidden(s, contract_id):
         raise missing
     if p.is_broker:
         bpid = resolve_broker_party_id(s, p)
@@ -933,6 +976,19 @@ def _live_round(s, contract_id: int) -> EsignEnvelope | None:
 # because a round that is half done leaves the contract there, and the second
 # signer still has to be able to get in.
 SIGNABLE_STATES = ("agreed", "signed")
+
+# Reinsurance treaties (treaty_routes) sign in the same round as a broker's
+# contract: the carrier signs on the document, then the lead reinsurer — which
+# has no seat here — is emailed its link and code, signs on the same document,
+# and both get the sealed copy.
+TREATY_TYPE = "insurer_reinsurer"
+
+
+def _counterparty_kind(env, s) -> str:
+    """'reinsurer' for a treaty's round, else 'broker' — for the page's words."""
+    c = s.get(Contract, env.contract_id) if getattr(env, "contract_id", None) else None
+    return "reinsurer" if c is not None and (c.contract_type or "") == TREATY_TYPE \
+        else "broker"
 
 
 def _assert_terms_settled(c: Contract) -> None:
@@ -1356,6 +1412,13 @@ def list_envelopes(p: Principal = Depends(require_role("carrier_admin")),
     with SessionLocal() as s:
         rows_q = (s.query(EsignEnvelope)
                   .filter(EsignEnvelope.tenant_id == p.tenant_id))
+        from phase2 import phase2_enabled
+        if not phase2_enabled():
+            # A treaty's rounds are Phase 2 (_treaty_hidden): not listed.
+            treaty_ids = s.query(Contract.id).filter(
+                Contract.contract_type == "insurer_reinsurer")
+            rows_q = rows_q.filter(or_(EsignEnvelope.contract_id.is_(None),
+                                       ~EsignEnvelope.contract_id.in_(treaty_ids)))
         if contract_id is not None:
             rows_q = rows_q.filter(EsignEnvelope.contract_id == contract_id)
         if status:
@@ -1375,7 +1438,7 @@ def list_envelopes(p: Principal = Depends(require_role("carrier_admin")),
 
 def _load_envelope(s, envelope_id: int, p: Principal) -> EsignEnvelope:
     env = s.get(EsignEnvelope, envelope_id)
-    if not env:
+    if not env or _treaty_hidden(s, env.contract_id):
         raise HTTPException(404, "not found")
     if not p.is_platform_admin and env.tenant_id != p.tenant_id:
         raise HTTPException(404, "not found")       # never confirm it exists
@@ -1573,7 +1636,7 @@ def _by_token(s, token: str) -> tuple[EsignEnvelope, EsignRecipient]:
     if exp and exp < _now():
         raise dead
     env = s.get(EsignEnvelope, rec.envelope_id)
-    if not env or env.status in ("voided",):
+    if not env or env.status in ("voided",) or _treaty_hidden(s, env.contract_id):
         raise dead
     return env, rec
 
@@ -1654,6 +1717,8 @@ def open_for_signing(token: str, request: Request,
                 "pages": esign_pdf.page_sizes(pdf),
                 "programme": _programme_name(env, s),
                 "term": _term_text(env, s),
+                # Who the other side is — a treaty's is its reinsurer.
+                "counterparty": _counterparty_kind(env, s),
             },
             # Who the link thinks you are. The page shows it back so a signer
             # who was forwarded somebody else's link notices immediately.

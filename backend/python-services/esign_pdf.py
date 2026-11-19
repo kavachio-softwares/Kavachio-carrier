@@ -776,6 +776,50 @@ def draw_signature_blocks(pdf_bytes: bytes, blocks: Sequence[dict]) -> bytes:
     return out
 
 
+def append_execution_page(pdf_bytes: bytes, *, title: str,
+                          parties: Sequence[dict]) -> bytes:
+    """An execution page added to the end of a document that has none — a
+    signature block for each party, carrying the anchors a signing round reads.
+
+    For a document written somewhere else (an uploaded treaty): its own pages
+    carry no anchors, and they are left exactly as they are. The signatures go
+    on a page of their own after them, in the same blocks the composed wording
+    prints, so it is signed on the document just as a wording written here is.
+
+    Each party is {"title", "org", "key", "name", "role"}: `key` is the party
+    key the round signs as; `name` and `role` are printed when known, else a
+    box is left for them.
+    """
+    doc = _open(pdf_bytes)
+    try:
+        last = doc[doc.page_count - 1]
+        pw, ph = last.rect.width, last.rect.height
+        page = doc.new_page(width=pw, height=ph)
+        page.insert_text(fitz.Point(72, 86), title, fontname="hebo", fontsize=14,
+                         color=(0.06, 0.09, 0.20))
+        page.insert_text(fitz.Point(72, 108),
+                         "Signed for and on behalf of each party below, on the "
+                         "terms of the document above.",
+                         fontname="helv", fontsize=10, color=(0.35, 0.38, 0.45))
+        page_no = doc.page_count
+        staged = doc.tobytes(deflate=True, garbage=3)
+    finally:
+        doc.close()
+    blocks = []
+    for i, p in enumerate(parties):
+        key = p["key"]
+        lines = [{"label": "Name:", "value": p.get("name"), "type": "name"},
+                 {"label": "Title:", "value": p.get("role"), "type": "title"},
+                 {"label": "Date signed:", "value": None, "type": "date"}]
+        blocks.append({
+            "page": page_no, "x": 72 / pw, "y": (140 + i * 200) / ph,
+            "title": p.get("title") or "", "org": p.get("org"),
+            "signers": [{"lines": lines,
+                         "anchors": {"signature": key, "name": key, "title": key,
+                                     "date": key}}]})
+    return draw_signature_blocks(staged, blocks)
+
+
 def render_page_png(pdf_bytes: bytes, page_no: int, scale: float = 2.0) -> bytes:
     """One page as a PNG. `page_no` is 1-based.
 

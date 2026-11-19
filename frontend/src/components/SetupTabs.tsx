@@ -13,7 +13,12 @@ import { InfoTip } from "./InfoTip";
 // (pages/DirectSetup.tsx), which splits the same one-card form into tabs;
 // "output" is shared with the saved-setup screens below.
 export type SetupTabKey = "details" | "documents" | "overview" | "mapping"
-  | "contracts" | "output" | "attention" | "calendar";
+  | "contracts" | "output" | "attention" | "calendar"
+  // A treaty's reinsurance bordereau setup (pages/ReinsuranceSetupEdit.tsx).
+  | "recipients" | "preview" | "input" | "rules"
+  // Configure Program's two sides (pages/AddProgram.tsx), and its Programme
+  // Rules tab, which reuses "rules" above.
+  | "broker" | "reinsurance";
 
 export type SetupTab = {
   key: SetupTabKey;

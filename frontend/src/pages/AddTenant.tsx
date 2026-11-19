@@ -111,9 +111,7 @@ export default function AddTenant() {
           <div className="card pad">
             <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>
               Owner
-              <InfoTip text={"The one person accountable for this organisation. They get an "
-                + "email inviting them to set a password, then set the company up and add "
-                + "their own colleagues as admins."} />
+              <InfoTip text="The person responsible for this carrier. They get an email to set a password, then set the company up." />
             </h3>
             <div className="field">
               <label>Full name <span style={{ color: "var(--p-crit)" }}>*</span></label>

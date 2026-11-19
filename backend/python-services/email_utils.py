@@ -106,7 +106,8 @@ def mail_account(account: str = "") -> MailAccount:
 def send_email(to: str, subject: str, html: str, text: str | None = None,
                account: str = "", cc: "str | list[str] | None" = None,
                attachments: "list[tuple[str, bytes, str]] | None" = None,
-               reply_to: "str | None" = None) -> None:
+               reply_to: "str | None" = None,
+               sender_name: "str | None" = None) -> None:
     """Send an HTML email as `account` (default sender when omitted).
     Raises on failure — the caller decides how to handle it.
 
@@ -124,7 +125,11 @@ def send_email(to: str, subject: str, html: str, text: str | None = None,
     recipient not on the list is skipped (logged, not raised) so callers that
     fan out to several addresses still deliver to the allowed ones. Cc
     addresses go through the same guard, individually — one disallowed cc
-    does not stop the message reaching an allowed `to`."""
+    does not stop the message reaching an allowed `to`.
+
+    `sender_name` replaces the account's display name for this one message —
+    e.g. "Accel via Kavachio" — while the address stays the authorised
+    mailbox, so the mail is still delivered as genuine."""
     allowed = _allowed_recipients()
     if allowed and (to or "").strip().lower() not in allowed:
         # WARNING, not INFO: mail that a caller believes it sent is silently not
@@ -150,7 +155,7 @@ def send_email(to: str, subject: str, html: str, text: str | None = None,
         )
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = formataddr((acct.sender_name, acct.sender))
+    msg["From"] = formataddr(((sender_name or "").strip() or acct.sender_name, acct.sender))
     msg["To"] = to
     if cc_list:
         msg["Cc"] = ", ".join(cc_list)

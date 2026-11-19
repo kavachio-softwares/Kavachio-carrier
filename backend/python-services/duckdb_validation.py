@@ -612,6 +612,10 @@ def _get_cached(session, rule_id, sh, rh):
 
 
 def _save_cache(session, rule, template_id, sh, rh, result):
+    # A programme rule (programme_rules.for_broker_run) is compiled for each
+    # setup at run time and has no validation_rule row: nothing to cache.
+    if rule.get("no_cache"):
+        return None
     from db import RuleSql
     rec = (session.query(RuleSql)
            .filter(RuleSql.rule_id == rule.get("rule_id"))
@@ -749,6 +753,9 @@ def _compiled_sql_for(rule, sheet_names=None):
         return _refresh_if_stale(spec, spec["compiled_sql"], sheet_names), None
     if rule.get("compiled_sql"):
         return rule["compiled_sql"], None
+    # A programme rule says itself why (programme_rules.for_broker_run).
+    if rule.get("no_column"):
+        return None, rule["no_column"]
     return None, ("This clause has no compiled validation query — re-upload the "
                   "contract to regenerate its rules.")
 

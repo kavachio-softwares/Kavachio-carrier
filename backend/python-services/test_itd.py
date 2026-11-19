@@ -1101,6 +1101,54 @@ def test_run_completed_but_unapplied_is_healed_by_the_next_file(run_session):
     assert plan["summary"]["rows_to_load"] == 39   # July was applied first
 
 
+def test_run_is_held_while_the_old_itd_tables_are_still_there(run_session):
+    # The split migration 40 repaired: the history under the old names, the
+    # app's tables empty. Comparing would send every transaction again.
+    import itd_run
+    s = run_session
+    itd_store.write_config(s, 7, CFG)
+    s.execute(text("CREATE TABLE bordereau_position (position_id INTEGER PRIMARY KEY)"))
+    s.commit()
+    july, _ = _july_august()
+    with pytest.raises(itd_run.ItdHistoryUnavailable):
+        _prepare(s, _landing(july))
+
+
+def test_run_is_held_when_itd_is_on_but_its_tables_are_missing(run_session, monkeypatch):
+    import itd_run
+    s = run_session
+    itd_store.write_config(s, 7, CFG)
+    s.commit()
+    monkeypatch.setattr(itd_store, "tables_present", lambda _s: False)
+    july, _ = _july_august()
+    with pytest.raises(itd_run.ItdHistoryUnavailable):
+        _prepare(s, _landing(july))
+
+
+def test_run_with_itd_off_is_untouched_even_with_old_tables(run_session):
+    s = run_session
+    s.execute(text("CREATE TABLE bordereau_position (position_id INTEGER PRIMARY KEY)"))
+    s.commit()
+    july, _ = _july_august()
+    land = _landing(july)
+    out, plan = _prepare(s, land)
+    assert plan is None and out is land
+
+
+def test_start_up_holds_back_the_new_tables_while_the_old_ones_remain():
+    eng = create_engine("sqlite://")
+    with eng.begin() as c:
+        c.execute(text("CREATE TABLE bordereau_position (position_id INTEGER PRIMARY KEY)"))
+    with eng.connect() as c:
+        assert itd_store.tables_to_hold_back(c) == {"bdx_sent_transaction"}
+        assert itd_store.old_tables_left(c) == ["bordereau_position"]
+    with eng.begin() as c:
+        itd_store.rename_old_tables(c)
+    with eng.connect() as c:
+        assert itd_store.tables_to_hold_back(c) == set()
+        assert itd_store.old_tables_left(c) == []
+
+
 # ── a corrected file: the next version of the same submission ───────────────
 
 @compiles(JSONB, "sqlite")

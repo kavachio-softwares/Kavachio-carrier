@@ -10,3 +10,6 @@ __pycache__/
 *.md
 scripts/
 *.docx
+# Google Cloud service-account keys: mount at run time, never bake into the image.
+*gcp-credetials*.json
+*gcp-credentials*.json

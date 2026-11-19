@@ -26,8 +26,10 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Sk } from "../components/ui/Skeleton";
 import { getHierarchy, onProgramme, type HierarchyProgramme } from "../api/hierarchy";
+import { getTreatyCounts } from "../api/treaty";
+import { phase2Enabled } from "../features";
 import { Pagination } from "../components/Pagination";
-import { ProgrammeStepper, flowUrl, nextStep, programmeSteps } from "../components/ProgrammeStepper";
+import { ProgrammeStepper, flowUrl, nextStep, programmeSteps, reinsuranceUrl } from "../components/ProgrammeStepper";
 import { fmtDate, localDayStart, localDayEnd } from "../utils/date";
 
 /** Rows per page — the same ten the other lists show. Paged client-side: the
@@ -79,6 +81,29 @@ type StepFilter = typeof STEP_FILTERS[number]["v"];
 const stuckOn = (p: HierarchyProgramme): StepFilter =>
   (programmeSteps(p).find(s => s.state === "current")?.key as StepFilter | undefined) ?? "ready";
 
+/** The programme's reinsurance side in one pill: none (quiet — a programme
+ *  takes files without a treaty), treaties with setups still to do (amber),
+ *  or every treaty set up (green). Opens Configure Program's Reinsurance tab. */
+function ReinsurancePill({ to, treaties, inUse }: { to: string; treaties: number; inUse: number }) {
+  const nav = useNavigate();
+  const plural = (n: number) => `${n} treat${n === 1 ? "y" : "ies"}`;
+  const [text, tone, hint] = treaties === 0
+    ? ["None", "bg-surface-2 text-ink-soft", "No treaty protects this programme — add one on its Reinsurance tab."]
+    : inUse >= treaties
+    ? [`${plural(treaties)} set up`, "bg-success/10 text-success",
+       "Every treaty's reinsurance bordereau is in use."]
+    : [`${plural(treaties)} · ${inUse} of ${treaties} set up`, "bg-warn/10 text-warn",
+       `${treaties - inUse} treat${treaties - inUse === 1 ? "y has" : "ies have"} no reinsurance bordereau in use yet.`];
+  return (
+    <button type="button" title={hint} aria-label={`Reinsurance: ${hint}`}
+      onClick={e => { e.stopPropagation(); nav(to); }}
+      className={`whitespace-nowrap rounded-md px-2 py-0.5 text-[11.5px] font-semibold ${tone}
+                  hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-navy`}>
+      {text}
+    </button>
+  );
+}
+
 export default function Programs() {
   const nav = useNavigate();
   const [rows, setRows] = useState<HierarchyProgramme[] | null>(null);
@@ -98,6 +123,18 @@ export default function Programs() {
   useEffect(() => {
     getHierarchy().then(h => setRows(h.programmes))
       .catch(() => setErr("Could not load your programmes."));
+  }, []);
+  // Live treaties per programme (Phase 26.2) — one call for the whole list.
+  // A programme with none is not broken, so it says "None" quietly rather
+  // than in the red the stepper keeps for what stops files.
+  const [treatyCounts, setTreatyCounts] = useState<Record<string, number>>({});
+  const [treatiesInUse, setTreatiesInUse] = useState<Record<string, number>>({});
+  // Reinsurance is Phase 2: no column, and nothing asked, while it is off.
+  const showReinsurance = phase2Enabled();
+  useEffect(() => {
+    if (!showReinsurance) return;
+    getTreatyCounts().then(r => { setTreatyCounts(r.counts); setTreatiesInUse(r.inUse); })
+      .catch(() => setTreatyCounts({}));
   }, []);
 
   // Filtered BEFORE the page slice, so the pager counts what you can see.
@@ -174,7 +211,7 @@ export default function Programs() {
             <div className="card" style={{ overflow: "visible", marginBottom: 14, padding: "14px 20px" }}>
               {/* One row, every control the same height (fbar-even in
                   proto.css). The search takes whatever width is left. */}
-              <div className="fbar-even">
+              <div className="fbar-even" style={{ alignItems: "flex-end" }}>
                 <div className="search">
                   <Search className="ic" />
                   <input placeholder="Search by programme or broker…" value={q}
@@ -187,13 +224,17 @@ export default function Programs() {
                       onClick={() => setStep(f.v)}>{f.label}</button>
                   ))}
                 </div>
-                <div className="fbar-daterange">
-                  <input type="date" className="fbar-date" aria-label="Created from date"
-                    value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
-                  <span className="sub">–</span>
-                  <input type="date" className="fbar-date" aria-label="Created to date"
-                    value={dateTo} onChange={e => setDateTo(e.target.value)} />
-                </div>
+                {/* The date each programme was created (under its name). */}
+                <label className="fbar-field" style={{ minWidth: 0 }}>
+                  <span className="sub">Created between</span>
+                  <span className="fbar-daterange">
+                    <input type="date" className="fbar-date" aria-label="Created from date"
+                      value={dateFrom} max={dateTo || undefined} onChange={e => setDateFrom(e.target.value)} />
+                    <span className="sub">–</span>
+                    <input type="date" className="fbar-date" aria-label="Created to date"
+                      value={dateTo} min={dateFrom || undefined} onChange={e => setDateTo(e.target.value)} />
+                  </span>
+                </label>
                 {/* Always in the row, only hidden, so the controls beside it do
                     not jump when a filter is first set. */}
                 <button type="button" className="fbar-clear" onClick={clearFilters}
@@ -221,7 +262,9 @@ export default function Programs() {
                 <thead>
                   <tr>
                     <th>Programme</th>
-                    <th>How far it's got</th>
+                    {/* The programme's two sides, as on Configure Program. */}
+                    <th>Broker</th>
+                    {showReinsurance && <th>Reinsurance</th>}
                     {/* Named for what the button is: the one thing that moves
                         this programme along the steps beside it. */}
                     <th className="text-right">Next step</th>
@@ -259,11 +302,25 @@ export default function Programs() {
                             p.bdx_frequency ? frequencyLabel(p.bdx_frequency).toLowerCase() : ""]
                             .filter(Boolean).join(" · ")}
                         </div>
+                        {/* 44.2 — this programme's open problems: what is
+                            waiting, on whom, and what is overdue. */}
+                        {/* Hidden 17 Nov 2026 with the Open Problems page.
+                        <Link to={`/open-problems?program=${p.id}`} onClick={e => e.stopPropagation()}
+                          className="mt-0.5 inline-block text-xs font-semibold text-navy hover:underline">
+                          Open problems
+                        </Link> */}
                       </td>
                       <td className="align-middle">
                         {/* Each pill opens its own step for this programme. */}
                         <ProgrammeStepper programme={p} />
                       </td>
+                      {showReinsurance && (
+                      <td className="whitespace-nowrap align-middle">
+                        <ReinsurancePill to={reinsuranceUrl(p.id)}
+                          treaties={treatyCounts[String(p.id)] ?? 0}
+                          inUse={treatiesInUse[String(p.id)] ?? 0} />
+                      </td>
+                      )}
                       <td className="whitespace-nowrap text-right align-middle">
                         {next ? (
                           <Button className="!px-3 !py-1.5 !text-[12.5px] !font-semibold" title={next.hint}
@@ -295,9 +352,15 @@ export default function Programs() {
             )}
 
             <p className="mt-3 border-t border-border pt-3 text-xs text-ink-muted">
-              Each programme goes Programme → Brokers → Contract → Setup. Green is
-              done, red is what's stopping files. Click a row to go straight to
-              where that programme is up to, or click any step to open it.
+              <b className="font-medium text-ink">Broker</b>: Brokers → Contract → Setup — green
+              is done, red is what's stopping files.{" "}
+              {showReinsurance && <>
+              <b className="font-medium text-ink">Reinsurance</b>: the treaties protecting the
+              programme and how many have their reinsurance bordereau set up — optional,
+              and irrespective of the brokers.{" "}
+              </>}
+              Click a row to go to where its brokers are
+              up to, or click any pill to open it.
             </p>
           </Card>
         )}

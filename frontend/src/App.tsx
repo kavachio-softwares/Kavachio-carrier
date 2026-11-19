@@ -1,5 +1,7 @@
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import Layout from "./components/Layout";
+import ResultPopup from "./components/ResultPopup";
+import { phase2Enabled } from "./features";
 import GlobalErrorPopup from "./components/GlobalErrorPopup";
 import Login from "./pages/Login";
 import ResetPassword from "./pages/ResetPassword";
@@ -16,17 +18,28 @@ import TeamActivity from "./pages/TeamActivity";
 import PersonActivity from "./pages/PersonActivity";
 import FilesByCarrier from "./pages/FilesByCarrier";
 import BrokerContracts from "./pages/BrokerContracts";
+import BrokerProgrammeRules from "./pages/BrokerProgrammeRules";
 import BrokerInvitations from "./pages/BrokerInvitations";
 import BrokerBordereau from "./pages/BrokerBordereau";
 import TenantDetail from "./pages/TenantDetail";
 import Parties from "./pages/Parties";
 import PartyDetail from "./pages/PartyDetail";
+import ProgrammeReinsurance from "./pages/ProgrammeReinsurance";
+import ReinsuranceBordereaux from "./pages/ReinsuranceBordereaux";
+import CededBordereauDetail from "./pages/CededBordereauDetail";
+import CededExceptions from "./pages/CededExceptions";
+import ReinsuranceSetups from "./pages/ReinsuranceSetups";
+import ReinsuranceSetupEdit from "./pages/ReinsuranceSetupEdit";
+import ReinsuranceSetupView from "./pages/ReinsuranceSetupView";
+import TreatyView from "./pages/TreatyView";
 import Programs from "./pages/Programs";
 import ProgramManagement from "./pages/ProgramManagement";
 import AddProgram from "./pages/AddProgram";
 import ContractDetail from "./pages/ContractDetail";
 import ContractRecord from "./pages/ContractRecord";
 import MidTermChange from "./pages/MidTermChange";
+import TreatyWordingReview from "./pages/TreatyWordingReview";
+import TreatyEndorsementReview from "./pages/TreatyEndorsementReview";
 import ContractSignature from "./pages/ContractSignature";
 import Contracts from "./pages/Contracts";
 import ContractNew from "./pages/ContractNew";
@@ -55,6 +68,15 @@ import RuleForm from "./pages/RuleForm";
 import RecentRuns from "./pages/RecentRuns";
 import Calendar from "./pages/Calendar";
 import BordereauCalendar from "./pages/BordereauCalendar";
+import MonthlyReport from "./pages/MonthlyReport";
+import ExecutiveReport from "./pages/ExecutiveReport";
+import PartnerPerformance from "./pages/PartnerPerformance";
+import ProgrammeManagement from "./pages/ProgrammeManagement";
+import MonthlySendSchedule from "./pages/MonthlySendSchedule";
+import PolicySearch from "./pages/PolicySearch";
+import FinancialSummary from "./pages/FinancialSummary";
+// Open Problems (44) hidden 17 Nov 2026 — page kept, route switched off.
+// import OpenProblems from "./pages/OpenProblems";
 // Feature 10 — file intake channels.
 import Files from "./pages/Files";
 import AddUser from "./pages/AddUser";
@@ -125,6 +147,9 @@ export default function App() {
     {/* Friendly popup for unexpected failures (5xx / server unreachable) on ANY
         screen, login included — see api/client.ts + GlobalErrorPopup. */}
     <GlobalErrorPopup />
+    {/* What an action came to — done, or why not — on any screen that
+        reports it this way (showDone / showError). */}
+    <ResultPopup />
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/reset" element={<ResetPassword />} />
@@ -143,6 +168,11 @@ export default function App() {
           /sign: no Layout, no session — the token is the credential, for one
           submission only. */}
       <Route path="/fix/:token" element={<FixLink />} />
+      {/* A reinsurer's private, read-only view of a treaty. No Layout, no
+          session: the emailed token finds the link and the one-time code
+          emailed with it unlocks it — reinsurers have no seat in Kavachio. */}
+      {/* Phase 2 — no route at all while the switch is off (features.ts). */}
+      {phase2Enabled() && <Route path="/treaty-view" element={<TreatyView />} />}
       {/* /welcome is the tenant-admin first-run wizard — it has no Layout shell,
           so it carries the guards itself. */}
       <Route path="/welcome" element={<RequireAuth><RequireAccess><Welcome /></RequireAccess></RequireAuth>} />
@@ -154,6 +184,7 @@ export default function App() {
         {/* Broker seats. Everything here is READ of what a carrier gave them. */}
         <Route path="/broker" element={<BrokerDashboard />} />
         <Route path="/broker/contracts" element={<BrokerContracts />} />
+        <Route path="/broker/programme-rules" element={<BrokerProgrammeRules />} />
         {/* The broker's monthly run — the broker admin's. */}
         <Route path="/broker/bordereau" element={<BrokerBordereau />} />
         <Route path="/broker/runs" element={<BrokerRuns />} />
@@ -189,6 +220,19 @@ export default function App() {
         <Route path="/programs/new" element={<AddProgram />} />
         {/* The same flow, picked up for a programme that already exists. */}
         <Route path="/programs/:programId/setup" element={<AddProgram />} />
+        {/* The treaties protecting one programme (Phase 26.2). */}
+        <Route path="/programs/:programId/reinsurance" element={<ProgrammeReinsurance />} />
+        {/* Reinsurance (ceded) bordereaux: per treaty and period, sent to
+            each reinsurer, answered on its private link. */}
+        <Route path="/reinsurance/bordereaux" element={<ReinsuranceBordereaux />} />
+        <Route path="/reinsurance/bordereaux/:id" element={<CededBordereauDetail />} />
+        <Route path="/reinsurance/bordereaux/:id/exceptions" element={<CededExceptions />} />
+        <Route path="/reinsurance/bordereaux/:id/exceptions/:ruleId" element={<CededExceptions />} />
+        {/* Each treaty's reinsurance bordereau setup — nothing is prepared for
+            a treaty until it is active. */}
+        <Route path="/reinsurance/setups" element={<ReinsuranceSetups />} />
+        <Route path="/reinsurance/setups/:contractId" element={<ReinsuranceSetupView />} />
+        <Route path="/reinsurance/setups/:contractId/edit" element={<ReinsuranceSetupEdit />} />
         {/* The contract as a RECORD — terms, documents, lifecycle. The
             programme-scoped route below is what it PRODUCED: clauses and rules. */}
         <Route path="/contracts" element={<Contracts />} />
@@ -200,6 +244,8 @@ export default function App() {
         {/* A running contract's terms changing from a date — sent to the broker,
             signed by both, then live. See pages/MidTermChange. */}
         <Route path="/contracts/:contractId/mid-term" element={<MidTermChange />} />
+        <Route path="/contracts/:contractId/wording" element={<TreatyWordingReview />} />
+        <Route path="/contracts/:contractId/endorsements/:docId" element={<TreatyEndorsementReview />} />
         {/* Screen only — no signing provider is connected. See the page. */}
         <Route path="/contracts/:contractId/signature" element={<ContractSignature />} />
         <Route path="/programs/:programId/contracts/:contractId" element={<ContractDetail />} />
@@ -230,6 +276,31 @@ export default function App() {
             due month, rather than one programme's deadlines. /calendar stays as
             the place a single programme's schedule is SET. */}
         <Route path="/bordereau-calendar" element={<BordereauCalendar />} />
+        {/* MOPR 42 — the Operational Report: Overview, Data Quality (MOPR 40) and
+            Exception Resolution (MOPR 41) as three tabs of one screen. The old
+            paths of the two detail screens open their tab. */}
+        <Route path="/monthly-report" element={<MonthlyReport />} />
+        {/* 42.2 — how the report is sent; opened from the Overview, not a tab. */}
+        <Route path="/monthly-report/send-schedule" element={<MonthlySendSchedule />} />
+        <Route path="/monthly-report/:tab" element={<MonthlyReport />} />
+        <Route path="/data-quality" element={<Navigate to="/monthly-report/data-quality" replace />} />
+        <Route path="/exception-resolution" element={<Navigate to="/monthly-report/exception-resolution" replace />} />
+        {/* Policy Search (43.1) — carrier and broker seats; no sidebar entry,
+            opened from the Dashboard and File Submissions. */}
+        <Route path="/policies" element={<PolicySearch />} />
+        {/* Financial Summary (35) — carrier and broker seats; no sidebar entry,
+            opened from the Dashboard as Policies is. */}
+        <Route path="/financial-summary" element={<FinancialSummary />} />
+        {/* <Route path="/exception-resolution" element={<ExceptionResolution />} /> */}
+        {/* 44 — every open problem, its owner, due date and age. A programme's
+            own view is ?program=<id>, linked from the Programmes list. */}
+        {/* Hidden 17 Nov 2026: the page must not open. Uncomment to bring it back. */}
+        {/* <Route path="/open-problems" element={<OpenProblems />} /> */}
+        <Route path="/executive-report" element={<ExecutiveReport />} />
+        {/* 36 — how often each broker sends a clean file on time, best and worst. */}
+        <Route path="/partner-performance" element={<PartnerPerformance />} />
+        {/* The Programme Management Report — a sub-screen of the Executive Report. */}
+        <Route path="/executive-report/programmes" element={<ProgrammeManagement />} />
         {/* How a broker's file reaches you, and everything that has landed —
             one screen with two tabs. The old paths are kept as redirects: they
             are in emails to brokers and in bookmarks, and a link that 404s is a

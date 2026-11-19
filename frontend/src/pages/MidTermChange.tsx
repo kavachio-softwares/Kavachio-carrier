@@ -405,11 +405,7 @@ export default function MidTermChange() {
           <div className="card" style={{ marginBottom: 16 }}>
             <div className="card-h">
               <h3>Change document</h3>
-              <InfoTip text="Already have the change document? Upload it and Kavachio reads what
-                it changes — the date, the terms and the clauses — and fills in this page for you
-                to check. If it is signed by both sides it is accepted and goes live with no
-                broker round. Without one, Kavachio writes the change document from what you
-                change below, and the broker agrees and both sides sign it." />
+              <InfoTip text={"Upload the change document and Kavachio fills in this page from it. If both sides signed it, it goes live straight away.\nWithout one, Kavachio writes it from your changes for the broker to agree and both sides to sign."} />
             </div>
             <div style={{ padding: "4px 18px 16px", fontSize: 13 }}>
               {doc ? (
@@ -461,9 +457,7 @@ export default function MidTermChange() {
               <div className="note" style={{ marginTop: 12 }}>
                 <b>Up to and including {pv.boundary.old_until}</b>: current terms.{" "}
                 <b>From {pv.boundary.new_from}</b>: new terms.{" "}
-                <InfoTip text={pv.boundary.sentence + " A row's date is its transaction "
-                  + "effective date — the column chosen for each setup below — not the "
-                  + "policy's inception date."} />
+                <InfoTip text={pv.boundary.sentence + " A row's date is its transaction effective date, not the policy's inception date."} />
               </div>
             )}
           </div>
@@ -477,7 +471,7 @@ export default function MidTermChange() {
           <div className="card-h">
             <h3>What changes — terms</h3>
             <InfoTip text={ct.is_uploaded
-              ? "This contract was uploaded, so its terms are read from what it says: from the checks it runs today and, for the rest, from its clauses. Each box starts at today's value — change the ones that move. A term read from a clause re-words that clause too."
+              ? "Terms are read from this uploaded contract's checks and clauses. Each box starts at today's value — change the ones that move."
               : "Each box starts at the term as it is today — change the ones that move. The wording quoting a term follows it."} />
           </div>
           <div style={{ padding: "4px 18px 16px" }}>
@@ -565,10 +559,7 @@ export default function MidTermChange() {
           <div className="card-h">
             <h3>What changes — clauses</h3>
             {editedCount > 0 && <span className="badge b-info"><span className="d" />{editedCount} changed</span>}
-            <InfoTip text="The contract's clauses as they read today. Re-word one, delete one, or add a
-              new one. The checks written from a re-worded or deleted clause end the day before the
-              change, and the checks its new words make run from the change date — every other
-              clause and check stays exactly as it is." />
+            <InfoTip text={"The contract's clauses as they read today. Re-word, delete or add one.\nChecks from a changed clause stop the day before the change; new ones run from the change date."} />
           </div>
           <div style={{ padding: "4px 18px 16px", fontSize: 13 }}>
             {clauses.length > 8 && (
@@ -719,9 +710,7 @@ export default function MidTermChange() {
         <div className="card" style={{ marginBottom: 16 }}>
           <div className="card-h">
             <h3>Checks</h3>
-            <InfoTip text="Nothing is overwritten. A check that changes keeps running for rows up to
-              the day before the change, and its new version runs from the change date. Every
-              other check stays exactly as it is." />
+            <InfoTip text="Nothing is overwritten. A changed check keeps its old version up to the day before the change and its new version from the change date." />
           </div>
           <div style={{ padding: "4px 18px 16px", fontSize: 13 }}>
             {!pv || (!pv.changes.length && !pv.clause_changes.length) ? (

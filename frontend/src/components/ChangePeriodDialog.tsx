@@ -16,6 +16,7 @@ import {
   type ContractRecord, type PeriodPreview, type UndoPreview,
 } from "../api/contractRecord";
 import { fmtDate } from "../utils/date";
+import { counterpartyLabel, counterpartyWord } from "../utils/counterparty";
 
 const STATE_LABEL: Record<string, string> = {
   active: "Active", expired: "Expired", superseded: "Superseded", terminated: "Terminated",
@@ -49,6 +50,8 @@ export function ChangePeriodDialog({ rec, onClose, onDone, onEvidenceAdded }: {
   onEvidenceAdded?: () => void;
 }) {
   const [inception, setInception] = useState(rec.inception_dt ?? "");
+  // "reinsurer" on a treaty, else "broker".
+  const party = counterpartyWord(rec.contract_type);
   const [expiry, setExpiry] = useState(rec.expiry_dt ?? "");
   const [reason, setReason] = useState("");
   const [note, setNote] = useState("");
@@ -232,8 +235,8 @@ export function ChangePeriodDialog({ rec, onClose, onDone, onEvidenceAdded }: {
                   </>
                 )}
               </Line>
-              <Line label="Broker is emailed">
-                {pv.broker_recipients.length ? pv.broker_recipients.join(", ") : "Nobody (no broker contacts)."}
+              <Line label={`${counterpartyLabel(rec.contract_type)} is emailed`}>
+                {pv.broker_recipients.length ? pv.broker_recipients.join(", ") : `Nobody (no ${party} contacts).`}
                 <div className="sub">With the reason below — never the internal note.</div>
               </Line>
               <Line label="Prior-period dates">Unchanged</Line>
@@ -289,7 +292,7 @@ export function ChangePeriodDialog({ rec, onClose, onDone, onEvidenceAdded }: {
           )}
 
           <label style={{ ...field, marginTop: 14 }}>
-            <span>Reason <b>— the broker will see this</b></span>
+            <span>Reason <b>— the {party} will see this</b></span>
             <textarea className="input" rows={2} value={reason}
                       onChange={e => setReason(e.target.value)}
                       placeholder="e.g. The end date was taken from the draft; the signed schedule says 31 Mar 2027." />
@@ -317,6 +320,7 @@ export function UndoPeriodDialog({ rec, onClose, onDone }: {
   onDone: (message: string) => void;
 }) {
   const [u, setU] = useState<UndoPreview | null>(null);
+  const party = counterpartyWord(rec.contract_type);
   const [reason, setReason] = useState("");
   const [note, setNote] = useState("");
   const [gapOk, setGapOk] = useState(false);
@@ -401,7 +405,7 @@ export function UndoPeriodDialog({ rec, onClose, onDone }: {
                 </label>
               )}
               <label style={{ ...field, marginTop: 12 }}>
-                <span>Reason <b>— the broker will see this</b></span>
+                <span>Reason <b>— the {party} will see this</b></span>
                 <textarea className="input" rows={2} value={reason} onChange={e => setReason(e.target.value)} />
               </label>
               <label style={{ ...field, marginTop: 10 }}>

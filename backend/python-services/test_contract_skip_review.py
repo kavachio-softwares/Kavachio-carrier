@@ -158,29 +158,33 @@ def test_it_settles_the_terms_and_says_who_did(w):
     assert "sent_for_review" not in acts, "nothing went out to anybody"
 
 
-def test_a_treaty_can_take_it_though_it_cannot_take_a_review(w):
-    """The bug this was written for. A reinsurer has no seat in Kavachio, so
-    send-for-review refuses the contract outright — and with the signing round
-    refusing a draft, a treaty had no road to a signature at all."""
+def test_a_treaty_cannot_skip_its_reinsurers(w):
+    """A treaty is agreed by every reinsurer approving it on its private link
+    (treaty_routes.send_treaty_for_approval), never by the carrier settling it
+    alone — so there is no skip for a treaty, and no signing it as a draft."""
     c = _treaty(w)
-    refused = client.post(f"/contracts/{c['id']}/send-for-review",
-                          headers=w["ch"], json={})
-    assert refused.status_code == 409, refused.text
-
+    assert c["actions"]["skip_review"] is False
+    assert c["actions"]["sign"] is False
     r = _skip(w, c["id"])
-    assert r.status_code == 200, r.text
-    assert r.json()["lifecycle"] == "agreed"
+    assert r.status_code == 409 and "reinsurers" in r.text
+    r = client.post(f"/contracts/{c['id']}/sign", headers=w["ch"],
+                    json={"signer_name": "Dana"})
+    assert r.status_code == 409 and "approval" in r.text
+    rec = client.get(f"/contracts/{c['id']}", headers=w["ch"]).json()
+    assert rec["lifecycle"] == "draft"
 
 
-def test_it_opens_the_signing_round(w):
-    """The whole purpose. Before: a draft cannot be signed, and the refusal
-    says so. After: the carrier's own signature is the next move."""
+def test_once_agreed_the_treaty_opens_the_signing_round(w):
+    """Before: a draft cannot be signed. Once every reinsurer has approved it
+    (agreed), the carrier's own signature is the next move."""
     c = _treaty(w)
     before = client.get(f"/esign/contracts/{c['id']}/round", headers=w["ch"])
     assert before.status_code == 200, before.text
     assert before.json()["can_sign"] is False
 
-    assert _skip(w, c["id"]).status_code == 200
+    with SessionLocal() as s:                     # every reinsurer approved
+        s.get(Contract, c["id"]).lifecycle = "agreed"
+        s.commit()
     after = client.get(f"/esign/contracts/{c['id']}/round", headers=w["ch"])
     assert after.status_code == 200, after.text
     assert after.json()["can_sign"] is True

@@ -905,11 +905,11 @@ def _gemini_candidates_call(
              TOP_N_CANDIDATES, len(headers), len(prompt))
     t0 = time.time()
     try:
-        # gemini-2.5-flash unless KAVACHIO_MODEL_DATAMODEL_MAPPING says otherwise;
+        # gemini-3.5-flash unless KAVACHIO_MODEL_DATAMODEL_MAPPING says otherwise;
         # temperature 0 + seed so the same headers are not mapped differently by chance.
         from contract_upload_services.gemini_service import DETERMINISTIC_SEED, model_for
         resp = client.models.generate_content(
-            model=model_for("datamodel_mapping", "gemini-2.5-flash"),
+            model=model_for("datamodel_mapping", "gemini-3.5-flash"),
             contents=prompt,
             config={
                 "response_mime_type": "application/json",
@@ -980,14 +980,15 @@ def _call_llm_candidates(
     truncates or fails to parse do we retry in chunks of `_FALLBACK_BATCH`.
     Returns `{ "Sheet :: Column": [{canonical, confidence, reason}, ...] }`.
     """
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key or not headers:
-        if not api_key:
-            log.warning("No GEMINI_API_KEY — returning empty candidates.")
+    from contract_upload_services.gemini_service import (
+        AI_NOT_CONFIGURED, ai_configured, get_client)
+    configured = ai_configured()
+    if not configured or not headers:
+        if not configured:
+            log.warning("%s — returning empty candidates.", AI_NOT_CONFIGURED)
         return {}
 
-    from google import genai
-    client = genai.Client(api_key=api_key)
+    client = get_client()
     mappable_model = {k: DATA_MODEL[k] for k in MAPPABLE_FIELDS}
 
     parsed = _gemini_candidates_call(
@@ -1541,18 +1542,15 @@ def filter_findings_to_data_sheets(findings: list[dict],
     if not findings:
         return findings
     try:
-        import os
-        from google import genai
+        from contract_upload_services.gemini_service import ai_configured, get_client
         from exporter import classify_sheet_roles, is_reference_sheet
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
+        if not ai_configured():
             return findings
         structure = {"sheets": [
             {"sheet_name": str(n),
              "columns": [{"column_name": str(c)} for c in (cols or []) if c is not None]}
             for n, cols in headers_by_sheet.items()]}
-        client = genai.Client(api_key=api_key)
-        classify_sheet_roles(client, structure)
+        classify_sheet_roles(get_client(), structure)
         non_data = {sh["sheet_name"] for sh in structure["sheets"]
                     if is_reference_sheet(sh)}
         kept = [f for f in findings if f["sheet"] not in non_data]

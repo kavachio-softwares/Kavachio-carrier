@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
-  LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, CalendarDays, ScrollText, History,
+  LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, ChevronDown, Layers, ListChecks, ClipboardList,
+  FileCheck, CalendarDays, ScrollText, History, FileSpreadsheet, BarChart3, Presentation, Timer, AlertTriangle, Award,
+  FileSearch,
 } from "lucide-react";
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
+import { phase2Enabled } from "../features";
 import { BrokerCarrierSwitch } from "./BrokerCarrierSwitch";
 import { BrokerOrgCard } from "./BrokerOrgCard";
 import { api, getDeduped } from "../api/client";
@@ -26,7 +28,11 @@ import { InfoTip as UiInfoTip } from "./ui/InfoTip";
 // carrier holds the same `carrier_admin` DB role, so the carrier admin is told
 // apart from a carrier user by the organisation's owner pointer, which arrives
 // with the brand rather than with the token (see hooks/useCarrierSeat).
-type Item = { to: string; label: string; icon: React.ElementType; carrierAdminOnly?: boolean };
+// `phase2` marks an entry that Phase 2 brought onto the sidebar although its
+// screen is older (Contracts): hidden while the Phase 2 switch is off. A
+// Phase 2 SCREEN needs no flag here — its ROUTE_ACCESS rule hides it.
+type Item = { to: string; label: string; icon: React.ElementType; carrierAdminOnly?: boolean;
+  phase2?: boolean };
 
 // Nav grouped to match the prototype's sidebar. All existing destinations are
 // preserved; each item is shown only when the current role may actually open it
@@ -63,6 +69,8 @@ const GROUPS: {
       { to: "/broker/bordereau", label: "Process Bordereau", icon: Zap },
       // What is owed and when — the list Process Bordereau works down.
       { to: "/broker/calendar", label: "Bordereau Calendar", icon: CalendarDays },
+      // Rules a carrier set for a programme, waiting for this broker's approval.
+      { to: "/broker/programme-rules", label: "Programme Rules", icon: ListChecks },
       // My Contracts has no entry here: the broker admin opens it from the
       // dashboard's Active Contracts tile.
       // No Users & Roles: broker users were retired on 29 Sep 2026, so the
@@ -72,10 +80,18 @@ const GROUPS: {
     ],
   },
   {
-    title: "Operations",
+    // The Dashboard on its own at the top, above every section — the page
+    // the day starts on, not one item of Operations (17 Nov 2026).
+    title: "",
     requires: "carrier_admin",
     items: [
       { to: "/home", label: "Dashboard", icon: LayoutDashboard },
+    ],
+  },
+  {
+    title: "Operations",
+    requires: "carrier_admin",
+    items: [
       // Hidden from the sidebar for now. The /program-management route still
       // exists and is still reached from a carrier's page — only the nav entry
       // is commented out.
@@ -98,11 +114,24 @@ const GROUPS: {
       // /direct/runs is scoped to the tenant, never to who pressed the button,
       // so such a run is listed here beside the brokers' own.
       { to: "/runs", label: "File Submissions", icon: History },
+      // 43: the policies INSIDE those files, searched, downloaded and emailed —
+      // directly below File Submissions, the files then what is in them (18 Nov
+      // 2026). Carrier seat here; /policies' `only` keeps Kavachio out, and the
+      // broker opens it from its Dashboard. Named "Policy Explorer" (18 Nov
+      // 2026) after plan task 43, "Data Explorer, Search & Export".
+      { to: "/policies", label: "Policy Explorer", icon: FileSearch },
+      // Process Reinsurance Bordereau has its own "Reinsurance" section below
+      // (17 Nov 2026): it is the carrier's OWN processing for its reinsurers,
+      // not the brokers' files this section watches.
       // The carrier's calendar IS listed: it is a whole-book view — every
       // broker's obligation for a due month — so unlike My Calendar it does not
       // belong inside one setup. It sits next to Process Bordereau because
       // "what is owed to me" and "run one" are the same job on two days.
       { to: "/bordereau-calendar", label: "Bordereau Calendar", icon: CalendarDays },
+      // 44: everything still waiting on someone — failed checks, late files,
+      // disputes, files on hold, contracts to sign — with owner, due date, age.
+      // Hidden 17 Nov 2026 — the page is switched off in App.tsx too.
+      // { to: "/open-problems", label: "Open Problems", icon: AlertTriangle },
       // My Calendar is deliberately NOT listed. Deadlines belong to a specific
       // carrier + program, so the calendar now lives inside that setup's own
       // screen where both are already fixed. The /calendar route still exists
@@ -131,6 +160,33 @@ const GROUPS: {
     ],
   },
   {
+    // The carrier's own processing: a treaty's reinsurance bordereau for a
+    // period, built from the brokers' files, checked and sent to the
+    // reinsurers. Its own section so it is never mistaken for the brokers'
+    // Process Bordereau.
+    title: "Reinsurance",
+    requires: "carrier_admin",
+    items: [
+      { to: "/reinsurance/bordereaux", label: "Process Reinsurance BDX", icon: FileSpreadsheet },
+    ],
+  },
+  {
+    // MOPR 42: the Operational Report — ONE item, three tabs inside: the Overview
+    // pack, Data Quality (MOPR 40) and Exception Resolution (MOPR 41). They
+    // are views of the same month, so one entry rather than three. It has its
+    // own heading, as agreed in the Operational Report proposal: reading a month
+    // back is a different job from the day's work under Operations.
+    title: "Reports",
+    requires: "carrier_admin",
+    items: [
+      { to: "/monthly-report", label: "Operational Report", icon: BarChart3 },
+      // 38.2: the whole book for leadership, downloadable and sent by email.
+      { to: "/executive-report", label: "Executive Report", icon: Presentation },
+      // 36: each broker's clean files on time, best and worst.
+      { to: "/partner-performance", label: "Partner Performance", icon: Award },
+    ],
+  },
+  {
     title: "Configure",
     requires: "carrier_admin",
     // Ordered as the work actually happens: a programme is created, brokers
@@ -138,16 +194,15 @@ const GROUPS: {
     // bordereau setup. Reading the section top to bottom IS the flow.
     items: [
       { to: "/programs", label: "Programmes", icon: Layers },
-      // Party and Contracts are hidden from the sidebar for now. Both routes
-      // and both access rules are unchanged — only the nav entries are
-      // commented out, the same as Program Management above and Files below.
-      //
-      // Neither screen is stranded by it: the Dashboard's "Parties" and
-      // "Contracts" tiles open them, Broker Performance has "All brokers →",
-      // and a contract is normally reached from the programme it hangs off
-      // rather than from a flat list of every contract in the book.
+      // Party is hidden from the sidebar for now (the Dashboard's "Parties"
+      // tile opens it).
       // { to: "/brokers", label: "Party", icon: Users2 },
-      // { to: "/contracts", label: "Contracts", icon: FileCheck },
+      // Broker contracts and reinsurance treaties, one list: its Type filter
+      // narrows it to either. Between Programmes and Bordereau Setup, as a
+      // contract hangs off a programme and a setup needs a contract.
+      // Shown since Phase 2 (treaties live in it); hidden with Phase 2 off,
+      // as it was before — the Dashboard's tile still opens it.
+      { to: "/contracts", label: "Contracts", icon: FileCheck, phase2: true },
       // Signatures is NOT a sidebar entry. Watching a round is watching a
       // contract, so it is reached from Contracts ("Signature history") and
       // from the contract's own record, filtered to that contract. A top-level
@@ -254,12 +309,12 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // Programmes now own their own sub-screens (create, and a programme's
   // brokers), so they highlight Programmes rather than the old party directory.
   if (under("/programs")) return "/programs";
-  // Party has no sidebar entry any more, and neither do contracts. Both are
-  // opened from the Dashboard's tiles, so — like /files — they keep Dashboard
-  // lit rather than pointing at a row that is no longer drawn, which would
-  // leave nothing highlighted at all.
+  // Party has no sidebar entry any more. It is opened from the Dashboard's
+  // tile, so — like /files — it keeps Dashboard lit.
   if (under("/brokers")) return "/home";
-  if (under("/contracts")) return "/home";
+  // A contract, a new one and Signatures all belong to Contracts.
+  // With Phase 2 off Contracts has no sidebar entry, so the Dashboard stays lit.
+  if (under("/contracts")) return phase2Enabled() ? "/contracts" : "/home";
   // An output template is part of a Bordereau Setup, and that is where the user
   // came from — highlighting anything else while they review a template they
   // opened from the setup screen makes the sidebar lie about where they are.
@@ -272,6 +327,16 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // Files has no sidebar entry — it is opened from the Dashboard — so /files
   // (and /intake, which redirects there) keeps Dashboard lit.
   if (under("/intake") || under("/files")) return "/home";
+  // Financial Summary has no sidebar entry either — both seats open it from
+  // their Dashboard, so that stays lit. Policies does for the carrier (under
+  // Operations), which lights itself; the broker has none, so its Dashboard.
+  if (under("/financial-summary")) return isBrokerSeat() ? "/broker" : "/home";
+  if (under("/policies") && isBrokerSeat()) return "/broker";
+
+  // The Operational Report's Data Quality and Exception Resolution tabs.
+  if (under("/monthly-report")) return "/monthly-report";
+  // The Programme Management Report is the Executive Report's sub-screen.
+  if (under("/executive-report")) return "/executive-report";
 
   if (under("/parties")) return "/parties";
   if (under("/tenants")) return "/tenants";
@@ -289,6 +354,8 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // All Setups empty state and onboarding). Both roll up under "All Setups".
   if (pathname === "/direct/setup" || pathname.startsWith("/direct/setup/")) return "/direct/setups";
   if (pathname.startsWith("/direct/setups/")) return "/direct/setups";
+  // A treaty's reinsurance setup is a tab of Bordereau Setup.
+  if (under("/reinsurance/setups")) return "/direct/setups";
 
   // Exception triage is linked from both Dashboard and Process Bordereau —
   // whichever one the user actually came from stays highlighted.
@@ -306,6 +373,7 @@ function subScreenOwner(pathname: string, search: string): string | null {
     // Bordereau, which is a different path from the carrier's.
     if (from === "broker") return "/broker/bordereau";
     if (from === "calendar") return "/bordereau-calendar";
+    if (from === "partner") return "/partner-performance";
     // Files Received has no sidebar entry; the Dashboard is its way in.
     if (from === "files") return "/home";
   }
@@ -382,9 +450,30 @@ export default function Layout() {
           title: g.carrierUserTitle && seat === "user" ? g.carrierUserTitle : g.title,
           items: g.items.filter(
             i => canAccessPath(i.to)
-              && (!i.carrierAdminOnly || addsCarrierUsers(seat))),
+              && (!i.carrierAdminOnly || addsCarrierUsers(seat))
+              && (!i.phase2 || phase2Enabled())),
         }))
         .filter(g => g.items.length > 0);
+  // Sections start closed; a heading opens or closes its links. The section
+  // holding the page on screen is opened for you (and stays open), so the
+  // sidebar always shows where you are. The untitled top group (Dashboard) is
+  // always open. In the icon-only sidebar every icon is shown — a closed
+  // section there would have no heading to open it with.
+  const itemActive = (to: string) =>
+    (!to.includes("?") && (loc.pathname === to || loc.pathname === `${to}/`))
+    || subScreenOwner(loc.pathname, loc.search) === to;
+  const activeGroup = groups.find(g => g.title && g.items.some(i => itemActive(i.to)))?.title;
+  const [openGroups, setOpenGroups] = useState<Set<string>>(
+    () => new Set(activeGroup ? [activeGroup] : []));
+  useEffect(() => {
+    if (activeGroup) setOpenGroups(o => o.has(activeGroup) ? o : new Set(o).add(activeGroup));
+  }, [activeGroup]);
+  const toggleGroup = (title: string) => setOpenGroups(o => {
+    const n = new Set(o);
+    if (n.has(title)) n.delete(title); else n.add(title);
+    return n;
+  });
+
   // The sidebar footer names the side, not the seat: "Carrier" / "Broker",
   // never "… Admin". Other screens keep ROLE_LABEL's full wording.
   const role = user ? normalizeRole(user.role) : null;
@@ -484,15 +573,30 @@ export default function Layout() {
               only the title, so a broker signing in saw every carrier link
               under a missing header and could click straight into screens
               that are not theirs. */}
-          {groups.filter(canSee).map(group => (
-            <div key={group.title}>
-              {group.title && <div className="group">{group.title}</div>}
-              {group.items.map(({ to, label, icon: Icon }) => {
+          {groups.filter(canSee).map((group, gi) => {
+            const open = !group.title || collapsed || openGroups.has(group.title);
+            return (
+            <div key={`${gi}-${group.title}`}>
+              {group.title && (
+                <button type="button" className="group group-btn"
+                  aria-expanded={open} title={collapsed ? group.title : undefined}
+                  onClick={() => { if (!collapsed) toggleGroup(group.title); }}>
+                  {group.title}
+                  <ChevronDown className="group-chev" size={13} strokeWidth={2}
+                    style={{ transform: open ? "none" : "rotate(-90deg)" }} />
+                </button>
+              )}
+              {open && group.items.map(({ to, label, icon: Icon }) => {
                 const subScreenActive = subScreenOwner(loc.pathname, loc.search) === to;
                 return (
                   <NavLink
                     key={to} to={to} end title={label}
-                    className={({ isActive }) => `item${isActive || subScreenActive ? " active" : ""}`}
+                    // An entry that carries a query (Treaties is the contracts
+                    // list, filtered) cannot trust isActive — NavLink matches
+                    // the path alone, which would light it on every contract
+                    // list. subScreenOwner reads the query and decides.
+                    className={({ isActive }) => `item${(isActive && !to.includes("?"))
+                      || subScreenActive ? " active" : ""}`}
                   >
                     <Icon className="ic" strokeWidth={1.8} />
                     <span className="item-label">{label}</span>
@@ -500,7 +604,8 @@ export default function Layout() {
                 );
               })}
             </div>
-          ))}
+            );
+          })}
         </nav>
 
         <div className="side-foot">

@@ -2130,6 +2130,8 @@ async def _render_landing(
     run_by_user_id: Optional[int] = None,
     mark_calendar: bool = True,
     period: Optional[str] = None,
+    check_kind: Optional[str] = None,
+    arrival_id: Optional[int] = None,
 ) -> dict:
     """Shared core: project a landing record into the output BDX, validate it
     against the contract rules, persist the downloadable file, and either raise a
@@ -2144,7 +2146,17 @@ async def _render_landing(
     validation and produce the (downloadable, highlighted) output file, but treat
     it as a throwaway — do NOT link it to the landing (so it stays out of run
     history) and do NOT raise an admin mapping task. Combine with
-    ``auto_ingest=False`` so nothing reaches the data model."""
+    ``auto_ingest=False`` so nothing reaches the data model.
+
+    ``check_kind`` is what the shared check record (MOPR 40.1, check_record)
+    calls this run when the flags above do not say: "preview" for the setup
+    preview. Otherwise a self-check, a re-generate or a run.
+
+    ``arrival_id`` is the file arrival this run is for, when there is one. The
+    shared check record reads its submission and version from it, which is how
+    version 2 of a file is known to be the same file as version 1 (MOPR 41
+    follows a problem across them). None is fine: a re-generate finds the
+    arrival from its export instead."""
     with SessionLocal() as s:
         rec = s.get(LandingRecord, landing_id)
         if not rec:
@@ -2347,6 +2359,9 @@ async def _render_landing(
     exceptions: list[dict] = []
     dv = None                  # run_validation's result, once it has returned
     validation_error = None    # what stopped it, if something did
+    # Read back by the shared check record even when validation fails early.
+    rules: list[dict] = []
+    column_types: dict = {}
     try:
         rules: list[dict] = []
         if governing_ids:
@@ -2373,6 +2388,14 @@ async def _render_landing(
                     cs, [dict(r) for r in rule_rows],
                     setup_template_id=eff_output_template_id,
                     scope=run_rule_scope)
+            # Programme Rules the carrier set for the whole programme, once
+            # this file's broker approved them (programme_rules.py).
+            try:
+                import programme_rules
+                with SessionLocal() as _ps:
+                    rules += programme_rules.for_broker_run(_ps, rec.tenant_id, _gov_rows, structure)
+            except Exception as _px:  # noqa: BLE001 — never block validation
+                log.info(f"[programme rules] skipped ({_px})")
 
         # A rule is "schedule-scoped" when its clause explicitly names the
         # schedules it applies to (IR params scope_sheets/sheets, e.g.
@@ -2517,8 +2540,9 @@ async def _render_landing(
     # one informational entry that is shown but never counted.
     projected_rows = sum(len(v) for v in projected.values())
     stats = (dv or {}).get("stats")
+    input_rows = vo.input_row_count(landing_data, supplement_cfg)
     status, status_reason = vo.outcome(
-        input_rows=vo.input_row_count(landing_data, supplement_cfg),
+        input_rows=input_rows,
         # the file's rows on the sheets the routing reads — tells a sheet
         # mismatch from a filter that let nothing through
         routed_rows=vo.routed_row_count(landing_data, supplement_cfg, routing),
@@ -2677,6 +2701,21 @@ async def _render_landing(
         s.commit()
         s.refresh(out)
         export_id = out.id
+        # MOPR 40.1 — the shared record of every check run: each rule and type
+        # check passed or failed, every error, and the rows and transaction
+        # types this run handled. Never costs the run (record_run swallows).
+        import check_record as _cr
+        _cr.record_run(
+            lane=_cr.DIRECT,
+            kind=check_kind or (_cr.SELF_CHECK if check_only
+                                else _cr.RERUN if reuse_export_id else _cr.RUN),
+            tenant_id=tenant_id, status=status, status_reason=status_reason,
+            rules=rules, column_types=column_types, dv=dv, exceptions=exceptions,
+            structure=structure, blocks=blocks, rows_in=input_rows,
+            export_id=export_id, landing_id=landing_id, arrival_id=arrival_id,
+            pipeline_id=out.pipeline_id, program_id=out.program_id,
+            broker_party_id=out.broker_party_id, contract_id=out.contract_id,
+            filename=fname, period=period, run_by=actor, run_by_user_id=run_by_user_id)
         # Set below when this run both satisfies a period AND is a broker's own
         # (out.broker_party_id set) — the outcome of the auto-send, surfaced on
         # the response so the screen can say what happened without a second
@@ -2860,7 +2899,8 @@ async def direct_render(
         except (ValueError, TypeError):
             extra = {}
     return await _render_landing(landing_id, contract_id, filename,
-                                 actor or _principal_email(principal), extra)
+                                 actor or _principal_email(principal), extra,
+                                 check_kind="preview")
 
 
 class RerenderRequest(BaseModel):
@@ -4450,6 +4490,8 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
                 check_only=check_only)
         except itd_run.OlderItdFile as e:
             raise HTTPException(409, {"code": "older_itd", "message": str(e)})
+        except itd_run.ItdHistoryUnavailable as e:
+            raise HTTPException(409, {"code": "itd_history_unavailable", "message": str(e)})
 
         # Supplement: capture the setup's stored supplementary sheets alongside the
         # BDX (no policy-number join — a supplement file just carries extra data).
@@ -4498,7 +4540,7 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
     return {"landing_id": landing_id, "pipeline_id": pipeline_id,
             "contract_id": contract_id, "eff_contract_id": eff_contract_id,
             "run_scope": run_scope, "drift": drift, "supp_stats": supp_stats,
-            "itd": itd_plan,
+            "itd": itd_plan, "arrival_id": arrival_id,
             "layout_changes": layout_changes}
 
 
@@ -4517,7 +4559,7 @@ async def _render_prepared(prep: dict, *, filename: Optional[str], actor: Option
         filename, actor, {}, auto_ingest=not check_only,
         pipeline_id=prep["pipeline_id"], check_only=check_only,
         scope=prep["run_scope"], run_by_user_id=run_by_user_id,
-        mark_calendar=mark_calendar, period=period)
+        mark_calendar=mark_calendar, period=period, arrival_id=prep.get("arrival_id"))
     result["format_drift"] = prep["drift"]
     result["layout_changes"] = prep.get("layout_changes")
     if prep["supp_stats"] is not None:
@@ -4926,6 +4968,19 @@ async def admin_task_propose(task_id: int,
     if not sheets_dict:
         raise HTTPException(400, "landing sample has no readable sheets")
 
+    # The admin's click, as its own row and under their name. The suggestion
+    # row written when the AI finishes stays "Kavachio · Automatic" — the AI
+    # made it — but on its own it read as if nobody had asked for it.
+    try:
+        from audit import log_activity, actor_email
+        log_activity(tenant_id, actor_email(_p.user_id), "datamodel_mapping_started",
+                     target=f"task:{task_id}",
+                     details={"task_id": task_id, "format_id": fmt_id,
+                              "source_filename": source_filename},
+                     principal=_p)
+    except Exception:  # noqa: BLE001
+        pass
+
     def _propose() -> dict:
         # Same AI mapping engine (+ scoring) as the normal upload flow — and the
         # minutes-long step the heartbeat above exists to cover.
@@ -5027,10 +5082,14 @@ def admin_task_resolve(task_id: int, body: TaskResolveBody,
             s.commit()
             try:
                 from audit import log_activity, actor_email
-                log_activity(task.tenant_id, body.resolved_by, "mapping_task_resolved",
+                # The admin who clicked, not whatever name the screen sent
+                # (it sent "default", so the row named nobody).
+                log_activity(task.tenant_id, actor_email(_p.user_id) or body.resolved_by,
+                             "mapping_task_resolved",
                              target=f"task:{task_id}",
                              details={"task_id": task_id, "action": body.action,
-                                      "mapper_id": body.mapper_id, "queued": 0})
+                                      "mapper_id": body.mapper_id, "queued": 0},
+                             principal=_p)
             except Exception:  # noqa: BLE001
                 pass
             return {"id": task.id, "status": task.status, "queued": 0}
@@ -5066,11 +5125,13 @@ def admin_task_resolve(task_id: int, body: TaskResolveBody,
 
     try:
         from audit import log_activity, actor_email
-        log_activity(None, body.resolved_by, "mapping_task_resolved",
+        log_activity(None, actor_email(_p.user_id) or body.resolved_by,
+                     "mapping_task_resolved",
                      target=f"task:{task_id}",
                      details={"task_id": task_id, "action": body.action,
                               "mapper_id": body.mapper_id,
-                              "queued": len(landing_ids)})
+                              "queued": len(landing_ids)},
+                     principal=_p)
     except Exception:  # noqa: BLE001
         pass
 
