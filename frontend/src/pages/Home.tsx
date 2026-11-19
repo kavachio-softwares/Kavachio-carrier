@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ComposedChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
-import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock, ShieldCheck, UserCheck } from "lucide-react";
+import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock, ShieldCheck, UserCheck,
+  BarChart3, Presentation, Zap } from "lucide-react";
 import { api } from "../api/client";
 import { currentMga, getTenantBrand, getUser, isKavachioAdmin, userRole, ROLE_LABEL, type Role } from "../auth";
 import { canAccessPath } from "../access";
@@ -12,9 +13,12 @@ import { listContractsPaged } from "../api/contractRecord";
 import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 import { isHeld, listArrivals, type Arrival } from "../api/intake";
 import { InfoTip } from "../components/InfoTip";
+import { RulesWaitingCard } from "../components/RulesWaitingCard";
 import { StatCard } from "../components/StatCard";
 import { ArrivalsCard } from "../components/ArrivalsCard";
+import { getReinsuranceDashboard, type ReinsuranceDashboard } from "../api/treaty";
 import BrokerPerformance from "../components/BrokerPerformance";
+import ProgrammeOverview, { type SelectedProgramme } from "../components/ProgrammeOverview";
 import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
 import { clickedDayIndex } from "../components/BrokerCharts";
 
@@ -67,6 +71,9 @@ type Stats = {
    *  endpoint. */
   avg_turnaround_min?: number | null;
 };
+/** One bar of the Bordereau Status chart: a day (YYYY-MM-DD), a month
+ *  (YYYY-MM) or a year (YYYY) of the dashboard's period pick. */
+type StatusPoint = { key: string; clean: number; flagged: number; resolved: number };
 // A "run" = a generated output export (carries the validation result).
 type Run = {
   id: number; filename: string; template_name: string | null;
@@ -155,7 +162,10 @@ export default function Home() {
   // "N parties" the Party screen prints.
   const [progCount, setProgCount] = useState<number | null>(null);
   const [partyCount, setPartyCount] = useState<number | null>(null);
+  const [reinsurerCount, setReinsurerCount] = useState<number | null>(null);
   const [contractCount, setContractCount] = useState<number | null>(null);
+  const [brokerCount, setBrokerCount] = useState<number | null>(null);
+  const [treatyCount, setTreatyCount] = useState<number | null>(null);
   // Bordereau setups a colleague has sent up and this carrier admin has not
   // decided on. The carrier admin's ONLY "waiting on me" — a setup sitting
   // here is a broker who cannot send a file yet, so it belongs on the first
@@ -170,17 +180,21 @@ export default function Home() {
   const ARRIVALS_FETCH = 500;
   const [arrivals, setArrivals] = useState<Arrival[] | null>(null);
 
-  // ONE period for the cards at the foot of the page — Overdue
-  // Bordereaux and Bordereaux Processed — picked as a month and a
-  // year in the bar above them. "All Months" takes the whole year, "All Years"
-  // everything. It opens on the current month, which is what they all
-  // counted before there was a pick.
+  // ONE period and ONE programme for every card in the activity block —
+  // Programme Overview, Bordereau Status, Broker Performance, Overdue
+  // Bordereaux, Bordereaux Processed and Reinsurance Bordereaux. The period is
+  // picked as a month and a year in the block's own bar: "All Months" takes the
+  // whole year, "All Years" everything. It opens on the current month. The
+  // programme is picked by clicking a row of the Programme Overview.
+  const [pickedProgramme, setPickedProgramme] = useState<SelectedProgramme | null>(null);
+  const programId = pickedProgramme?.id;
   const [year, setYear] = useState<string>(String(new Date().getFullYear()));
   const [month, setMonth] = useState<string>(pad2(new Date().getMonth() + 1));
   const period = year === ALL ? ALL : month === ALL ? year : `${year}-${month}`;
   const everyMonth = period === ALL;
   const [monthStart, monthEnd] = periodRange(period) ?? [null, null];
   // How the cards name the pick.
+  const periodLabel = everyMonth ? "All years" : periodName(period);
   const countWhen = everyMonth ? "across all years" : `in ${periodName(period)}`;
   const infoWhen = everyMonth ? "" : ` in ${periodName(period)}`;
 
@@ -192,21 +206,40 @@ export default function Home() {
     getCalendar().then(c => setCalCounts(c.counts ?? {})).catch(() => setCalCounts({}));
   }, [mga]);
 
+  // Reinsurance, folded into the cards that already exist rather than a
+  // section of its own: treaties in the Contracts tile, and the reinsurance
+  // bordereaux of the Monthly Activity month beside Bordereaux Processed.
+  const [rei, setRei] = useState<ReinsuranceDashboard | null>(null);
+  useEffect(() => {
+    if (userRole() !== "carrier_admin") return;
+    let live = true;
+    getReinsuranceDashboard(period === ALL ? undefined : period, programId)
+      .then(d => { if (live) setRei(d); }).catch(() => { if (live) setRei(null); });
+    return () => { live = false; };
+  }, [mga, period, programId]);
+
   // Both carrier seats; Kavachio staff have the box on their own dashboard.
   useEffect(() => {
     if (role !== "carrier_admin") return;
     let live = true;
-    getBoard(period)
-      .then(b => { if (live) { setBoard({ period, data: b }); setBoardMonths(b.months ?? []); } })
+    const key = `${period}|${programId ?? ""}`;
+    getBoard(period, { program: programId })
+      .then(b => {
+        if (!live) return;
+        setBoard({ period: key, data: b });
+        // The year list is the whole book's, not one programme's.
+        if (programId == null) setBoardMonths(b.months ?? []);
+      })
       .catch(() => { if (live) setBoard(null); });
     return () => { live = false; };
-  }, [mga, role, period]);
+  }, [mga, role, period, programId]);
   // The board answers with ANOTHER month when nothing fell due in the one
   // asked for (the calendar opens on real work) — for this box, that month
   // simply owed nothing.
-  const boardNow = board?.period === period ? board.data : null;
+  const boardNow = board?.period === `${period}|${programId ?? ""}` ? board.data : null;
   const due = boardNow
-    ? (boardNow.month === period ? boardNow.counts : { on_time: 0, late: 0, never: 0 })
+    ? (boardNow.month === period ? boardNow.counts
+      : { on_time: 0, late: 0, overdue: 0, never: 0 })
     : null;
 
   // Both directories are carrier-scoped. A broker seat carries no tenant, so
@@ -215,6 +248,14 @@ export default function Home() {
   // Process Bordereau follows the route rules (access.ts), so its button and
   // links show exactly to the seats that may open it.
   const canProcess = canAccessPath("/direct");
+  const quickActions = [
+    { to: "/monthly-report", label: "Monthly Report", icon: BarChart3,
+      hint: "Last month's files, problems and fixes",
+      soft: "var(--p-info-soft)", ink: "var(--p-info-ink)" },
+    { to: "/executive-report", label: "Executive Report", icon: Presentation,
+      hint: "The whole book for leadership, to download or email",
+      soft: "var(--p-ok-soft)", ink: "var(--p-ok-ink)" },
+  ].filter(q => canAccessPath(q.to));
 
   useEffect(() => {
     if (!carrierSeat) return;
@@ -229,11 +270,25 @@ export default function Home() {
     getBrokersPaged({ page: 1, page_size: 1, mine: true })
       .then(r => setPartyCount(r.total))
       .catch(() => setPartyCount(null));
+    // Reinsurers are parties too — kept in the Party directory (/parties), not
+    // on /brokers. Counted the way that screen counts them when filtered to
+    // reinsurers (inactive included), so the tile and the list agree.
+    api.get<{ total: number }>("/parties", {
+      params: { mga, party_type: "reinsurer", include_inactive: true, page: 1, page_size: 1 },
+    })
+      .then(r => setReinsurerCount(r.data?.total ?? 0))
+      .catch(() => setReinsurerCount(null));
     // Same trick, same reason: sent with no filters so `total` is the carrier's
     // whole book — which is the unfiltered figure the Contracts screen prints.
     listContractsPaged({ page: 1, page_size: 1 })
       .then(r => setContractCount(r.total))
       .catch(() => setContractCount(null));
+    // The same count split by who the contract is with — brokers, or the
+    // carrier's own reinsurers — so the tile says which is which.
+    listContractsPaged({ page: 1, page_size: 1, contract_type: "insurer_broker" })
+      .then(r => setBrokerCount(r.total)).catch(() => setBrokerCount(null));
+    listContractsPaged({ page: 1, page_size: 1, contract_type: "insurer_reinsurer" })
+      .then(r => setTreatyCount(r.total)).catch(() => setTreatyCount(null));
   }, [mga, carrierSeat]);
 
   // Only the carrier admin can decide on these, so only they are asked to.
@@ -349,7 +404,7 @@ export default function Home() {
     setRunsTotal(null);
     setRunsProgrammes(null);
     api.get<{ total: number; items: { program_id: number | null }[] }>(`/direct/runs`, { params: {
-      mga, page: 1, page_size: 200,
+      mga, page: 1, page_size: 200, program_id: programId,
       ...(monthStart && monthEnd
         ? { date_from: monthStart.toISOString(), date_to: monthEnd.toISOString() } : {}),
     } })
@@ -365,7 +420,19 @@ export default function Home() {
       .catch(() => { if (live) { setRunsTotal(null); setRunsProgrammes(null); } });
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mga, period]);
+  }, [mga, period, programId]);
+
+  // The Bordereau Status chart for the same pick: a bar per day of a month, per
+  // month of a year, or per year for All Years (/dashboard/bordereau-status).
+  const [statusData, setStatusData] = useState<{ unit: "day" | "month" | "year"; items: StatusPoint[] } | null>(null);
+  useEffect(() => {
+    let live = true;
+    api.get<{ unit: "day" | "month" | "year"; items: StatusPoint[] }>("/dashboard/bordereau-status",
+      { params: { mga, period, program_id: programId } })
+      .then(r => { if (live) setStatusData(r.data); })
+      .catch(() => { if (live) setStatusData({ unit: "day", items: [] }); });
+    return () => { live = false; };
+  }, [mga, period, programId]);
 
   const fmt = (v: number | null | undefined) => (v == null ? "—" : v);
   // A not-validated run is never clean: its checks did not run (it carries one
@@ -397,17 +464,27 @@ export default function Home() {
     pieData.push({ name: "Uncategorized", value: stats.pending_exceptions, color: "#94a3b8" });
   }
 
-  // The last seven days, oldest first. Named by each day's real weekday — the
-  // series starts six days ago, not on a Monday.
-  const statusSeries = (stats?.runs_by_day_status ?? []).map((d, i) => ({
-    date: d.date,
-    name: d.date
-      ? new Date(`${d.date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" })
-      : `Day ${i + 1}`,
-    clean: d.clean || 0,
-    flagged: d.flagged || 0,
-    resolved: d.resolved || 0,
-  }));
+  // The picked period, oldest first: days are numbered (the full date is in
+  // the tooltip), months named, years as they are.
+  const statusUnit = statusData?.unit ?? "day";
+  const statusSeries = (statusData?.items ?? []).map(d => {
+    const day = statusUnit === "day" ? new Date(`${d.key}T00:00:00`) : null;
+    const mon = statusUnit === "month" ? new Date(Number(d.key.slice(0, 4)), Number(d.key.slice(5, 7)) - 1, 1) : null;
+    return {
+      key: d.key,
+      name: day ? String(day.getDate())
+        : mon ? mon.toLocaleDateString("en-GB", { month: "short" }) : d.key,
+      full: day ? day.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" })
+        : mon ? mon.toLocaleDateString("en-GB", { month: "long", year: "numeric" }) : d.key,
+      clean: d.clean || 0, flagged: d.flagged || 0, resolved: d.resolved || 0,
+    };
+  });
+  // A day opens its files; a month or a year narrows the pick to it.
+  const openStatusBar = (key: string) => {
+    if (statusUnit === "day") setStatusDay(key);
+    else if (statusUnit === "month") setMonth(key.slice(5, 7));
+    else { setYear(key); setMonth(ALL); }
+  };
 
   // Only a carrier admin can run the org/carrier/Bordereau setup. Until it is
   // done, anyone else gets a single notice instead of a dashboard with nothing
@@ -452,11 +529,8 @@ export default function Home() {
         </div>
       ) : undefined}
       onClick={() => nav("/contracts?waiting=mine")}
-      info={"Contracts whose terms your broker has agreed and which are now "
-            + "waiting for your signature as the carrier. \"Fully signed\" "
-            + "counts the contracts both you and the broker have signed. A "
-            + "contract the broker has sent back with changes requested is "
-            + "shown in red below — answer it before it can be signed."}
+      info={"Contracts the broker has agreed that now need your signature. Fully signed = signed by both sides.\n"
+            + "One sent back with changes requested shows in red — answer it first."}
     />
   ) : null;
 
@@ -472,11 +546,8 @@ export default function Home() {
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
           </div>
           <h3 style={{ margin: 0, fontSize: 18 }}>Files Received</h3>
-          <InfoTip text={`All bordereau files your brokers sent${infoWhen}, across `
-            + "every channel — including files on hold or rejected at intake. "
-            + "Below the total, amber counts files on hold (waiting for you to "
-            + "release or discard them) and red counts files whose processing "
-            + "failed (nothing was saved; safe to retry). Click to view them all."} />
+          <InfoTip text={`All files your brokers sent${infoWhen}, by any channel, including those on hold or rejected.\n`
+            + "Amber = on hold for you to release or discard; red = processing failed, safe to retry."} />
         </div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
           <span style={{ fontSize: 32, fontWeight: 600, color: "var(--p-text)" }}>
@@ -513,17 +584,60 @@ export default function Home() {
   // version. Said with this period's own numbers when they are to hand.
   const acceptedInPeriod = arrivalsInPeriod?.filter(a => a.outcome === "accepted").length;
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-  const processedTip = "A bordereau is one broker's report for one programme, for one month. "
-    + ((receivedInPeriod != null && acceptedInPeriod != null && runsTotal != null && !receivedMore)
-      ? `${acceptedInPeriod} of the ${plural(receivedInPeriod, "file", "files")} received${infoWhen} `
-        + `${acceptedInPeriod === 1 ? "was" : "were"} processed. Re-sent files count once (latest copy), `
-        + `so that's ${plural(runsTotal, "bordereau", "bordereaux")}`
+  const processedTip = "One broker's report for one programme and month; a re-sent file counts once.\n"
+    // Files received are counted over the whole book, so the sum is only
+    // told when no programme is picked.
+    + ((programId == null && receivedInPeriod != null && acceptedInPeriod != null && runsTotal != null && !receivedMore)
+      ? `${acceptedInPeriod} of ${plural(receivedInPeriod, "file", "files")} received${infoWhen} `
+        + `${acceptedInPeriod === 1 ? "was" : "were"} processed: `
+        + `${plural(runsTotal, "bordereau", "bordereaux")}`
         + (runsProgrammes != null
-          ? ` across ${plural(runsProgrammes, "programme", "programmes")}. ` : ". ")
-      : "Re-sent files count once (latest copy). ")
+          ? ` across ${plural(runsProgrammes, "programme", "programmes")}.\n` : ".\n")
+      : "")
     + "Click to see each result.";
 
   // Recent runs
+  /** The month's reinsurance bordereaux — what was ceded to reinsurers from
+   *  the inward files — under Bordereaux Processed, in the same month. */
+  const reinsuranceCard = (d: ReinsuranceDashboard) => {
+    const c = d.ceded;
+    const chips = [
+      { n: c.ready_to_send, label: "ready to send", tone: "b-info" },
+      { n: c.overdue, label: "overdue", tone: "b-crit" },
+      { n: c.sent, label: "sent", tone: "b-mut" },
+      { n: c.queried, label: "queried", tone: "b-warn" },
+      { n: c.agreed, label: "agreed", tone: "b-ok" },
+    ].filter(x => x.n);
+    return (
+      <div className="card" style={{ padding: "16px 20px", cursor: "pointer" }}
+           onClick={() => nav("/reinsurance/bordereaux")}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <h3 style={{ margin: 0, fontSize: 15 }}>Reinsurance Bordereaux</h3>
+            <InfoTip text={`Statements for your reinsurers${infoWhen}, worked out from the bordereaux above — one per treaty and period.`} />
+          </div>
+          <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+            <span style={{ fontSize: 22, fontWeight: 600 }}>{fmt(c.total ?? 0)}</span>
+            <span className="sub">{(c.total ?? 0) === 1 ? "statement" : "statements"} {countWhen}</span>
+          </span>
+        </div>
+        {(chips.length > 0 || c.not_set_up > 0) && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+            {chips.map(x => (
+              <span key={x.label} className={`badge ${x.tone}`}><span className="d" />{x.n} {x.label}</span>
+            ))}
+            {c.not_set_up > 0 && (
+              <Link className="badge b-warn" to="/direct/setups?tab=reinsurance"
+                    onClick={e => e.stopPropagation()}>
+                {c.not_set_up} {c.not_set_up === 1 ? "treaty" : "treaties"} not set up
+              </Link>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const recentCard = (
     <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)", color: "white", border: "none", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/runs?from=home")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgba(15,23,42,0.4), 0 4px 6px -4px rgba(15,23,42,0.4)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}>
       <div>
@@ -555,6 +669,30 @@ export default function Home() {
     </div>
   );
 
+  // Quick actions — the reports, one click from the dashboard, under Overdue
+  // Bordereaux. Each shows only to a seat that may open it (canAccessPath).
+  // HIDDEN for now: not placed on the page.
+  const quickCard = quickActions.length > 0 && (
+    <div className="card">
+      <div className="card-h">
+        <Zap size={18} style={{ color: "var(--p-primary)" }} /><h3>Quick actions</h3>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+                    gap: 14, padding: "20px 22px" }}>
+        {quickActions.map(q => (
+          <Link key={q.to} to={q.to}
+            style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
+                     padding: "18px 14px", borderRadius: 10, textAlign: "center",
+                     background: q.soft, border: "1px solid var(--p-border)", textDecoration: "none" }}>
+            <q.icon size={24} style={{ color: q.ink }} />
+            <b style={{ fontSize: 14, color: q.ink }}>{q.label}</b>
+            <span style={{ fontSize: 12, color: "var(--p-muted)", lineHeight: 1.4 }}>{q.hint}</span>
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+
   return (
     <div className="proto">
       <div className="view full">
@@ -563,12 +701,22 @@ export default function Home() {
             <h2>Dashboard</h2>
             <p>{SUBTITLE[role]}</p>
           </div>
-          {canProcess && (
+          {(canProcess || canAccessPath("/policies")) && (
             <div className="actions">
-              <Link className="btn pri" to="/direct">＋ Process Bordereaux</Link>
+              {/* A shortcut: Policy Explorer is also in the sidebar, under Operations. */}
+              {canAccessPath("/policies") && (
+                <Link className="btn" to="/policies">Policy Explorer</Link>
+              )}
+              {canAccessPath("/financial-summary") && (
+                <Link className="btn" to="/financial-summary">Financial Summary</Link>
+              )}
+              {canProcess && <Link className="btn pri" to="/direct">＋ Process Bordereaux</Link>}
             </div>
           )}
         </div>
+
+        {/* Programme rules sent and not yet approved by everyone (carrier only). */}
+        {role === "carrier_admin" && <RulesWaitingCard side="carrier" />}
 
         {/* KPI tiles — wired to /dashboard/stats (see API notes for the new fields).
 
@@ -590,15 +738,33 @@ export default function Home() {
               {cell(3, <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="" />)}
 
               {seat !== "user" && (
-                cell(3, <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="" />)
+                cell(3, <StatCard title="Parties" icon={Users} subtitle=""
+                  value={partyCount == null || reinsurerCount == null
+                    ? fmt(partyCount ?? reinsurerCount) : fmt(partyCount + reinsurerCount)}
+                  split={[
+                    { label: "Brokers", value: fmt(partyCount), onClick: () => nav("/brokers") },
+                    { label: "Reinsurers", value: fmt(reinsurerCount),
+                      onClick: () => nav("/parties?type=reinsurer") },
+                  ]} />)
               )}
 
               {/* The sub-line appears only when something is about to run out
                   — a "0 expiring" line would be one more thing to read past. */}
-              {cell(3, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")}
-                subtitle={expiringSoon
-                  ? `${expiringSoon} ${expiringSoon === 1 ? "contract" : "contracts"} expiring in the next ${expiringDays} days`
-                  : ""} />)}
+              {/* Two kinds of contract, two numbers: with brokers (the business
+                  coming in) and with reinsurers (the risk passed on). One total
+                  left a carrier guessing which it was looking at. */}
+              {cell(3, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText}
+                onClick={() => nav("/contracts")}
+                split={[
+                  { label: "Broker contracts", value: fmt(brokerCount),
+                    onClick: () => nav("/contracts?type=insurer_broker"),
+                    hint: expiringSoon
+                      ? `${expiringSoon} expiring in ${expiringDays} days` : undefined },
+                  { label: "Reinsurance treaties", value: fmt(treatyCount),
+                    onClick: () => nav("/contracts?type=insurer_reinsurer"),
+                    hint: rei?.counts.expiring_soon
+                      ? `${rei.counts.expiring_soon} expiring in 90 days` : undefined },
+                ]} />)}
 
               {carrierAdmin && cell(3, signaturesTile)}
 
@@ -653,10 +819,7 @@ export default function Home() {
                   + "on you"
                 : `${stats?.active_setups ?? 0} live`}
               onClick={() => nav("/direct/setups?status=pending_approval")}
-              info={"Bordereau setups your carrier users have finished and sent "
-                    + "up. Nothing about one reaches the broker until you "
-                    + "approve it — not the programme, not the contract and "
-                    + "not the BDX template."}
+              info={"Bordereau setups waiting for your approval. Nothing in one reaches the broker until you approve it."}
             />
           )}
 
@@ -686,11 +849,7 @@ export default function Home() {
                   + "waiting on you"
                 : "nothing waiting"}
               onClick={() => nav("/brokers/requests")}
-              info={"Brokers your carrier users want to bring on board. Nothing "
-                    + "has been sent to any of them — they hear from Kavachio "
-                    + "only once you approve. Approving sends the invitation; "
-                    + "what they may send you is still settled by the bordereau "
-                    + "setup approval."}
+              info={"Brokers waiting for your approval to join. Nothing is sent to a broker until you approve; approving sends the invitation."}
             />
           )}
 
@@ -701,54 +860,110 @@ export default function Home() {
 
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
-          {/* Processing Volume Chart */}
-          <div className="card" style={{ padding: "24px 20px", display: "flex", flexDirection: "column" }}>
-            <div className="card-h" style={{ marginBottom: 20 }}>
-              <h3>Bordereau Status</h3>
-              <InfoTip text="Clean vs Flagged runs and Resolved exceptions over the last 7 days." />
+        {/* ONE block for everything that happened in a period: a single month
+            + year pick (and the programme picked on the Programme Overview)
+            drives every card inside it, so no card counts "last 7 days" or
+            "last 30 days" of its own. The bar sticks while the block scrolls. */}
+        <section aria-label="Activity" style={{ border: "1px solid var(--p-border-2)", borderRadius: 16,
+                      background: "var(--p-surface-3)", padding: "0 18px 18px", marginBottom: 24 }}>
+          <div style={{ position: "sticky", top: 0, zIndex: 5, background: "var(--p-surface-3)",
+                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                        flexWrap: "wrap", gap: 12, padding: "16px 0 14px", marginBottom: 4,
+                        borderBottom: "1px solid var(--p-border-2)", borderRadius: "16px 16px 0 0" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <h3 style={{ margin: 0, fontSize: 16 }}>Activity · {periodLabel}</h3>
+              <InfoTip text={"Every card here counts the month and year picked"
+                + (carrierAdmin ? ", and the programme picked in Programme Overview, if any" : "")
+                + ".\nAll Months = the whole year; All Years = everything."} />
+              {pickedProgramme && (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+                  <span className="badge b-info"><span className="d" />{pickedProgramme.name}</span>
+                  <button type="button" className="linkish"
+                    style={{ background: "none", border: 0, cursor: "pointer", padding: 0, fontSize: 12.5 }}
+                    onClick={() => setPickedProgramme(null)}>Show all programmes</button>
+                </span>
+              )}
             </div>
-            <div style={{ width: "100%", height: 260 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart
-                  data={statusSeries}
-                  margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
-                  barSize={32}
-                  style={{ cursor: "pointer" }}
-                  // A day's column opens the files behind it; the legend
-                  // under the chart does not (clickedDayIndex).
-                  onClick={(st: any, e: any) => {
-                    const i = clickedDayIndex(st, e);
-                    const d = i != null ? statusSeries[i]?.date : undefined;
-                    if (d) setStatusDay(d);
-                  }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} dy={10} />
-                  <YAxis yAxisId="left" allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} />
-                  <YAxis yAxisId="right" orientation="right" allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} />
-                  <Tooltip
-                    formatter={(value, name) => [value as number, name]}
-                    labelFormatter={(label) => `${label}`}
-                    contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", boxShadow: "0 10px 15px -3px rgb(0 0 0 / 0.1)" }}
-                    itemStyle={{ color: "#0f172a", fontWeight: 600, textTransform: "capitalize" }}
-                    labelStyle={{ color: "#64748b", marginBottom: 4 }}
-                    cursor={{ fill: '#f1f5f9' }}
-                  />
-                  <Legend verticalAlign="bottom" height={36} iconType="circle" wrapperStyle={{ fontSize: 13, color: "#64748b", textTransform: "capitalize" }} />
-                  <Bar yAxisId="left" dataKey="clean" name="Clean Files" fill="#10b981" stackId="a" />
-                  <Bar yAxisId="left" dataKey="flagged" name="Flagged Files" fill="#f59e0b" stackId="a" radius={[4, 4, 0, 0]} />
-                  <Line yAxisId="right" type="monotone" dataKey="resolved" name="Resolved Exceptions in Files" stroke="#3b82f6" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} />
-                </ComposedChart>
-              </ResponsiveContainer>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {/* With All Years there is no one year to take a month of. */}
+              <select className="fbar-select" aria-label="Month"
+                value={year === ALL ? ALL : month} disabled={year === ALL}
+                onChange={e => setMonth(e.target.value)}>
+                <option value={ALL}>All Months</option>
+                {MONTH_NAMES.map((name, i) => (
+                  <option key={name} value={pad2(i + 1)}>{name}</option>
+                ))}
+              </select>
+              <select className="fbar-select" aria-label="Year"
+                value={year} onChange={e => setYear(e.target.value)}>
+                <option value={ALL}>All Years</option>
+                {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
+              </select>
             </div>
           </div>
 
-          {/* Carrier admin: Broker Performance sits beside Bordereau Status,
-              in place of the Exceptions Breakdown chart. How each broker
-              company is working and putting its issues right — the five that
-              most recently sent this carrier a file. */}
-          {carrierAdmin ? <BrokerPerformance mga={mga} /> : (
+          <div style={{ paddingTop: 16 }}>
+          {/* The top of the hierarchy (programme → broker → contract → bordereau):
+              one row per programme, worst first. Carrier only — it reads the Open
+              Problems list, which is the carrier's. Clicking a row picks the
+              programme for every card in this block. */}
+          {carrierAdmin && (
+            <ProgrammeOverview mga={mga} period={period} periodLabel={periodLabel}
+              selected={pickedProgramme} onSelect={setPickedProgramme} />
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
+            <div className="card" style={{ padding: "24px 20px", display: "flex", flexDirection: "column" }}>
+              <div className="card-h" style={{ marginBottom: 20 }}>
+                <h3>Bordereau Status</h3>
+                <InfoTip text={`Clean and flagged files, and exceptions resolved, ${everyMonth ? "in every year" : `in ${periodLabel}`}`
+                  + ` — one bar per ${statusUnit}. `
+                  + (statusUnit === "day" ? "Click a day to see its files." : `Click a ${statusUnit} to look at it on its own.`)} />
+                <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--p-faint)" }}>{periodLabel}</span>
+              </div>
+              <div style={{ width: "100%", height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart
+                    data={statusSeries}
+                    margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                    maxBarSize={32}
+                    style={{ cursor: "pointer" }}
+                    // A bar opens what is behind it; the legend under the
+                    // chart does not (clickedDayIndex).
+                    onClick={(st: any, e: any) => {
+                      const i = clickedDayIndex(st, e);
+                      const k = i != null ? statusSeries[i]?.key : undefined;
+                      if (k) openStatusBar(k);
+                    }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} dy={10} />
+                    <YAxis yAxisId="left" allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} />
+                    <YAxis yAxisId="right" orientation="right" allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} />
+                    <Tooltip
+                      formatter={(value, name) => [value as number, name]}
+                      labelFormatter={(label, payload) => String(payload?.[0]?.payload?.full ?? label)}
+                      contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", boxShadow: "0 10px 15px -3px rgb(0 0 0 / 0.1)" }}
+                      itemStyle={{ color: "#0f172a", fontWeight: 600, textTransform: "capitalize" }}
+                      labelStyle={{ color: "#64748b", marginBottom: 4 }}
+                      cursor={{ fill: '#f1f5f9' }}
+                    />
+                    <Legend verticalAlign="bottom" height={36} iconType="circle" wrapperStyle={{ fontSize: 13, color: "#64748b", textTransform: "capitalize" }} />
+                    <Bar yAxisId="left" dataKey="clean" name="Clean Files" fill="#10b981" stackId="a" />
+                    <Bar yAxisId="left" dataKey="flagged" name="Flagged Files" fill="#f59e0b" stackId="a" radius={[4, 4, 0, 0]} />
+                    <Line yAxisId="right" type="monotone" dataKey="resolved" name="Resolved Exceptions in Files" stroke="#3b82f6" strokeWidth={3} dot={{ r: statusSeries.length > 14 ? 2 : 4 }} activeDot={{ r: 6 }} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            {/* Carrier admin: Broker Performance sits beside Bordereau Status,
+                in place of the Exceptions Breakdown chart — same period, same
+                programme as the rest of the block. */}
+            {carrierAdmin ? (
+              <BrokerPerformance mga={mga} programme={pickedProgramme}
+                period={period} periodLabel={periodLabel} />
+            ) : (
           /* Exceptions Breakdown Pie Chart */
           <div className="card" style={{ padding: "24px 20px", display: "flex", flexDirection: "column" }}>
             <div className="card-h" style={{ marginBottom: 20 }}>
@@ -798,15 +1013,17 @@ export default function Home() {
               </div>
             )}
           </div>
-          )}
-        </div>
+            )}
+          </div>
 
-        {/* How each broker company is working and putting its issues right —
+         
+         
+          {/* How each broker company is working and putting its issues right —
             the five that most recently sent this carrier a file. The carrier
             admin has it in the row above. */}
         {carrierSeat && !carrierAdmin && (
           <div style={{ marginBottom: 24 }}>
-            <BrokerPerformance mga={mga} />
+            <BrokerPerformance mga={mga} period={period} periodLabel={periodLabel}/>
           </div>
         )}
 
@@ -838,33 +1055,38 @@ export default function Home() {
               {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
             </select>
           </div>
-        </div>
+        </div> 
 
-        {carrierAdmin ? (
-          /* Carrier admin's foot of the page: Overdue Bordereaux on the left,
-             Bordereaux Processed on the right at the same height. */
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 18 }}>
-            <div style={{ display: "grid" }}>
-              <ArrivalsCard onTime={due?.on_time} late={due?.late} never={due?.never}
-                subtitle={due ? `Due in ${periodName(period)}` : undefined}
-                info={`Bordereaux your brokers owed${infoWhen}, by how they arrived.`} />
+          {carrierAdmin ? (
+            /* Overdue Bordereaux on the left, Bordereaux Processed and
+               Reinsurance Bordereaux (and Reinsurance) on the right. Each card keeps
+             its own height. */
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24,
+                        alignItems: "start" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                <ArrivalsCard onTime={due?.on_time} late={due?.late}
+                  overdue={due?.overdue} never={due?.never}
+                  subtitle={due ? (everyMonth ? "Due in any year" : `Due in ${periodLabel}`) : undefined}
+                  info={`Bordereaux your brokers owed${infoWhen}, by how they arrived.`} />
+                {/* Quick actions (quickCard) goes here — hidden for now. */}
             </div>
-            <div style={{ display: "grid" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                {recentCard}
+                {rei && reinsuranceCard(rei)}
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
               {recentCard}
             </div>
+          )}
           </div>
-        ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginBottom: 18 }}>
-            {recentCard}
-          </div>
-        )}
-
-
+        </section>
       </div >
 
       <DayFilesDrawer day={statusDay} from="home"
         load={dd => api.get<DayRuns>("/dashboard/runs-on-day", {
-          params: { day: dd, mga },
+          params: { day: dd, mga, program_id: programId },
         }).then(a => a.data)}
         onClose={() => setStatusDay(null)} />
     </div >

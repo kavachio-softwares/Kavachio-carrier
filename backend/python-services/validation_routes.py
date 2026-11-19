@@ -408,7 +408,9 @@ def _resolve_contract_latest(s, template_id: int, tenant_id) -> Optional[int]:
     rows = s.execute(
         text("SELECT contract_id, rule_spec, canonical_target FROM validation_rule "
              "WHERE rule_status = 'active' AND contract_id IS NOT NULL "
-             "AND (tenant_id IS NULL OR tenant_id = :tid)"),
+             "AND (tenant_id IS NULL OR tenant_id = :tid) "
+             # A treaty never owns a broker's template.
+             "AND COALESCE(rule_spec->>'source', '') <> 'reinsurance'"),
         {"tid": tenant_id},
     ).mappings().all()
     from collections import defaultdict

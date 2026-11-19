@@ -176,6 +176,9 @@ _SECRET_SEGMENTS = [
     (re.compile(r"(/esign/sign/)[^/]+"), r"\1{token}"),
     # The broker's secure correction link is the same kind of credential.
     (re.compile(r"(/fix-link/)[^/]+"), r"\1{token}"),
+    # A reinsurer's private treaty link (treaty_routes) — the same kind of
+    # credential again, and it keeps its own access history.
+    (re.compile(r"(/treaty-view/)[^/]+"), r"\1{token}"),
 ]
 
 # Id segments that are not NUMBERS. A tenant is addressed by its code, so
@@ -344,6 +347,31 @@ _FRIENDLY = {
     ("PUT",    "/programs/{id}/schedule"):           "submission_schedule_updated",
     ("POST",   "/tenants/{code}/transfer-ownership"): "ownership_transferred",
     ("POST",   "/onboarding/skip"):                  "onboarding_skipped",
+    # --- reinsurance treaties (treaty_routes)
+    ("PUT",    "/contracts/{id}/treaty"):            "treaty_structure_saved",
+    ("POST",   "/treaties/upload"):                  "signed_treaty_uploaded",
+    ("POST",   "/contracts/{id}/wording/read"):      "treaty_wording_read",
+    ("POST",   "/contracts/{id}/wording/clauses"):   "treaty_clauses_read",
+    ("POST",   "/contracts/{id}/basis"):             "treaty_term_changed",
+    ("POST",   "/contracts/{id}/endorsements/{id}/read"): "treaty_endorsement_read",
+    ("POST",   "/contracts/{id}/send-for-approval"): "treaty_sent_for_approval",
+    ("POST",   "/contracts/{id}/endorsements/{id}/send-for-approval"): "treaty_endorsement_sent_for_approval",
+    ("POST",   "/contracts/{id}/endorsements/{id}/sign"): "treaty_endorsement_signed",
+    ("POST",   "/contracts/{id}/endorsements/{id}/confirm"): "treaty_endorsement_applied",
+    ("DELETE", "/contracts/{id}/basis/{id}"):        "treaty_term_change_removed",
+    ("POST",   "/contracts/{id}/basis/send-for-approval"): "treaty_basis_sent_for_approval",
+    ("POST",   "/contracts/{id}/wording/confirm"):   "treaty_terms_confirmed",
+    ("POST",   "/reinsurance/bordereaux"):           "reinsurance_bordereau_prepared",
+    ("POST",   "/reinsurance/bordereaux/{id}/decide"): "reinsurance_exception_decided",
+    ("POST",   "/reinsurance/bordereaux/{id}/validate"): "reinsurance_bordereau_validated",
+    ("PUT",    "/reinsurance/setups/{id}"):          "reinsurance_setup_saved",
+    ("POST",   "/reinsurance/setups/{id}/send-back"): "reinsurance_setup_sent_back",
+    ("PUT",    "/contracts/{id}/treaty/programmes"): "treaty_programmes_updated",
+    ("POST",   "/programs/{id}/treaties"):           "treaty_attached_to_programme",
+    ("DELETE", "/programs/{id}/treaties/{id}"):      "treaty_detached_from_programme",
+    ("POST",   "/contracts/{id}/reinsurer-access"):  "treaty_shared_with_reinsurer",
+    ("POST",   "/contracts/{id}/reinsurer-access/{id}/resend"): "treaty_link_resent",
+    ("POST",   "/contracts/{id}/reinsurer-access/{id}/revoke"): "treaty_link_revoked",
 }
 
 def friendly_action(method: str, path: str) -> str:
@@ -368,6 +396,25 @@ _SELF_LOGGED = [
     ("POST",   re.compile(r"^/fix-link/[^/]+(/.*)?$")),
     # The carrier's delivery rule and channel notify list log themselves.
     ("PUT",    re.compile(r"^/programs/\d+/delivery-rule$")),
+    # MOPR 41's fix target and MOPR 42.2's Monthly Report settings and sends
+    # write their own named rows, with the old and new value or the month.
+    ("PUT",    re.compile(r"^/reports/exception-resolution/target$")),
+    ("PUT",    re.compile(r"^/reports/monthly/delivery$")),
+    ("POST",   re.compile(r"^/reports/monthly/send$")),
+    # 38.2's Executive Report schedule and sends, the same way.
+    ("PUT",    re.compile(r"^/reports/executive/delivery$")),
+    ("POST",   re.compile(r"^/reports/executive/send$")),
+    ("POST",   re.compile(r"^/reports/executive/sends/clear$")),
+    # 43.3: emailing the policy list writes its own named row (policy_export),
+    # with how many policies, the filters and who it went to.
+    ("POST",   re.compile(r"^/policies/send$")),
+    # Programme Rules: every write names itself (programme_rule_routes).
+    ("POST",   re.compile(r"^/programs/\d+/rules$")),
+    ("PUT",    re.compile(r"^/programs/\d+/rules/\d+$")),
+    ("DELETE", re.compile(r"^/programs/\d+/rules/\d+$")),
+    ("POST",   re.compile(r"^/programs/\d+/rules/\d+/(send|retire)$")),
+    ("POST",   re.compile(r"^/broker/programme-rules/\d+/(approve|request-changes)$")),
+    ("POST",   re.compile(r"^/treaty-view/[^/]+/programme-rules/\d+/(approve|request-changes)$")),
     ("PUT",    re.compile(r"^/intake/routes/\d+/contacts$")),
     ("POST",   re.compile(r"^/extra-fields$")),
     ("POST",   re.compile(r"^/extra-fields/[^/]+/adopt$")),
@@ -410,6 +457,15 @@ _SELF_LOGGED = [
     # neither persists anything. A contract wording preview is a POST only
     # because it posts the draft it is rendering.
     ("POST",   re.compile(r"^/contract-wording/preview$")),
+    ("POST",   re.compile(r"^/treaty/preview$")),
+    ("POST",   re.compile(r"^/treaties/read$")),
+    # Sending writes its own row (reinsurance_bordereau_sent).
+    ("POST",   re.compile(r"^/reinsurance/bordereaux/\d+/send$")),
+    ("POST",   re.compile(r"^/reinsurance/setups/\d+/activate$")),
+    ("POST",   re.compile(r"^/reinsurance/setups/\d+/preview$")),
+    # The reinsurer's link has no Kavachio user behind it; every code, unlock
+    # and download is written to reinsurer_access_event by the route itself.
+    ("POST",   re.compile(r"^/treaty-view/[^/]+(/.*)?$")),
     ("POST",   re.compile(r"^/contracts/\d+/endorsement/preview$")),
     # Marking your own notifications as read is bookkeeping on your own inbox.
     ("POST",   re.compile(r"^/admin/notifications/read$")),

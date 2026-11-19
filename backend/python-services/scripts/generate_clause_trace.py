@@ -34,7 +34,8 @@ Options:
     --min-cols N       A row needs >= N distinct non-empty cells to count as a header (default 3)
 
 Requirements:
-    * GEMINI_API_KEY in the environment / .env  (the extraction + synthesis LLM calls)
+    * GOOGLE_APPLICATION_CREDENTIALS (or GOOGLE_CLOUD_PROJECT) in the environment / .env
+      (the extraction + synthesis LLM calls on Agent Platform)
     * Read access to the rule-template catalog in Postgres (DATABASE_URL).
       This script READS the catalog but never writes to Postgres.
 """
@@ -50,7 +51,7 @@ _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _BACKEND_DIR)
 
 # Standalone scripts don't go through main.py, which is the only place that loads
-# .env — so load it here for GEMINI_API_KEY / DATABASE_URL.
+# .env — so load it here for the Google Cloud AI settings / DATABASE_URL.
 try:
     from dotenv import load_dotenv
     load_dotenv(os.path.join(_BACKEND_DIR, ".env"))

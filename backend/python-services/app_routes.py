@@ -1045,9 +1045,12 @@ def tenants_list(
             # they are the proof that its own admin got started.
             programmes = s.query(func.count(Program.id)).filter(
                 Program.tenant_id == t.id).scalar() or 0
-            brokers = s.query(func.count(Party.id)).filter(
-                Party.tenant_id == t.id,
-                func.cast(Party.party_type, String) == "broker").scalar() or 0
+            # The same people the carrier's Users tab lists: the broker login
+            # of every broker this carrier works with — the ones it onboarded
+            # AND the ones another carrier onboarded that accepted its
+            # invitation or sit on its programmes. One query for both
+            # screens, so the two numbers cannot drift apart.
+            brokers = _carrier_broker_logins(s, t.id).count()
             items.append({
                 "mga": t.tenant_name,
                 "name": t.legal_name or (t.tenant_name or "").title(),
@@ -1427,7 +1430,9 @@ def parties_list(
             # true pagination (unlike the old client-side post-filter, which
             # filtered an already-sliced page and could show fewer rows than
             # the page size with no indication more matches existed elsewhere).
-            query = query.filter(Party.is_active.is_(True), Party.is_active.is_(None)) \
+            # Active = true OR NULL (NULL predates the column default). The two
+            # used to be ANDed, so "Active" matched nothing at all.
+            query = query.filter(or_(Party.is_active.is_(True), Party.is_active.is_(None))) \
                 if is_active else query.filter(Party.is_active.is_(False))
         elif not include_inactive:
             # Selectors must never offer a deactivated party, so active-only is the
@@ -1737,19 +1742,30 @@ class ScheduleBody(BaseModel):
     due_day_of_month: Optional[int] = None         # monthly/quarterly deadline
     due_offset_days: Optional[int] = None          # weekly deadline
     soon_window_days: Optional[int] = None
+    # MOPR 39.2 — days late before a missing file is Delinquent (1–365).
+    delinquent_after_days: Optional[int] = None
+    # MOPR 39.3 — why the deadlines are being changed (required once files have
+    # started falling due), and whether files already sent are re-checked
+    # against the new date (only when the old one was wrong). Not columns.
+    reason: Optional[str] = None
+    recheck_past: bool = False
     contract_id: Optional[int] = None
 
 
 def _schedule_dict(sched: Optional[SubmissionSchedule], resolved, reason=None,
-                   contract_frequency=None, contract_anchor=None) -> dict:
+                   contract_frequency=None, contract_anchor=None,
+                   has_history: bool = False) -> dict:
     """Serialise a schedule + whether it resolves. `resolved` is a ResolvedSchedule
     or None; when None the UI shows the 'set it up' prompt (reason says what's missing).
     contract_frequency/anchor tell the UI what the contract supplies, so 'Save' can be
-    enabled when the schedule would resolve even without a manual override."""
+    enabled when the schedule would resolve even without a manual override.
+    `has_history` — a file has fallen due or been sent, so a change from here on
+    is an override and asks why (MOPR 39.3)."""
     base = {
         "exists": sched is not None,
         "resolved": resolved is not None,
         "reason": reason,
+        "has_history": has_history,
         "contract_frequency": contract_frequency,
         "contract_anchor": contract_anchor.isoformat()
             if hasattr(contract_anchor, "isoformat") else contract_anchor,
@@ -1764,6 +1780,7 @@ def _schedule_dict(sched: Optional[SubmissionSchedule], resolved, reason=None,
             "due_day_of_month": sched.due_day_of_month,
             "due_offset_days": sched.due_offset_days,
             "soon_window_days": sched.soon_window_days,
+            "delinquent_after_days": sched.delinquent_after_days,
         })
     if resolved is not None:
         base.update({
@@ -1786,7 +1803,7 @@ def program_schedule_get(program_id: int, principal: Principal = Depends(current
     """
     from submission_calendar_service import (
         resolve_for_schedule, _unresolved_reason, program_contract_basis,
-        ensure_auto_schedule,
+        ensure_auto_schedule, schedule_has_history,
     )
     with SessionLocal() as s:
         p = s.get(Program, program_id)
@@ -1803,16 +1820,24 @@ def program_schedule_get(program_id: int, principal: Principal = Depends(current
         resolved, program, contract = resolve_for_schedule(s, sched)
         reason = None if resolved else _unresolved_reason(sched, program, contract)
         return _schedule_dict(sched, resolved, reason,
-                              contract_frequency=c_freq, contract_anchor=c_anchor)
+                              contract_frequency=c_freq, contract_anchor=c_anchor,
+                              has_history=schedule_has_history(s, program_id))
 
 
 @router.put("/programs/{program_id}/schedule")
 def program_schedule_put(program_id: int, body: ScheduleBody,
                          principal: Principal = Depends(current_principal)):
-    """Create/update the schedule (C-6/C-8 override), then (re)build the calendar."""
+    """Create/update the schedule (C-6/C-8 override), then (re)build the calendar.
+
+    MOPR 39.3 — a change is a manual override and is recorded: every field
+    that moved as old → new, the reason (required once the programme's files
+    have started falling due), and what it did to the calendar. Files already
+    sent keep their result unless `recheck_past` says the old date was wrong."""
     from submission_calendar_service import (
         resolve_for_schedule, materialize_schedule, _unresolved_reason,
-        program_contract_basis,
+        program_contract_basis, schedule_snapshot, schedule_changes,
+        schedule_has_history, reason_needed, DATE_FIELDS,
+        notify_brokers_of_new_dates,
     )
     with SessionLocal() as s:
         p = s.get(Program, program_id)
@@ -1824,19 +1849,49 @@ def program_schedule_put(program_id: int, body: ScheduleBody,
         if sched is None:
             sched = SubmissionSchedule(tenant_id=p.tenant_id, program_id=program_id)
             s.add(sched); s.flush()
-        for k, v in body.model_dump(exclude_unset=True).items():
+        dad = body.delinquent_after_days
+        if dad is not None and not 1 <= dad <= 365:
+            raise HTTPException(400, "Delinquent after must be between 1 and 365 days late.")
+        before = schedule_snapshot(s, sched)
+        history = schedule_has_history(s, program_id)
+        for k, v in body.model_dump(exclude_unset=True,
+                                    exclude={"reason", "recheck_past"}).items():
             setattr(sched, k, v)
-        result = materialize_schedule(s, sched)
+        changes = schedule_changes(before, schedule_snapshot(s, sched))
+        why = (body.reason or "").strip() or None
+        if why is None and reason_needed(changes, history):
+            s.rollback()
+            raise HTTPException(400, "Say why you're changing the deadlines.")
+        # Re-checking only means something when a date actually moved.
+        recheck = bool(body.recheck_past) and any(
+            c["field"] in DATE_FIELDS for c in changes)
+        result = materialize_schedule(s, sched, recheck_past=recheck)
         s.commit(); s.refresh(sched)
         resolved, program, contract = resolve_for_schedule(s, sched)
         reason = None if resolved else _unresolved_reason(sched, program, contract)
         c_freq, c_anchor = program_contract_basis(s, program_id)
         mga = _tenant_name(s, p.tenant_id)
-        _log(mga, _actor(principal), "submission_schedule_updated", target=str(program_id),
-             details={"resolved": result.get("resolved"), "count": result.get("count")})
+        # Nothing changed, nothing to record — a second Save is not an override.
+        told = 0
+        if changes:
+            changed_by = _actor(principal)
+            # The brokers whose due dates moved are told (after the commit —
+            # the change stands whether or not the mail goes).
+            told = notify_brokers_of_new_dates(
+                s, p, changes, result, _carrier_label(s, p.tenant_id),
+                changed_by=changed_by)
+            _log(mga, changed_by, "submission_schedule_updated",
+                 target=str(program_id), principal=principal,
+                 details={"program_name": p.name, "changes": changes, "reason": why,
+                          "moved": result.get("moved", 0),
+                          "kept_past": result.get("kept_past", 0),
+                          "recheck_past": recheck,
+                          "rechecked": result.get("rechecked", []),
+                          "brokers_emailed": told})
         return {"schedule": _schedule_dict(sched, resolved, reason,
-                                           contract_frequency=c_freq, contract_anchor=c_anchor),
-                "calendar": result}
+                                           contract_frequency=c_freq, contract_anchor=c_anchor,
+                                           has_history=schedule_has_history(s, program_id)),
+                "calendar": result, "changes": changes, "brokers_emailed": told}
 
 
 @router.get("/calendar")
@@ -1868,6 +1923,13 @@ def calendar_list(mga: Optional[str] = None, program_id: Optional[int] = None,
 @router.get("/calendar/board")
 def calendar_board_view(mga: Optional[str] = None, month: Optional[str] = None,
                         carrier: Optional[int] = None, broker: Optional[int] = None,
+                        program_id: Optional[int] = None,
+                        q: Optional[str] = Query(None, max_length=100),
+                        filter_program: Optional[int] = None,
+                        filter_broker: Optional[int] = None,
+                        status: Optional[str] = None, case: Optional[str] = None,
+                        frequency: Optional[str] = None, stage: Optional[str] = None,
+                        options: bool = False,
                         principal: Principal = Depends(current_principal)):
     """The carrier's Bordereau Calendar for one due-month (requirement 17.2).
 
@@ -1880,10 +1942,45 @@ def calendar_board_view(mga: Optional[str] = None, month: Optional[str] = None,
     `carrier` (tenant id) and/or one `broker` (party id), the same two filters
     as the platform dashboard. Anyone tenant-bound is pinned to their own
     tenant as before; `carrier`/`broker` are meaningless for them and ignored.
+
+    The screen's filters narrow the two tables only (BoardFilters), never the
+    headline counts: `q` (programme / broker / contract name), `filter_program`,
+    `filter_broker`, and comma-separated `status` and `case` for the month's
+    rows, `frequency` and `stage` for the programme list. `options=true` adds
+    the programme and broker choices for those dropdowns.
+
+    A filtered request re-reads the board without healing or sweeping the
+    calendar first: the unfiltered load that opened the screen just did, and a
+    filter change should not write.
     """
     from submission_calendar_service import (
-        calendar_board, sweep_overdue, heal_calendars,
+        calendar_board, sweep_overdue, heal_calendars, board_filter_options,
+        BoardFilters, BOARD_STAGES, _FREQ_LABEL,
     )
+    from submission_case import OPEN as CASE_OPEN, RESOLVED as CASE_RESOLVED
+
+    def _picks(raw: Optional[str], allowed, what: str) -> frozenset:
+        vals = frozenset(v.strip() for v in (raw or "").split(",") if v.strip())
+        bad = vals - set(allowed)
+        if bad:
+            raise HTTPException(400, f"unknown {what}: {', '.join(sorted(bad))}")
+        return vals
+
+    filters = BoardFilters(
+        q=q or "", program_id=filter_program, broker_id=filter_broker,
+        statuses=_picks(status, ("scheduled", "due_soon", "due_today", "overdue",
+                                 "never_arrived", "on_time", "received_late"), "status"),
+        cases=_picks(case, (*CASE_OPEN, CASE_RESOLVED, "none"), "case"),
+        frequencies=_picks(frequency, (*_FREQ_LABEL, "not_set"), "frequency"),
+        stages=_picks(stage, BOARD_STAGES, "stage"))
+    refresh = not (filters.narrows_rows or filters.narrows_schedules)
+
+    def _board(s, tid, **kw) -> dict:
+        out = calendar_board(s, tid, month=month, filters=filters, **kw)
+        if options:
+            out["filter_options"] = board_filter_options(s, tid)
+        return out
+
     with SessionLocal() as s:
         if principal.is_platform_admin and not mga:
             tid = carrier
@@ -1893,24 +1990,26 @@ def calendar_board_view(mga: Optional[str] = None, month: Optional[str] = None,
                 # (sweep_scheduler.py); redoing that DB-wide on every
                 # dashboard click would be needless load for a view nobody
                 # can act from anyway (platform admin is read-only here).
-                if tid is not None:
+                if tid is not None and refresh:
                     heal_calendars(s, tenant_id=tid)
                     sweep_overdue(s, tenant_id=tid)
                     s.commit()
             except Exception:   # never let the reminder path break the view
                 s.rollback()
-            return calendar_board(s, tid, month=month, broker_id=broker)
+            return _board(s, tid, broker_id=broker)
         tid = resolve_tenant_id(s, principal, mga)
-        try:
-            # Calendars built under older rules — no broker on their rows, or
-            # deadlines still running past a contract that has ended — are brought
-            # up to date on view, the same way the sweep below runs.
-            heal_calendars(s, tenant_id=tid)
-            sweep_overdue(s, tenant_id=tid)
-            s.commit()
-        except Exception:      # never let the reminder path break the view
-            s.rollback()
-        return calendar_board(s, tid, month=month)
+        if refresh:
+            try:
+                # Calendars built under older rules — no broker on their rows, or
+                # deadlines still running past a contract that has ended — are
+                # brought up to date on view, the same way the sweep below runs.
+                heal_calendars(s, tenant_id=tid)
+                sweep_overdue(s, tenant_id=tid)
+                s.commit()
+            except Exception:      # never let the reminder path break the view
+                s.rollback()
+        # `program_id`: the dashboard's programme pick — one programme's board.
+        return _board(s, tid, program_ids=[program_id] if program_id is not None else None)
 
 
 @router.get("/calendar/{expected_id}/versions")
@@ -2027,6 +2126,149 @@ def calendar_sweep(mga: Optional[str] = None,
         result = sweep_overdue(s, tenant_id=tid)
         s.commit()
         return result
+
+
+# ---- MOPR 39.2: the case on a missing file ----------------------------------
+# Overdue → Delinquent → In Dispute → Resolved (submission_case.py). The broker
+# raises a dispute from its own calendar (broker_routes); everything here is
+# the carrier's side: read a case, enter a dispute for the broker, decide one.
+
+class CaseDisputeBody(BaseModel):
+    reason: str                          # submission_case.DISPUTE_REASONS key
+    note: Optional[str] = None
+
+
+class CaseDecisionBody(BaseModel):
+    decision: str                        # accept | reject | waive | extend | reopen
+    note: Optional[str] = None           # required — the broker is told it
+    extend_to: Optional[date] = None     # extend only: the new date
+
+
+def _case_http(ex) -> HTTPException:
+    """A refused move → 400 when the request itself is wrong, 409 when the case
+    is not in a state that allows it."""
+    bad_input = ("bad_reason", "note_required", "bad_decision", "bad_date")
+    return HTTPException(400 if ex.code in bad_input else 409, str(ex))
+
+
+def _case_schedule(s, e) -> Optional[SubmissionSchedule]:
+    return (s.query(SubmissionSchedule)
+            .filter(SubmissionSchedule.program_id == e.program_id).first())
+
+
+def _carrier_label(s, tenant_id) -> str:
+    t = s.get(Tenant, tenant_id) if tenant_id else None
+    return ((t.legal_name or (t.tenant_name or "").title()) if t else None) or "Your carrier"
+
+
+def _case_payload(s, e, principal: Principal, *, side: str, carrier_admin: bool) -> dict:
+    """One period's case: where it stands, every move so far (named the way
+    this viewer may see them), and what this viewer may do next. Shared by the
+    carrier's and the broker's calendar."""
+    import submission_case as sc
+    from decision_log import Labeller
+    from submission_calendar import derive_status, DEFAULT_SOON_WINDOW_DAYS
+    today = datetime.utcnow().date()
+    sched = _case_schedule(s, e)
+    prog = s.get(Program, e.program_id)
+    broker = s.get(Party, e.broker_party_id) if e.broker_party_id else None
+    soon = (sched.soon_window_days if sched and sched.soon_window_days is not None
+            else DEFAULT_SOON_WINDOW_DAYS)
+    return {
+        "expected_id": e.id,
+        "program_id": e.program_id,
+        "program_name": prog.name if prog else f"Programme {e.program_id}",
+        "broker_party_id": e.broker_party_id,
+        "broker_name": broker.legal_name if broker else None,
+        "carrier_name": _carrier_label(s, e.tenant_id),
+        "period": e.period,
+        "due_date": e.due_date.isoformat() if e.due_date else None,
+        "closes_on": e.closes_on.isoformat() if e.closes_on else None,
+        "received_at": e.received_at.isoformat() if e.received_at else None,
+        "status": derive_status(e.due_date, today, soon, e.received_at, e.closes_on),
+        "days_over": sc.days_over(e, today),
+        "delinquent_after_days": sc.delinquent_after_days(sched),
+        "case": sc.case_dict(e),
+        "history": sc.history(s, e.id, Labeller(s, principal).label),
+        "can": sc.allowed(e, side=side, carrier_admin=carrier_admin, today=today),
+        "reasons": [{"key": k, "label": v} for k, v in sc.DISPUTE_REASONS.items()],
+    }
+
+
+def _owned_case_row(s, expected_id: int, principal: Principal) -> ExpectedSubmission:
+    e = s.get(ExpectedSubmission, expected_id)
+    if e is None:
+        raise HTTPException(404, "period not found")
+    assert_tenant_owns(principal, e.tenant_id)
+    return e
+
+
+def _acting_carrier(principal: Principal) -> None:
+    if principal.is_platform_admin:
+        raise HTTPException(403, "Kavachio staff can read a case but not act on it — "
+                                 "the carrier does.")
+
+
+@router.get("/calendar/{expected_id}/case")
+def calendar_case(expected_id: int,
+                  principal: Principal = Depends(current_principal)):
+    """A late file's case, as the carrier sees it."""
+    with SessionLocal() as s:
+        e = _owned_case_row(s, expected_id, principal)
+        admin = (not principal.is_platform_admin) and is_carrier_admin_seat(s, principal)
+        return _case_payload(s, e, principal, side="carrier", carrier_admin=admin)
+
+
+@router.post("/calendar/{expected_id}/case/dispute")
+def calendar_case_dispute(
+        expected_id: int, body: CaseDisputeBody,
+        principal: Principal = Depends(require_carrier_admin("enter a dispute for a broker"))):
+    """The carrier enters a dispute FOR the broker — it phoned or emailed
+    instead of using its calendar. Also how a dispute the carrier rejected is
+    reopened (the broker itself cannot raise a second one)."""
+    import submission_case as sc
+    with SessionLocal() as s:
+        e = _owned_case_row(s, expected_id, principal)
+        _acting_carrier(principal)
+        who = {"actor": _actor(principal), "user_id": principal.user_id,
+               "role": principal.role, "broker_party_id": None}
+        try:
+            sc.raise_dispute(s, e, who=who, reason=body.reason, note=body.note,
+                             by_carrier=True,
+                             n=sc.delinquent_after_days(_case_schedule(s, e)))
+        except sc.CaseError as ex:
+            s.rollback()
+            raise _case_http(ex)
+        s.commit()
+        return _case_payload(s, e, principal, side="carrier", carrier_admin=True)
+
+
+@router.post("/calendar/{expected_id}/case/decision")
+def calendar_case_decision(
+        expected_id: int, body: CaseDecisionBody,
+        principal: Principal = Depends(require_carrier_admin("decide a late file's case"))):
+    """The carrier's decision: accept or reject a dispute, waive the period
+    (nil return), or give more time. The broker's contacts are emailed the
+    decision and the note after it is saved."""
+    import submission_case as sc
+    with SessionLocal() as s:
+        e = _owned_case_row(s, expected_id, principal)
+        _acting_carrier(principal)
+        who = {"actor": _actor(principal), "user_id": principal.user_id,
+               "role": principal.role, "broker_party_id": None}
+        try:
+            sc.decide(s, e, who=who, decision=body.decision, note=body.note,
+                      extend_to=body.extend_to,
+                      n=sc.delinquent_after_days(_case_schedule(s, e)))
+        except sc.CaseError as ex:
+            s.rollback()
+            raise _case_http(ex)
+        s.commit()
+        payload = _case_payload(s, e, principal, side="carrier", carrier_admin=True)
+        sc.notify_decision(s, e, body.decision, (body.note or "").strip(),
+                           payload["program_name"], payload["carrier_name"],
+                           decided_by=_actor(principal))
+        return payload
 
 
 # @router.post("/programs/{program_id}/contracts")
@@ -3408,6 +3650,7 @@ def program_contract_detail(program_id: int, contract_id: int,
                        source_page_number, generation_confidence, rule_status
                 FROM validation_rule
                 WHERE contract_id = :cid AND rule_status <> 'disabled'
+                  AND COALESCE(rule_spec->>'source', '') <> 'reinsurance'
                 ORDER BY rule_id
             """),
             {"cid": contract_id},
@@ -4648,7 +4891,10 @@ def contract_generate_rules(program_id: int, contract_id: int,
         with SessionLocal() as s:
             s.query(RuleSql).filter(RuleSql.contract_id == contract_id).delete(
                 synchronize_session=False)
-            s.execute(text("DELETE FROM validation_rule WHERE contract_id = :cid"),
+            # A treaty's reinsurance rules (ceded_canonical) are kept: they
+            # follow the treaty's bordereau setup, not this regeneration.
+            s.execute(text("DELETE FROM validation_rule WHERE contract_id = :cid "
+                           "AND COALESCE(rule_spec->>'source', '') <> 'reinsurance'"),
                       {"cid": contract_id})
             s.execute(text("""UPDATE clauses_extracted
                                  SET rule_generation_status = 'in_review',
@@ -4661,6 +4907,28 @@ def contract_generate_rules(program_id: int, contract_id: int,
               f"interrupted earlier attempt on contract {contract_id}")
 
     clauses = [dict(r) for r in rows]
+    from_previous = None
+    if not clauses and not authored:
+        # A RENEWAL made without its wording has no clauses of its own — but it
+        # renews on last year's terms, so last year's clauses are what its rules
+        # are written from (copied as its own rows). Attaching a new wording and
+        # re-reading it replaces them.
+        from contract_routes import clauses_from_renewal_chain
+        with SessionLocal() as s:
+            from_previous = clauses_from_renewal_chain(s, s.get(Contract, contract_id))
+            if from_previous:
+                s.commit()
+                rows = s.execute(
+                    text("""SELECT clause_id, contract_id, clause_type, title, text,
+                                   page_number, section_header
+                              FROM clauses_extracted
+                             WHERE contract_id = :cid
+                             ORDER BY clause_id"""),
+                    {"cid": contract_id}).mappings().all()
+                clauses = [dict(r) for r in rows]
+                print(f"[generate-rules] contract {contract_id} is a renewal with no "
+                      f"clauses of its own — took {len(clauses)} from contract "
+                      f"{from_previous}")
     if not clauses:
         # An authored contract reaching here is ORDINARY, not an error. A
         # Bordereau Setup calls this for every contract it binds, and a
@@ -4678,7 +4946,10 @@ def contract_generate_rules(program_id: int, contract_id: int,
         # document that was read and yielded nothing. That stays an error,
         # because silence there would hide a failed extraction.
         raise HTTPException(
-            400, "this contract has no extracted clauses to build rules from")
+            400, "this contract has no extracted clauses to build rules from — "
+                 "nothing in it, or in a contract it renews, has been read. "
+                 "Attach its wording on the contract's page and read it, or "
+                 "upload the contract here instead of using the one on file.")
 
     # Heavy: the same batched model calls a fresh upload makes, minus the
     # extraction call. FastAPI runs a sync route in a worker thread, so blocking
@@ -4882,6 +5153,97 @@ def program_contract_activate(program_id: int, contract_id: int,
 
 # ---- S-12 Operations Home — dashboard stats + activity --------------------
 
+# Days ahead in which a signed or active contract counts as "expiring soon" —
+# the Contracts tile's line and the Programme Overview's renewal nudge.
+CONTRACT_EXPIRING_SOON_DAYS = 30
+
+
+def _dashboard_window(period: Optional[str]) -> tuple[Optional[date], Optional[date]]:
+    """The carrier dashboard's ONE period pick as its first and last day:
+    'YYYY-MM' a month, 'YYYY' a year, 'all' (or nothing) every day — the same
+    three the calendar board takes. Every card under the pick counts a file by
+    the DB's own date of it (func.date), as the Bordereau Status chart and its
+    day list always have, so a file sits in the same month on every card."""
+    import calendar as _cal
+    if not period or period == "all":
+        return None, None
+    m = _re_sb.fullmatch(r"(\d{4})(?:-(\d{2}))?", period)
+    if not m or (m.group(2) and not 1 <= int(m.group(2)) <= 12):
+        raise HTTPException(400, "period must be YYYY-MM, YYYY or all")
+    y = int(m.group(1))
+    if m.group(2):
+        mo = int(m.group(2))
+        return date(y, mo, 1), date(y, mo, _cal.monthrange(y, mo)[1])
+    return date(y, 1, 1), date(y, 12, 31)
+
+
+def _in_window(col, start: Optional[date], end: Optional[date]):
+    """SQL filters putting `col`'s date inside the window (none for 'all')."""
+    out = []
+    if start is not None:
+        out.append(func.date(col) >= start)
+    if end is not None:
+        out.append(func.date(col) <= end)
+    return out
+
+
+@router.get("/dashboard/bordereau-status")
+def dashboard_bordereau_status(mga: str, period: Optional[str] = None,
+                               program_id: Optional[int] = None,
+                               principal: Principal = Depends(current_principal)):
+    """The Bordereau Status chart for the dashboard's period pick: clean and
+    flagged files, and exceptions resolved, counted the way /dashboard/stats'
+    seven-day series counts them (every status other than 'clean' is flagged;
+    fix / approve / dismiss / reject settle an exception).
+
+    One bar per day for a month, per month for a year, per year for all years.
+    `program_id` narrows it to one programme — the Programme Overview's pick.
+    """
+    start, end = _dashboard_window(period)
+    today = datetime.utcnow().date()
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        runs_q = (s.query(func.date(OutputExport.created_at), OutputExport.status,
+                          func.count(OutputExport.id))
+                  .filter(OutputExport.tenant_id == tid,
+                          *_in_window(OutputExport.created_at, start, end)))
+        dec_q = (s.query(func.date(ExceptionDecisionLog.decided_at),
+                         func.count(ExceptionDecisionLog.id))
+                 .filter(ExceptionDecisionLog.tenant_id == tid,
+                         ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss", "reject")),
+                         *_in_window(ExceptionDecisionLog.decided_at, start, end)))
+        if program_id is not None:
+            runs_q = runs_q.filter(OutputExport.program_id == program_id)
+            dec_q = dec_q.filter(ExceptionDecisionLog.program_id == program_id)
+        runs = runs_q.group_by(func.date(OutputExport.created_at), OutputExport.status).all()
+        decided = dec_q.group_by(func.date(ExceptionDecisionLog.decided_at)).all()
+
+    # The bucket a day falls in: the day itself, its month, or its year.
+    unit = "day" if period and len(period) == 7 else "month" if period and len(period) == 4 else "year"
+    key = (lambda d: d.isoformat()) if unit == "day" else \
+          (lambda d: d.strftime("%Y-%m")) if unit == "month" else (lambda d: str(d.year))
+    as_date = lambda d: d if isinstance(d, date) else date.fromisoformat(str(d))
+
+    if unit == "day":
+        keys = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
+    elif unit == "month":
+        keys = [f"{start.year}-{m:02d}" for m in range(1, 13)]
+    else:
+        years = [as_date(d).year for d, *_ in runs] + [as_date(d).year for d, _ in decided]
+        first = min(years) if years else today.year
+        keys = [str(y) for y in range(first, max(today.year, max(years, default=first)) + 1)]
+    by = {k: {"key": k, "clean": 0, "flagged": 0, "resolved": 0} for k in keys}
+    for d, status, c in runs:
+        b = by.get(key(as_date(d)))
+        if b is not None:
+            b["clean" if status == "clean" else "flagged"] += c
+    for d, c in decided:
+        b = by.get(key(as_date(d)))
+        if b is not None:
+            b["resolved"] += c
+    return {"period": period or "all", "unit": unit, "items": [by[k] for k in keys]}
+
+
 @router.get("/dashboard/stats")
 def dashboard_stats(mga: str, principal: Principal = Depends(current_principal)):
     """Aggregates for the home dashboard."""
@@ -5055,7 +5417,7 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         # EXPIRING_SOON_DAYS — the "N expiring soon" line under the Contracts
         # tile. Counted over every contract, not only the ones waiting on the
         # carrier. An already-expired one is not "soon"; it is gone.
-        EXPIRING_SOON_DAYS = 30
+        EXPIRING_SOON_DAYS = CONTRACT_EXPIRING_SOON_DAYS
         _today_d = _cr._today()
         _soon_d = _today_d + timedelta(days=EXPIRING_SOON_DAYS)
         contracts_expiring_soon = 0
@@ -5256,10 +5618,453 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         }
 
 
+def _report_window(cadence: Optional[str], period: Optional[str],
+                   month: Optional[str]) -> Optional[dict]:
+    """The period a Monthly Report tab asked for — a day, a week, a month or
+    dates picked (monthly_report.window) — or None for a call with `month`
+    alone, which every report made before the period switch and still works."""
+    import check_record
+    import monthly_report
+    if not cadence:
+        return None
+    if cadence == "month":
+        period = period or month
+        if period:
+            try:
+                check_record.month_bounds(period)
+            except (ValueError, TypeError):
+                raise HTTPException(400, "month must be YYYY-MM")
+    return monthly_report.window(cadence, period, datetime.utcnow().date())
+
+
+def _window_words(w: dict) -> dict:
+    """What a report says about its period: which kind, which one, in words."""
+    import monthly_report
+    return {"cadence": w["cadence"], "period": w["period"],
+            "title": monthly_report.period_title(w["cadence"], w["period"])}
+
+
+@router.get("/reports/data-quality")
+def report_data_quality(mga: str, month: Optional[str] = None,
+                        program_id: Optional[int] = None,
+                        broker_party_id: Optional[int] = None,
+                        cadence: Optional[str] = None, period: Optional[str] = None,
+                        principal: Principal = Depends(current_principal)):
+    """MOPR 40.2 / 40.3 — one month's data quality and volumes, read from the
+    shared check record (check_record.summary): files and rows handled,
+    policies split new / renewed / cancelled, checks passed and failed, errors
+    found, and how many files passed with no human help.
+
+    `month` is YYYY-MM (default: this month), by the day a file was checked.
+    With `cadence` (day | week | month | custom) and `period`, the period
+    picked instead (monthly_report.window), plus `previous`: the same numbers
+    for the period it is compared with."""
+    import check_record
+    import monthly_report
+    w = _report_window(cadence, period, month)
+    if w is None:
+        month = month or datetime.utcnow().strftime("%Y-%m")
+        try:
+            start, end = check_record.month_bounds(month)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "month must be YYYY-MM")
+    else:
+        month, start, end = w["period"], monthly_report._at(w["start"]), monthly_report._at(w["end"])
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        out = check_record.summary(s, tid, start, end, program_id=program_id,
+                                   broker_party_id=broker_party_id)
+        if w is not None:
+            p = w["previous"]
+            before = check_record.summary(s, tid, monthly_report._at(p["start"]),
+                                          monthly_report._at(p["end"]), program_id=program_id,
+                                          broker_party_id=broker_party_id)
+            out.update(_window_words(w))
+            out["previous"] = {"period": p["period"],
+                               "title": monthly_report.period_title(w["cadence"], p["period"]),
+                               "volumes": before["volumes"], "quality": before["quality"],
+                               "no_human_help": before["no_human_help"]}
+        # Names for the two breakdowns, and for the filters.
+        broker_ids = {r["id"] for r in out["by_broker"] if r["id"]}
+        prog_ids = {r["id"] for r in out["by_programme"] if r["id"]}
+        brokers = dict(s.query(Party.id, Party.legal_name)
+                       .filter(Party.id.in_(broker_ids)).all()) if broker_ids else {}
+        progs = dict(s.query(Program.id, Program.name)
+                     .filter(Program.id.in_(prog_ids)).all()) if prog_ids else {}
+        for r in out["by_broker"]:
+            r["name"] = brokers.get(r["id"]) or ("No broker" if not r["id"] else f"Broker {r['id']}")
+        for r in out["by_programme"]:
+            r["name"] = progs.get(r["id"]) or ("No programme" if not r["id"] else f"Programme {r['id']}")
+        for r in out["by_broker_programme"]:
+            b, p = r["broker_party_id"], r["program_id"]
+            r["broker_name"] = brokers.get(b) or ("No broker" if not b else f"Broker {b}")
+            r["programme_name"] = progs.get(p) or ("No programme" if not p else f"Programme {p}")
+        out["programmes"] = [{"id": p.id, "name": p.name} for p in (
+            s.query(Program).filter(Program.tenant_id == tid).order_by(Program.name).all())]
+        bp = (s.query(Party.id, Party.legal_name)
+              .join(ProgramBroker, ProgramBroker.broker_party_id == Party.id)
+              .join(Program, Program.id == ProgramBroker.program_id)
+              .filter(Program.tenant_id == tid).distinct().all())
+        out["brokers"] = sorted(({"id": i, "name": n} for i, n in bp),
+                                key=lambda b: (b["name"] or "").lower())
+        out["month"] = month
+        return out
+
+
+def _report_filter_lists(s, tid: int) -> dict:
+    """The carrier's programmes and brokers, for a report's filters."""
+    progs = [{"id": p.id, "name": p.name} for p in (
+        s.query(Program).filter(Program.tenant_id == tid).order_by(Program.name).all())]
+    bp = (s.query(Party.id, Party.legal_name)
+          .join(ProgramBroker, ProgramBroker.broker_party_id == Party.id)
+          .join(Program, Program.id == ProgramBroker.program_id)
+          .filter(Program.tenant_id == tid).distinct().all())
+    return {"programmes": progs,
+            "brokers": sorted(({"id": i, "name": n} for i, n in bp),
+                              key=lambda b: (b["name"] or "").lower())}
+
+
+@router.get("/reports/exception-resolution")
+def report_exception_resolution(mga: str, month: Optional[str] = None,
+                                program_id: Optional[int] = None,
+                                broker_party_id: Optional[int] = None,
+                                page: int = Query(1, ge=1),
+                                page_size: int = Query(10, ge=1, le=100),
+                                severity: Optional[str] = None,
+                                cadence: Optional[str] = None, period: Optional[str] = None,
+                                principal: Principal = Depends(current_principal)):
+    """MOPR 41 — how fast the problems the checks found were fixed in a month
+    (41.1), against the carrier's target (41.2), and the age and owner of every
+    problem still open now (41.3). See fix_performance.py.
+
+    `month` is YYYY-MM (default: this month), by the day a problem was fixed;
+    the open list is always as of now. `page` / `page_size` page that list,
+    `severity` narrows it. With `cadence` and `period`, the period picked
+    instead (monthly_report.window)."""
+    import check_record
+    import fix_performance as fp
+    import monthly_report
+    w = _report_window(cadence, period, month)
+    if w is None:
+        month = month or datetime.utcnow().strftime("%Y-%m")
+        try:
+            start, end = check_record.month_bounds(month)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "month must be YYYY-MM")
+    else:
+        month, start, end = w["period"], monthly_report._at(w["start"]), monthly_report._at(w["end"])
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        out = fp.summary(s, tid, start, end, program_id=program_id,
+                         broker_party_id=broker_party_id, page=page, page_size=page_size,
+                         severity=severity)
+        listed = [*out["by_broker_programme"], *out["open"]["items"], *out["open"]["groups"]]
+        broker_ids = {r["broker_party_id"] for r in listed} - {None}
+        prog_ids = {r["program_id"] for r in listed} - {None}
+        brokers = dict(s.query(Party.id, Party.legal_name)
+                       .filter(Party.id.in_(broker_ids)).all()) if broker_ids else {}
+        progs = dict(s.query(Program.id, Program.name)
+                     .filter(Program.id.in_(prog_ids)).all()) if prog_ids else {}
+        # The owner is who has to act: the broker whose file it is, or the
+        # carrier itself for a file no broker sent.
+        for r in listed:
+            b, p = r["broker_party_id"], r["program_id"]
+            r["broker_name"] = brokers.get(b) or ("No broker" if not b else f"Broker {b}")
+            r["programme_name"] = progs.get(p) or ("No programme" if not p else f"Programme {p}")
+            r["owner"] = brokers.get(b) if b else "Carrier"
+        out.update(_report_filter_lists(s, tid))
+        out["month"] = month
+        if w is not None:
+            out.update(_window_words(w))
+        return out
+
+
+def _monthly_pack(s, tid: int, month: Optional[str], cadence: Optional[str],
+                  period: Optional[str], program_id: Optional[int],
+                  broker_party_id: Optional[int], *, for_file: bool = False) -> dict:
+    """The pack a Monthly Report call asked for: `month` alone as it always was,
+    or with `cadence` + `period` a day, a week, a month or dates picked. A file
+    also carries what only the files show (monthly_report.add_file_detail)."""
+    import monthly_report
+    if not cadence:
+        month = month or datetime.utcnow().strftime("%Y-%m")
+    w = _report_window(cadence or "month", period, month)
+    pack = monthly_report.pack_for(s, tid, w["cadence"], w["period"], program_id=program_id,
+                                   broker_party_id=broker_party_id)
+    if for_file:
+        monthly_report.add_file_detail(s, tid, pack, program_id=program_id,
+                                       broker_party_id=broker_party_id)
+    return monthly_report.name_rows(s, pack)
+
+
+@router.get("/reports/monthly")
+def report_monthly(mga: str, month: Optional[str] = None,
+                   program_id: Optional[int] = None,
+                   broker_party_id: Optional[int] = None,
+                   cadence: Optional[str] = None, period: Optional[str] = None,
+                   principal: Principal = Depends(current_principal)):
+    """MOPR 42 — the monthly pack: timeliness, volumes, data quality and fixes
+    for one month, beside last month and the same month last year, and one line
+    per broker and programme. See monthly_report.py.
+
+    `month` is YYYY-MM (default: this month). With `cadence` (day | week |
+    month | custom) and `period`, the period picked (monthly_report.pack_for)."""
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        out = _monthly_pack(s, tid, month, cadence, period, program_id, broker_party_id)
+        out.update(_report_filter_lists(s, tid))
+        return out
+
+
+def _monthly_delivery_view(s, tid: int, page: Optional[int] = None,
+                           page_size: int = 10) -> dict:
+    """MOPR 42.2 — the Send & Schedule screen: the settings, who receives the
+    report (the carrier's own logins), when it next goes, and what has been sent.
+    Paging is opt-in: with `page`, `sends` is that page of every report sent
+    and `sends_total` counts them all; without it, the newest 24 as before."""
+    import report_delivery as rd
+    cfg = rd.settings(s, tid)
+    nxt = (rd.next_send(cfg["send_day"], datetime.utcnow().date(), rd.sent_months(s, tid))
+           if cfg["auto_send"] else None)
+    out = {"settings": cfg, "recipients": rd.people(s, tid), "next": nxt,
+           "send_days": list(rd.SEND_DAYS)}
+    if page is None:
+        out["sends"] = rd.history(s, tid)
+        return out
+    page, page_size = max(page, 1), max(1, min(page_size, 100))
+    out.update(sends=rd.history(s, tid, limit=page_size, offset=(page - 1) * page_size),
+               sends_total=rd.count_sends(s, tid), page=page, page_size=page_size)
+    return out
+
+
+@router.get("/reports/monthly/delivery")
+def report_monthly_delivery(mga: str, page: Optional[int] = None, page_size: int = 10,
+                            principal: Principal = Depends(current_principal)):
+    """MOPR 42.2 — how the Monthly Report is sent, and what has been sent."""
+    with SessionLocal() as s:
+        return _monthly_delivery_view(s, resolve_tenant_id(s, principal, mga),
+                                      page=page, page_size=page_size)
+
+
+class MonthlyDeliveryBody(BaseModel):
+    auto_send: Optional[bool] = None
+    send_day: Optional[int] = None
+    file_format: Optional[str] = None
+    delivery: Optional[str] = None
+
+
+@router.put("/reports/monthly/delivery")
+def save_monthly_delivery(body: MonthlyDeliveryBody, mga: str,
+                          principal: Principal = Depends(require_carrier_admin("change how the operational report is sent"))):
+    """MOPR 42.2 — save Send & Schedule. Each change is kept in the Audit Logs
+    with the old and new value."""
+    import report_delivery as rd
+    from audit import actor_columns
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        try:
+            before, after = rd.save_settings(s, tid, body.model_dump(exclude_none=True),
+                                             principal.user_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        changes = {k: {"old": before.get(k), "new": v} for k, v in after.items()
+                   if k != "saved" and before.get(k) != v}
+        if changes:
+            s.add(ActivityEvent(tenant_id=tid, actor=_actor(principal),
+                                action="monthly_report_settings_updated",
+                                target="monthly_report:settings", details={"changes": changes},
+                                **actor_columns(principal)))
+        s.commit()
+        return _monthly_delivery_view(s, tid)
+
+
+class MonthlySendBody(BaseModel):
+    month: Optional[str] = None
+    # A day, a week or dates picked instead of a month (monthly_report.window).
+    cadence: Optional[str] = None
+    period: Optional[str] = None
+    # Send now's popup (the Executive Report's): the logins ticked (the
+    # carrier's own only), other addresses typed, and the file's format.
+    # Left out: every login, in Send & Schedule's format.
+    user_ids: Optional[list[int]] = None
+    emails: Optional[list[str]] = None
+    file_format: Optional[str] = None
+
+
+@router.post("/reports/monthly/send")
+def send_monthly_report(body: MonthlySendBody, mga: str,
+                        principal: Principal = Depends(require_carrier_admin("send the operational report"))):
+    """MOPR 42.2 — send a month's report now (default: last month) to the
+    carrier's own logins. With `cadence` + `period`, that period's report."""
+    import check_record
+    import monthly_report
+    import report_delivery as rd
+    from audit import actor_columns
+    cadence = body.cadence or "month"
+    if cadence == "month":
+        month = (body.period or body.month
+                 or monthly_report.shift(datetime.utcnow().strftime("%Y-%m"), -1))
+        try:
+            check_record.month_bounds(month)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "month must be YYYY-MM")
+    else:
+        month = monthly_report.window(cadence, body.period, datetime.utcnow().date())["period"]
+    kind = "now"
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        try:
+            r = rd.send(s, tid, month, kind=kind, user_id=principal.user_id, cadence=cadence,
+                        user_ids=body.user_ids, emails=body.emails,
+                        file_format=body.file_format)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        details = {"month": month, "kind": kind, "delivered": r["delivered"],
+                   "failed": r["failed"]}
+        if cadence != "month":
+            details.update(cadence=cadence, period=r["title"])
+        s.add(ActivityEvent(tenant_id=tid, actor=_actor(principal), action="monthly_report_sent",
+                            target=f"monthly_report:{month}", details=details,
+                            **actor_columns(principal)))
+        s.commit()
+        return r
+
+
+def _report_file_response(name: str, data: bytes, mime: str):
+    from fastapi.responses import Response
+    return Response(content=data, media_type=mime,
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@router.get("/reports/monthly/file")
+def monthly_report_file(mga: str, month: Optional[str] = None, format: str = "pdf",
+                        program_id: Optional[int] = None,
+                        broker_party_id: Optional[int] = None,
+                        cadence: Optional[str] = None, period: Optional[str] = None,
+                        principal: Principal = Depends(current_principal)):
+    """MOPR 42.2 — the month (or, with `cadence` + `period`, the day, week or
+    dates picked) as on screen, as a PDF or Excel file."""
+    import report_delivery as rd
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        pack = _monthly_pack(s, tid, month, cadence, period, program_id, broker_party_id,
+                             for_file=True)
+        scope = []
+        if program_id:
+            p = s.query(Program).filter(Program.id == program_id, Program.tenant_id == tid).first()
+            scope.append(p.name if p else f"Programme {program_id}")
+        if broker_party_id:
+            b = s.query(Party).filter(Party.id == broker_party_id).first()
+            scope.append(b.legal_name if b else f"Broker {broker_party_id}")
+        fmt = "excel" if format in ("excel", "xlsx") else "pdf"
+        name, data, mime = rd.files(pack, fmt, rd.carrier_name(s, tid), " · ".join(scope))[0]
+        return _report_file_response(name, data, mime)
+
+
+@router.get("/reports/monthly/sends/{send_id}/file")
+def monthly_report_sent_file(send_id: int, mga: str, format: str = "pdf",
+                             principal: Principal = Depends(current_principal)):
+    """MOPR 42.2 — a report as it was sent: the numbers kept with it, so the
+    file is the one people received."""
+    import report_delivery as rd
+    from db import MonthlyReportSend
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        row = (s.query(MonthlyReportSend)
+               .filter(MonthlyReportSend.id == send_id, MonthlyReportSend.tenant_id == tid).first())
+        if row is None or row.pack is None:
+            raise HTTPException(404, "That report was not sent, so there is no file to download.")
+        fmt = "excel" if format in ("excel", "xlsx") else "pdf"
+        name, data, mime = rd.files(row.pack, fmt, (row.options or {}).get("carrier", ""))[0]
+        return _report_file_response(name, data, mime)
+
+
+class FixTargetBody(BaseModel):
+    days: int
+
+
+@router.put("/reports/exception-resolution/target")
+def set_fix_target(body: FixTargetBody, mga: str,
+                   principal: Principal = Depends(require_carrier_admin("change the fix target"))):
+    """MOPR 41.2 — the carrier's target for fixing a problem, in days. The
+    change is kept in the Audit Logs with the old and new value."""
+    import fix_performance as fp
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        try:
+            old, new = fp.set_target_days(s, tid, body.days, principal.user_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if old != new:
+            from audit import actor_columns
+            s.add(ActivityEvent(tenant_id=tid, actor=_actor(principal),
+                                action="fix_target_updated", target="quality:fix_target",
+                                details={"old_days": old, "new_days": new},
+                                **actor_columns(principal)))
+        s.commit()
+        return {"target_days": new, "was": old}
+
+
+@router.get("/reports/open-problems")
+def report_open_problems(mga: str, program_id: Optional[int] = None,
+                         broker_party_id: Optional[int] = None,
+                         kind: Optional[str] = Query(None, alias="type"),
+                         owner: Optional[str] = None,
+                         overdue_only: bool = False,
+                         sort: str = "age",
+                         page: int = Query(1, ge=1),
+                         page_size: int = Query(25, ge=1, le=100),
+                         principal: Principal = Depends(require_carrier_admin("see open problems"))):
+    """Phase 2 · 44 — every open problem across the carrier's book: failed
+    checks, late or missing files, disputes, files on hold and contracts to
+    sign, each with its status, owner (a broker company, or the carrier), due
+    date and age, plus each owner's workload. See open_problems.py.
+
+    `program_id` / `broker_party_id` narrow everything; `type`, `owner`
+    ("carrier" or a broker party id) and `overdue_only` narrow the list only.
+    `sort` is age (oldest first) or due (soonest first)."""
+    import fix_performance as fp
+    import open_problems as op
+    if kind and kind not in op.TYPES:
+        raise HTTPException(400, f"type must be one of {', '.join(op.TYPES)}")
+    if sort not in op.SORTS:
+        raise HTTPException(400, f"sort must be one of {', '.join(op.SORTS)}")
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        target = fp.target_days(s, tid)
+        items = op.collect(s, tid, target=target, program_id=program_id,
+                           broker_party_id=broker_party_id)
+        out = op.build(items, today=datetime.utcnow().date(), owner=owner, kind=kind,
+                       overdue_only=overdue_only, sort=sort, page=page, page_size=page_size)
+        broker_ids = ({i["broker_party_id"] for i in out["items"]}
+                      | {int(w["owner"]) for w in out["workload"] if w["owner"] != op.CARRIER}) - {None}
+        prog_ids = {i["program_id"] for i in out["items"]} - {None}
+        brokers = dict(s.query(Party.id, Party.legal_name)
+                       .filter(Party.id.in_(broker_ids)).all()) if broker_ids else {}
+        progs = dict(s.query(Program.id, Program.name)
+                     .filter(Program.id.in_(prog_ids)).all()) if prog_ids else {}
+
+        def _owner_name(key: str) -> str:
+            return "Carrier" if key == op.CARRIER else (brokers.get(int(key)) or f"Broker {key}")
+
+        for w in out["workload"]:
+            w["owner_name"] = _owner_name(w["owner"])
+        for i in out["items"]:
+            b, p = i["broker_party_id"], i["program_id"]
+            i["owner_name"] = _owner_name(i["owner_key"])
+            i["broker_name"] = brokers.get(b) if b else None
+            i["programme_name"] = progs.get(p) or ("No programme" if not p else f"Programme {p}")
+        out.update(_report_filter_lists(s, tid))
+        out["target_days"] = target
+        out["types"] = [{"type": k, "label": v} for k, v in op.TYPE_WORDS.items()]
+        return out
+
 @router.get("/dashboard/broker-performance")
 def dashboard_broker_performance(mga: str,
                                  days: int = Query(30, ge=7, le=90),
                                  limit: int = Query(5, ge=1, le=20),
+                                 program_id: Optional[int] = None,
+                                 period: Optional[str] = None,
                                  principal: Principal = Depends(current_principal)):
     """How each broker company is working, and how far its issues have been
     resolved — the most recently active `limit` brokers of this carrier.
@@ -5295,8 +6100,20 @@ def dashboard_broker_performance(mga: str,
     A superseded run is not counted twice: a "Fix & re-run" moves the landing
     pointer to the new export and the old one becomes history (see
     `exception_tally.current_export_ids`).
+
+    `program_id` narrows the card to one programme's files — the Programme
+    Overview's drill-down from a programme to its brokers.
+
+    `period` (YYYY-MM, YYYY or all) is the dashboard's one period pick and
+    replaces `days`: the files counted are the ones run in it, by the same date
+    every other card under the pick uses (_dashboard_window).
     """
     since = datetime.utcnow() - timedelta(days=days)   # stored times are utcnow
+    start, end = _dashboard_window(period) if period else (None, None)
+
+    def _when(col):
+        return _in_window(col, start, end) if period else [col >= since]
+
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
         # Which brokers to report is read off the runs themselves — a broker is
@@ -5305,11 +6122,14 @@ def dashboard_broker_performance(mga: str,
         # a broker missing from that list (its party reached the carrier by some
         # route the list does not cover) had its files silently dropped from the
         # card while the same files were still counted by every tile above it.
-        exports = (s.query(OutputExport.id, OutputExport.broker_party_id,
-                           OutputExport.status, OutputExport.created_at)
-                   .filter(OutputExport.tenant_id == tid,
-                           OutputExport.broker_party_id.isnot(None),
-                           OutputExport.created_at >= since)
+        exports_q = (s.query(OutputExport.id, OutputExport.broker_party_id,
+                             OutputExport.status, OutputExport.created_at)
+                     .filter(OutputExport.tenant_id == tid,
+                             OutputExport.broker_party_id.isnot(None),
+                             *_when(OutputExport.created_at)))
+        if program_id is not None:
+            exports_q = exports_q.filter(OutputExport.program_id == program_id)
+        exports = (exports_q
                    .order_by(OutputExport.created_at.desc(), OutputExport.id.desc())
                    .all())
         per: dict[int, dict] = {}
@@ -5325,7 +6145,7 @@ def dashboard_broker_performance(mga: str,
         # No "latest file" is singled out any more: outstanding work cannot be
         # hidden by a later good run when every file in the window is counted.
 
-        ranked = sorted(per.items(), key=lambda kv: kv[1]["last_run_at"] or since,
+        ranked = sorted(per.items(), key=lambda kv: kv[1]["last_run_at"] or datetime.min,
                         reverse=True)[:limit]
         names = {p.id: (p.legal_name or p.dba_name or "—") for p in
                  s.query(Party).filter(Party.id.in_([bid for bid, _ in ranked] or [0])).all()}
@@ -5336,11 +6156,14 @@ def dashboard_broker_performance(mga: str,
         def _work(broker_id) -> dict:
             """Every live file this broker sent this carrier in the window."""
             total = {"files": 0, "rows": 0, "exceptions": 0, "resolved": 0, "open": 0}
-            ids = [i for (i,) in s.query(OutputExport.id)
-                   .filter(OutputExport.tenant_id == tid,
-                           OutputExport.broker_party_id == broker_id,
-                           OutputExport.created_at >= since,
-                           OutputExport.id.in_(live or {-1})).all()]
+            ids_q = s.query(OutputExport.id).filter(
+                OutputExport.tenant_id == tid,
+                OutputExport.broker_party_id == broker_id,
+                *_when(OutputExport.created_at),
+                OutputExport.id.in_(live or {-1}))
+            if program_id is not None:
+                ids_q = ids_q.filter(OutputExport.program_id == program_id)
+            ids = [i for (i,) in ids_q.all()]
             for eid in ids:
                 # One export at a time, then let it go: the exceptions column
                 # runs to megabytes on a big bordereau.
@@ -5366,7 +6189,290 @@ def dashboard_broker_performance(mga: str,
                 "last_run_at": _iso_utc(b["last_run_at"]),
                 "work": _work(bid),
             })
-        return {"days": days, "items": items, "active_total": len(per)}
+
+        # With a programme picked, its brokers that sent nothing in the window
+        # are listed too, after the ones that did — "no file received" under a
+        # broker's name says who is quiet, where an empty card said nothing.
+        # The same brokers the Programme Overview counts (the calendar's
+        # active links), with when each last sent a file on this programme.
+        if program_id is not None and len(items) < limit:
+            from submission_calendar_service import active_broker_ids
+            idle = [b for b in active_broker_ids(s, program_id) if b not in per]
+            idle = idle[:limit - len(items)]
+            if idle:
+                idle_names = {p.id: (p.legal_name or p.dba_name or "—") for p in
+                              s.query(Party).filter(Party.id.in_(idle)).all()}
+                last_sent = dict(
+                    s.query(OutputExport.broker_party_id, func.max(OutputExport.created_at))
+                    .filter(OutputExport.tenant_id == tid,
+                            OutputExport.program_id == program_id,
+                            OutputExport.broker_party_id.in_(idle))
+                    .group_by(OutputExport.broker_party_id).all())
+                for bid in idle:
+                    items.append({
+                        "id": bid, "name": idle_names.get(bid, "—"),
+                        "runs": 0, "clean": 0, "flagged": 0, "not_checked": 0,
+                        "last_run_at": _iso_utc(last_sent.get(bid)),
+                        "no_files": True,
+                        "work": {"files": 0, "rows": 0, "exceptions": 0,
+                                 "resolved": 0, "open": 0},
+                    })
+        return {"days": days, "period": period, "items": items, "active_total": len(per)}
+
+
+# What a programme is waiting on, most urgent first — the order the Programme
+# Overview lists them and the one status each row shows. Each names its cause,
+# so the badge says what is wrong rather than how worried to be.
+PROGRAMME_STATUS_ORDER = ("files_missing", "waiting_on_you", "exceptions_open",
+                          "contract_ended", "contract_ending", "on_track", "setup_missing")
+
+
+@router.get("/dashboard/programme-overview")
+def dashboard_programme_overview(
+        mga: str,
+        month: Optional[str] = None,
+        days: int = Query(30, ge=7, le=90),
+        period: Optional[str] = None,
+        principal: Principal = Depends(require_carrier_admin("see the programme overview"))):
+    """One row per programme — the top of the hierarchy (programme → broker →
+    contract → bordereau) — so the dashboard starts where the business does.
+
+    Nothing here is counted afresh; every figure is read from the screen that
+    already owns it, so a programme's row and the page behind it agree:
+
+      files this month   the Bordereau Calendar (`calendar_board`) for `month`
+                         (YYYY-MM, default this month): due, received, late,
+                         overdue, never arrived — brokers owing nothing are not
+                         counted, as on the calendar
+      files missing      every bordereau still late or never sent, any month —
+                         the Open Problems page's "Late or missing file" rows
+      brokers / setup    the calendar's own per-programme schedule: the brokers
+                         allowed to report, and whether each has a live setup
+      contracts          broker contracts on the programme (the dashboard's
+                         "Broker contracts" figure, split by programme)
+      exceptions         every live file run in the last `days`, tallied by
+                         `exception_tally.export_tally` — the count Broker
+                         Performance and each file's exception screen show
+      waiting on you     the Open Problems rows only the carrier can move:
+                         disputes, files on hold, contracts to sign
+      clean              of those files, the share with nothing flagged
+
+    Status — the first that applies, in PROGRAMME_STATUS_ORDER:
+      files_missing    a bordereau is overdue or never arrived, any month
+      waiting_on_you   a dispute, a held file or a contract to sign
+      exceptions_open  a file still has open exceptions for the broker to fix
+      contract_ended   every contract on it has passed its end date — the
+                       calendar's own cover end (`program_cover_ends`), so no
+                       further bordereau falls due until it is renewed
+      contract_ending  a contract ends within CONTRACT_EXPIRING_SOON_DAYS
+      setup_missing    no broker, or none with a live setup: its files cannot be
+                       checked yet — but they are still owed, so the calendar
+                       figures and the causes above still show
+      on_track         nothing waiting
+    Every cause that applies is returned in `statuses`, the first in `status`.
+
+    `period` (YYYY-MM, YYYY or all) is the dashboard's one period pick. When
+    sent it sets both windows: the bordereaux due in it (the calendar takes the
+    same three picks) and the files checked in it — in place of `month` and
+    `days`. "Files missing" stays every month: a missing file is still owed.
+
+    Read only — unlike /calendar/board it does not heal or sweep the calendar.
+    """
+    import re
+    import contract_routes as _cr
+    import fix_performance as fp
+    import open_problems as op
+    from exception_tally import current_export_ids, export_tally
+    from submission_calendar_service import calendar_board, program_cover_ends
+
+    today = datetime.utcnow().date()
+    if period:
+        start, end = _dashboard_window(period)    # 400s on a bad pick
+        month = period
+        checked_when = _in_window(OutputExport.created_at, start, end)
+    else:
+        month = month or today.strftime("%Y-%m")
+        if not re.fullmatch(r"\d{4}-\d{2}", month):
+            raise HTTPException(400, "month must be YYYY-MM")
+        checked_when = [OutputExport.created_at >= datetime.utcnow() - timedelta(days=days)]
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        board = calendar_board(s, tid, month=month)
+
+        progs: dict[int, dict] = {}
+        for sch in board.get("schedules") or []:
+            brokers = sch.get("brokers") or []
+            progs[sch["program_id"]] = {
+                "program_id": sch["program_id"], "name": sch.get("program_name") or "—",
+                "brokers": len(brokers),
+                "brokers_without_setup": [b["broker_name"] for b in brokers
+                                          if not b.get("setup_live")],
+                "contracts": 0, "contract_ends_soon": None, "contract_ended": None,
+                "due": 0, "received": 0, "late": 0, "overdue": 0, "never": 0,
+                "files_missing": 0, "missing_from": {},
+                "files": 0, "clean_files": 0,
+                "exceptions": 0, "exceptions_open": 0, "worst_file": None,
+                "waiting_on_you": 0,
+            }
+
+        # The calendar answers with ANOTHER month when nothing fell due in the
+        # one asked for — for this card, that month simply owed nothing.
+        if board.get("month") == month:
+            for r in board.get("rows") or []:
+                p = progs.get(r["program_id"])
+                if p is None or r.get("unassigned"):
+                    continue
+                p["due"] += 1
+                st = r.get("status")
+                if st in ("on_time", "received_late"):
+                    p["received"] += 1
+                    p["late"] += 1 if st == "received_late" else 0
+                elif st == "overdue":
+                    p["overdue"] += 1
+                elif st == "never_arrived":
+                    p["never"] += 1
+
+        soon = today + timedelta(days=CONTRACT_EXPIRING_SOON_DAYS)
+        for c in (s.query(Contract)
+                  .filter(Contract.tenant_id == tid,
+                          Contract.contract_type == "insurer_broker",
+                          Contract.program_id.in_(list(progs) or [-1])).all()):
+            p = progs[c.program_id]
+            p["contracts"] += 1
+            if (_cr._effective_lifecycle(c) in ("signed", "active") and c.expiry_dt
+                    and today <= c.expiry_dt <= soon):
+                ends = c.expiry_dt.isoformat()
+                if p["contract_ends_soon"] is None or ends < p["contract_ends_soon"]:
+                    p["contract_ends_soon"] = ends
+
+        # Ended: the latest end date across the programme's contracts — the
+        # same date the Bordereau Calendar stops at — has passed, so nothing
+        # more falls due and "Nothing due" would hide why.
+        for pid, end in program_cover_ends(s, list(progs)).items():
+            if pid in progs and end < today:
+                progs[pid]["contract_ended"] = end.isoformat()
+
+        # Exceptions: every live file in the window, one at a time (the
+        # exceptions column runs to megabytes), as Broker Performance does.
+        live = current_export_ids(s, tenant_id=tid)
+        ids = [i for (i,) in s.query(OutputExport.id).filter(
+            OutputExport.tenant_id == tid,
+            OutputExport.program_id.in_(list(progs) or [-1]),
+            *checked_when,
+            OutputExport.id.in_(live or {-1})).all()]
+        for eid in ids:
+            r = s.get(OutputExport, eid)
+            if r is None:
+                continue
+            p = progs[r.program_id]
+            t = export_tally(r)
+            p["files"] += 1
+            p["clean_files"] += 1 if r.status == "clean" else 0
+            p["exceptions"] += t["exceptions"]
+            p["exceptions_open"] += t["open"]
+            # The file to open from the row: the one with the most still open,
+            # the newest on a tie.
+            w = p["worst_file"]
+            if t["open"] and (w is None or (t["open"], r.id) > (w["open"], w["export_id"])):
+                p["worst_file"] = {"export_id": r.id, "upload_id": r.source_upload_id,
+                                   "open": t["open"], "broker_party_id": r.broker_party_id}
+            s.expunge(r)
+
+        # From the Open Problems list: missing files (any month) and the moves
+        # that are the carrier's own. Failed checks are NOT taken from it — the
+        # exceptions above are the count every other screen shows.
+        for i in op.collect(s, tid, target=fp.target_days(s, tid)):
+            p = progs.get(i["program_id"])
+            if p is None:
+                continue
+            if i["type"] == op.LATE_FILE:
+                p["files_missing"] += 1
+                b = i.get("broker_party_id")
+                p["missing_from"][b] = p["missing_from"].get(b, 0) + 1
+            elif i["owner"] == op.CARRIER and i["type"] != op.CHECK:
+                p["waiting_on_you"] += 1
+
+        bids = ({b for p in progs.values() for b in p["missing_from"]}
+                | {p["worst_file"]["broker_party_id"] for p in progs.values() if p["worst_file"]}) - {None}
+        names = dict(s.query(Party.id, Party.legal_name).filter(Party.id.in_(bids)).all()) if bids else {}
+
+    def _name(bid) -> str:
+        return names.get(bid) or "the broker"
+
+    items = []
+    for p in progs.values():
+        pid = p["program_id"]
+        no_setup = not p["brokers"] or len(p["brokers_without_setup"]) == p["brokers"]
+        statuses = [k for k, on in (
+            ("files_missing", p["files_missing"] > 0),
+            ("waiting_on_you", p["waiting_on_you"] > 0),
+            ("exceptions_open", p["exceptions_open"] > 0),
+            ("contract_ended", bool(p["contract_ended"])),
+            ("contract_ending", bool(p["contract_ends_soon"])),
+            ("setup_missing", no_setup),
+        ) if on]
+        # A missing setup stops files being CHECKED, not being owed: a bordereau
+        # still falls due on the calendar, so it is one cause among the others
+        # (the least urgent) rather than one that hides them.
+        status = statuses[0] if statuses else "on_track"
+
+        # The next steps: one per cause, in status order, at most three — so a
+        # programme with files missing AND exceptions open offers both ways in.
+        # `link` is a screen path.
+        w = p["worst_file"]
+        steps: list[dict] = []
+        if not p["brokers"]:
+            steps.append({"text": "Add a broker", "link": f"/programs/{pid}/setup?tab=broker"})
+        elif no_setup or p["brokers_without_setup"]:
+            steps.append({"text": f"Finish the Bordereau Setup for {p['brokers_without_setup'][0]}",
+                          "link": f"/programs/{pid}/setup?tab=broker&stage=4"})
+        # Each cause's own step (setup_missing's is the one above).
+        for k in statuses:
+            if k == "files_missing":
+                bid, n = max(p["missing_from"].items(), key=lambda kv: kv[1])
+                steps.append({"text": f"Chase {_name(bid)} — {n} {'file' if n == 1 else 'files'} missing",
+                              "link": "/bordereau-calendar"})
+            elif k == "waiting_on_you":
+                n = p["waiting_on_you"]
+                steps.append({"text": f"{n} {'item is' if n == 1 else 'items are'} waiting on you",
+                              "link": f"/open-problems?program={pid}"})
+            elif k == "exceptions_open" and w:
+                # Straight to that file's exception screen, the way the
+                # dashboard's other file links open it.
+                steps.append({"text": f"{_name(w['broker_party_id'])} to fix — open the file "
+                                      f"with {w['open']} {'exception' if w['open'] == 1 else 'exceptions'}",
+                              "link": f"/uploads/{w['upload_id'] or w['export_id']}/exceptions"
+                                      f"?download={w['export_id']}&from=home"})
+            elif k == "contract_ended":
+                steps.append({"text": "Renew the contract",
+                              "link": "/contracts?type=insurer_broker"})
+            elif k == "contract_ending":
+                steps.append({"text": "A contract ends soon — start the renewal",
+                              "link": "/contracts?type=insurer_broker"})
+        steps = steps[:3]
+
+        items.append({
+            "program_id": pid, "name": p["name"], "status": status, "statuses": statuses,
+            "brokers": p["brokers"], "brokers_without_setup": len(p["brokers_without_setup"]),
+            "contracts": p["contracts"], "contract_ends_soon": p["contract_ends_soon"],
+            "contract_ended": p["contract_ended"],
+            "due": p["due"], "received": p["received"], "late": p["late"],
+            "overdue": p["overdue"], "never": p["never"], "files_missing": p["files_missing"],
+            "files": p["files"], "clean_files": p["clean_files"],
+            "exceptions": p["exceptions"], "exceptions_open": p["exceptions_open"],
+            "waiting_on_you": p["waiting_on_you"],
+            # The file the exceptions link opens (its exception screen).
+            "exceptions_link": (f"/uploads/{w['upload_id'] or w['export_id']}/exceptions"
+                                f"?download={w['export_id']}&from=home" if w else None),
+            "next_steps": steps,
+        })
+    items.sort(key=lambda r: (PROGRAMME_STATUS_ORDER.index(r["status"]),
+                              -r["files_missing"], -r["exceptions_open"], (r["name"] or "").lower()))
+    return {"month": month, "days": days, "period": period,
+            "expiring_days": CONTRACT_EXPIRING_SOON_DAYS,
+            "items": items,
+            "status_counts": {k: sum(1 for r in items if r["status"] == k)
+                              for k in PROGRAMME_STATUS_ORDER}}
 
 
 @router.get("/dashboard/brokers/{broker_party_id}/files")
@@ -5490,11 +6596,11 @@ _REVIEW_BUCKETS = [
 ]
 
 
-# Stages that mean "currently writing business". Onboarding / In Setup are not
-# live yet; Runoff's term has already ended. This is what the Active Programs
-# card and the segment chart count — deliberately NOT `_is_live_program()` on its
-# own, which cannot see that a term has lapsed (see below).
-_WRITING_STAGES = ("Active", "Under Review")
+# The stage rule lives in program_stage.py so other screens (the Executive
+# Report) share it without importing this module.
+from program_stage import (WRITING_STAGES as _WRITING_STAGES,  # noqa: E402
+                           current_contract as _current_contract,
+                           is_live_program as _is_live_program, program_stage)
 
 
 def _bucket_for(days: int) -> str:
@@ -5502,51 +6608,6 @@ def _bucket_for(days: int) -> str:
         if test(days):
             return key
     return "60_90"
-
-
-def _is_live_program(program, contract) -> bool:
-    """Is this program actually writing business right now?
-
-    NOT simply `status_ops == 'active'`. Two things measured against the dev
-    database make that check wrong on real rows:
-
-      1. The column drifts. 96 programs there carry an ACTIVE contract while
-         their own status_ops still says 'draft' — the program is promoted when
-         a contract is activated, but rows predating that behaviour were never
-         caught up (which is exactly what backfill_program_status.py exists to
-         repair, and it clearly hasn't been run everywhere). Trusting the column
-         alone would drop those programs out of the KPI count, the segment chart
-         AND the review count, silently understating the book.
-      2. It is not case-normalised — both 'active' and 'Active' exist.
-
-    So liveness is derived from the two signals together: the program says it is
-    active, or it holds an activated contract.
-
-    LIMIT, and why callers must not use this alone as "active": it reads
-    contract.STATUS, never contract.expiry_dt, and nothing flips a contract to
-    inactive when its term lapses. A program whose term ended years ago still
-    answers True here. That is correct for "this row is live, not a draft" — the
-    question the stage ladder asks — but wrong for "is this writing business",
-    which the spec defines as active AND NOT in runoff. For that, test the
-    resolved stage against _WRITING_STAGES.
-    """
-    if (program.status or "").strip().lower() == "active":
-        return True
-    return contract is not None and (contract.status or "").strip().lower() == "active"
-
-
-def _current_contract(rows: list) -> Optional[Any]:
-    """The contract that speaks for a program right now.
-
-    A program can hold several contracts (versions, or one per schedule_key).
-    An `active` one wins; otherwise the most recently created row, so a program
-    still mid-setup still reports a stage instead of vanishing from the donut.
-    """
-    if not rows:
-        return None
-    active = [c for c in rows if (c.status or "").strip().lower() == "active"]
-    pool = active or rows
-    return max(pool, key=lambda c: (c.id or 0))
 
 
 @router.get("/program-management/carriers")
@@ -5596,7 +6657,9 @@ def program_management_carriers(
             .join(Program, Program.id == ExpectedSubmission.program_id)
             .where(Program.party_id == Party.id,
                    Program.tenant_id == tid,
-                   ExpectedSubmission.status.in_(("overdue", "late")))
+                   # Past due and nothing in — still waited for (overdue) or
+                   # given up on (never_arrived) alike.
+                   ExpectedSubmission.status.in_(("overdue", "late", "never_arrived")))
             .correlate(Party)
             .scalar_subquery()
         )
@@ -5692,6 +6755,8 @@ def program_management_stats(
         # 'late' is the retired pre-grace-removal spelling of 'overdue'. init_db
         # folds those rows over, but RLS deployments skip that migration, so it
         # stays in the filter rather than silently dropping their backlog.
+        # 'never_arrived' is overdue whose period has closed (MOPR 39.1) — the
+        # file is just as missing, so it still counts here.
         overdue_by_program: dict[int, int] = {}
         schedules_configured = 0
         if pids:
@@ -5700,7 +6765,7 @@ def program_management_stats(
             ).filter(
                 ExpectedSubmission.tenant_id == tid,
                 ExpectedSubmission.program_id.in_(pids),
-                ExpectedSubmission.status.in_(("overdue", "late")),
+                ExpectedSubmission.status.in_(("overdue", "late", "never_arrived")),
             ).group_by(ExpectedSubmission.program_id).all():
                 overdue_by_program[prog_id] = int(cnt)
             schedules_configured = s.query(SubmissionSchedule).filter(
@@ -5723,26 +6788,7 @@ def program_management_stats(
             days = (term_end - today).days if term_end else None
 
             is_active = _is_live_program(p, contract)
-            contract_status = (contract.status or "").strip().lower() if contract is not None else None
-
-            # Stage ladder — derived from real columns, first match wins.
-            # Deliberately NOT the document's five-value vocabulary: that would
-            # need a status enum the DB doesn't have. These are the same
-            # lifecycle positions expressed in the signals we actually store.
-            if not is_active:
-                stage = "Onboarding" if contract is None else "In Setup"
-            elif contract is None:
-                stage = "Onboarding"                       # program, no contract yet
-            elif contract_status in ("drafted", "extracting"):
-                stage = "In Setup"
-            elif days is None:
-                stage = "Active"                           # live, term unknown
-            elif days < 0:
-                stage = "Runoff"                           # term ended, still reporting
-            elif days <= horizon_days:
-                stage = "Under Review"                     # continuation decision due
-            else:
-                stage = "Active"
+            stage = program_stage(p, contract, today, horizon_days)
             stage_counts[stage] = stage_counts.get(stage, 0) + 1
 
             # Writing business = the resolved STAGE, so the card and the donut can
@@ -6371,19 +7417,22 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
 
         overdue_by_tenant: dict = {}
         overdue_brokers: set = set()
-        arrived_on_time = arrived_late = 0
+        arrived_on_time = arrived_late = never_arrived = 0
         for e in due_rows:
             soon = soon_by_program.get(e.program_id)
             status = derive_status(e.due_date, today,
                                    soon if soon is not None else DEFAULT_SOON_WINDOW_DAYS,
-                                   e.received_at)
+                                   e.received_at, e.closes_on)
             if status == "on_time":
                 arrived_on_time += 1
             elif status == "received_late":
                 arrived_late += 1
-            elif status == "overdue":
+            elif status in ("overdue", "never_arrived"):
+                # Both are missing files; the card shows them apart (MOPR 39.1).
                 overdue_by_tenant[e.tenant_id] = overdue_by_tenant.get(e.tenant_id, 0) + 1
                 overdue_brokers.add(e.broker_party_id)
+                if status == "never_arrived":
+                    never_arrived += 1
 
         # --- Contracts sent for signature and not yet signed by everyone ---
         week_ago = now - timedelta(days=7)
@@ -6539,7 +7588,11 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
             },
             "seats": seats,
             "open_exceptions": open_ex,
+            # `total` is every missing file: `waiting` still overdue, `never`
+            # the ones whose period has closed.
             "overdue": {"total": sum(overdue_by_tenant.values()),
+                        "waiting": sum(overdue_by_tenant.values()) - never_arrived,
+                        "never": never_arrived,
                         "brokers": len(overdue_brokers),
                         "carriers": sum(1 for v in overdue_by_tenant.values() if v),
                         "on_time": int(arrived_on_time or 0),
@@ -6606,6 +7659,7 @@ def platform_runs_on_day(day: date = Query(..., description="YYYY-MM-DD, in `tz`
 @router.get("/dashboard/runs-on-day")
 def carrier_runs_on_day(day: date = Query(..., description="YYYY-MM-DD"),
                         mga: Optional[str] = None,
+                        program_id: Optional[int] = None,
                         principal: Principal = Depends(current_principal)):
     """The files behind one bar of the carrier dashboard's Bordereau Status
     chart. Same day and same split as that chart (/dashboard/stats'
@@ -6616,6 +7670,9 @@ def carrier_runs_on_day(day: date = Query(..., description="YYYY-MM-DD"),
         q = (_day_runs_query(s)
              .filter(OutputExport.tenant_id == tid,
                      func.date(OutputExport.created_at) == day))
+        # The dashboard's programme pick, so the list matches its bar.
+        if program_id is not None:
+            q = q.filter(OutputExport.program_id == program_id)
         return _day_runs_payload(
             s, q.order_by(OutputExport.created_at, OutputExport.id).all(), day, None,
             lambda st: "clean" if st == "clean" else "flagged")
@@ -6727,6 +7784,20 @@ def _user_dict(u: AppUser, mga: Optional[str] = None) -> dict:
             "last_login_at": _iso_utc(u.last_login_at)}
 
 
+def _carrier_broker_logins(s, tid):
+    """The broker logins of every broker this carrier works with — what the
+    Carriers list counts as the carrier's brokers and what its Users tab lists
+    (`/users?kind=broker`) when Kavachio opens it. A broker company with no
+    login has nobody to show, so it is not counted either."""
+    from auth_deps import db_role_values
+    broker_ids = _carrier_broker_ids(s, tid)
+    if not broker_ids:
+        return s.query(AppUser).filter(False)
+    return s.query(AppUser).filter(
+        AppUser.broker_party_id.in_(broker_ids),
+        AppUser.role.in_(db_role_values("broker_admin")))
+
+
 @router.get("/users")
 def users_list(
     mga: str,
@@ -6735,9 +7806,15 @@ def users_list(
     status: Optional[str] = None,
     page: Optional[int] = Query(None, ge=1),
     page_size: Optional[int] = Query(None, ge=1, le=200),
+    # Opt-in: "broker" leaves out the carrier's own people. Kavachio's
+    # carrier page uses it, so its Users tab lists the same brokers the
+    # Carriers list counts. Omitted → every row, as before.
+    kind: Optional[str] = None,
     principal: Principal = Depends(current_principal),
 ):
     from auth_deps import _ROLE_ALIASES, db_role_values
+    if kind not in (None, "", "broker"):
+        raise HTTPException(400, "kind must be 'broker' or left out")
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
 
@@ -6757,7 +7834,8 @@ def users_list(
         broker_admins = (and_(AppUser.broker_party_id.in_(broker_ids),
                               AppUser.role.in_(db_role_values("broker_admin")))
                          if broker_ids else False)
-        who = broker_admins if seat == "user" else or_(own_people, broker_admins)
+        who = (broker_admins if seat == "user" or kind == "broker"
+               else or_(own_people, broker_admins))
 
         # kavachio_admin is a cross-tenant platform role, not a member of this
         # tenant's org — never surfaced on a tenant's own Users screen.

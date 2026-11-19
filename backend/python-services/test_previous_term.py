@@ -65,9 +65,9 @@ def test_calendar_starts_at_the_first_term_not_the_renewal(chain):
 def test_previous_term_uses_its_chains_layout(chain, monkeypatch):
     import os
     import db
-    # The module builds an AI client at import; a placeholder key is enough.
-    if not os.getenv("GEMINI_API_KEY"):
-        monkeypatch.setenv("GEMINI_API_KEY", "test-placeholder")
+    # A placeholder project is enough: the AI client is only built on first use.
+    if not os.getenv("GOOGLE_CLOUD_PROJECT"):
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-placeholder")
     from output_template_routes import _resolve, EXACT
     s, p, old, new, alone = chain
     t = db.ExportTemplate(tenant_id=1, name="layout", contract_id=new.id,

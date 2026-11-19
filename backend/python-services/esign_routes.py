@@ -504,10 +504,28 @@ def _resolve_broker_signer(s, tenant_id: int, broker_party_id: int | None,
     if not party:
         raise HTTPException(404, "that broker is not on file")
     org = party.legal_name or "The broker"
+    # A treaty's other side is its lead REINSURER, which has no seat here: it
+    # signs from the emailed link and its one-time code, as a broker's signer
+    # with no account does. Its signer is the contact the carrier holds for it.
+    reinsurer = (party.party_type or "") == "reinsurer"
+    role = "Reinsurer" if reinsurer else "Broker"
     if given and given.email:
         return SignerIn(side="broker", name=given.name, email=given.email,
-                        title=given.title or "Broker", org=given.org or org,
+                        title=given.title or role, org=given.org or org,
                         broker_party_id=bpid, order=2)
+    if reinsurer:
+        from db import PartyContact
+        ct = (s.query(PartyContact)
+              .filter(PartyContact.party_id == bpid,
+                      PartyContact.email.isnot(None), PartyContact.email != "")
+              .order_by(PartyContact.id).first())
+        if ct is None:
+            raise HTTPException(
+                400, f"{org} has nobody to sign — add a contact with an email "
+                     "on the reinsurer, or name its signer on the contract.")
+        return SignerIn(side="broker", name=ct.full_name or ct.email,
+                        email=ct.email, title=ct.title or role,
+                        org=org, broker_party_id=bpid, order=2)
     admin = (s.query(AppUser)
              .filter(AppUser.broker_party_id == bpid,
                      AppUser.role.in_(db_role_values("broker_admin")),
@@ -775,6 +793,20 @@ def _build_document(s, body: EnvelopeIn, env: EsignEnvelope, insurer: SignerIn,
             data = esign_pdf.ensure_pdf(data, name)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        if (not esign_pdf.discover_fields(data)
+                and (contract.contract_type or "") == "insurer_reinsurer"):
+            # An uploaded treaty is signed like one written here: on the
+            # document. Its own pages carry no signing boxes, so an execution
+            # page with one for the carrier and one for the lead reinsurer is
+            # added after them; the uploaded pages are left as they are.
+            data = esign_pdf.append_execution_page(
+                data, title=f"Execution of {contract.name or env.title or 'the treaty'}",
+                parties=[
+                    {"title": "Signed for the reinsured", "org": insurer.org,
+                     "key": insurer_key, "name": insurer.name, "role": insurer.title},
+                    {"title": "Signed for the reinsurer", "org": broker.org,
+                     "key": broker_key, "name": broker.name, "role": broker.title},
+                ])
         if not esign_pdf.discover_fields(data):
             raise HTTPException(
                 400, "That wording has no signature blocks in it. Its execution "
@@ -933,6 +965,19 @@ def _live_round(s, contract_id: int) -> EsignEnvelope | None:
 # because a round that is half done leaves the contract there, and the second
 # signer still has to be able to get in.
 SIGNABLE_STATES = ("agreed", "signed")
+
+# Reinsurance treaties (treaty_routes) sign in the same round as a broker's
+# contract: the carrier signs on the document, then the lead reinsurer — which
+# has no seat here — is emailed its link and code, signs on the same document,
+# and both get the sealed copy.
+TREATY_TYPE = "insurer_reinsurer"
+
+
+def _counterparty_kind(env, s) -> str:
+    """'reinsurer' for a treaty's round, else 'broker' — for the page's words."""
+    c = s.get(Contract, env.contract_id) if getattr(env, "contract_id", None) else None
+    return "reinsurer" if c is not None and (c.contract_type or "") == TREATY_TYPE \
+        else "broker"
 
 
 def _assert_terms_settled(c: Contract) -> None:
@@ -1654,6 +1699,8 @@ def open_for_signing(token: str, request: Request,
                 "pages": esign_pdf.page_sizes(pdf),
                 "programme": _programme_name(env, s),
                 "term": _term_text(env, s),
+                # Who the other side is — a treaty's is its reinsurer.
+                "counterparty": _counterparty_kind(env, s),
             },
             # Who the link thinks you are. The page shows it back so a signer
             # who was forwarded somebody else's link notices immediately.

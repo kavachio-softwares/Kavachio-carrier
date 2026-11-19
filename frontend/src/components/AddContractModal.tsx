@@ -46,8 +46,11 @@ type Programme = { id: number; name: string; status: string | null };
 export default function AddContractModal({
   open, onClose, broker, programmes, programId: initialProgramId,
   brokerId: initialBrokerId, onAdded, initialFile, initialRefFiles, copiedFrom,
-  copiedFilename,
+  copiedFilename, switcher,
 }: {
+  /** Shown at the top of the dialog — the Contracts list's broker /
+   *  reinsurance choice, when it opened this from "All contracts". */
+  switcher?: React.ReactNode;
   open: boolean;
   onClose: () => void;
   /** The broker this contract is for, when the opener knows it. Left out, the
@@ -258,6 +261,7 @@ export default function AddContractModal({
         </>
       )}>
       <div className="space-y-4">
+        {!saved && switcher}
         {saved ? (
           <SavedPanel saved={saved} programId={Number(programId)}
             filename={file?.name ?? null} />

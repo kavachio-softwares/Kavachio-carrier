@@ -47,6 +47,13 @@ class OlderItdFile(Exception):
     """An ITD file older than the latest one this feed has already loaded."""
 
 
+class ItdHistoryUnavailable(Exception):
+    """ITD is on for the setup, but the feed's history cannot be read where the
+    app keeps it (the ITD tables are missing, or the old names are still there
+    — migrations 39/40). Comparing anyway would treat every transaction as new
+    and send it again, so the file is held."""
+
+
 def _sheet_streams(landing: dict, cfg: dict) -> list[str]:
     names = list(((landing or {}).get("sheets") or {}).keys())
     out = []
@@ -141,18 +148,28 @@ def prepare(s, *, tenant_id: int, pipe, program_id: Optional[int],
             ) -> tuple[dict, Optional[dict]]:
     """(landing to store, plan). The plan is None when ITD is off, and then the
     landing is returned untouched. Raises OlderItdFile for an ITD file older
-    than one this feed has already loaded."""
+    than one this feed has already loaded, and ItdHistoryUnavailable when ITD
+    is on but the feed's history cannot be read."""
     if pipe is None:
         return landing, None
     try:
-        if not itd_store.tables_present(s):
-            return landing, None
+        present = itd_store.tables_present(s)
         cfg = itd_store.read_config(s, pipe.id)
     except Exception:  # noqa: BLE001 — ITD must never be why a run cannot start
         log.warning("ITD settings could not be read for setup %s", pipe.id, exc_info=True)
         return landing, None
     if not itd.enabled(cfg):
         return landing, None
+    # ITD is on: without the feed's history every transaction would look new
+    # and be sent again — hold the file instead of comparing it with nothing.
+    left = itd_store.old_tables_left(s)
+    if not present or left:
+        log.error("ITD file held for setup %s: history unavailable (tables present: %s, "
+                  "old names left: %s)", pipe.id, present, left)
+        raise ItdHistoryUnavailable(
+            "Not processed — this setup handles ITD files, and its earlier ITD "
+            "history can't be read right now, so the file can't be compared safely. "
+            "Nothing was sent. Please try again once support confirms ITD is available.")
     # Automatic settings take up amount columns recognised since they were made.
     cfg = itd.refresh_money_columns(cfg, landing)
     streams = _sheet_streams(landing, cfg)

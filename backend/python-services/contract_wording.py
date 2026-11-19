@@ -159,7 +159,15 @@ def build_sections(*, values: dict, limits: dict,
         out.append({"key": key, "title": title, "body": "\n".join(numbered),
                     "origin": origin, "locked": locked})
 
+    # A treaty is between the reinsured and its reinsurers — calling the
+    # reinsurer "the Broker" would put the wrong relationship in a signed
+    # document. The treaty's own clauses (treaty_types.build_sections) use the
+    # same two names.
+    is_treaty = "reinsurer" in (type_label or "").lower()
     add("parties", "Parties and cover", [
+        ("This Agreement is made between {{carrier_name}} (the “Reinsured”) "
+         "and the reinsurers subscribing to it, led by {{counterparty_name}} "
+         "(together the “Reinsurers”).") if is_treaty else
         "This Agreement is made between {{carrier_name}} (the “Carrier”) and "
         "{{counterparty_name}} (the “Broker”).",
         "Business may be declared under it from {{inception}} to "

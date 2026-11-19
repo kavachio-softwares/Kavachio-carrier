@@ -6,7 +6,7 @@ is more accurate and the user reviews a small, like-to-like mapping.
 
 Two layers, so the engine is usable (and testable) without the network:
   1. heuristic_match()   normalised name matching → high-confidence `copy` rules
-  2. propose_for_sheet()  fills the rest with Gemini when GEMINI_API_KEY is set,
+  2. propose_for_sheet()  fills the rest with Gemini when AI is configured (ai_configured),
                           otherwise returns only the heuristic mapping.
 
 Since the semantic-mapping work, layer 1 is no longer the whole story: the
@@ -199,7 +199,7 @@ def heuristic_match(
 
 # Today's model. KAVACHIO_MODEL_COLUMN_MAPPING moves this one call to a bigger
 # model without dragging every other flash caller along (gemini_service.model_for).
-DEFAULT_MAPPING_MODEL = "gemini-2.5-flash"
+DEFAULT_MAPPING_MODEL = "gemini-3.5-flash"
 # Part of every cached answer's key. Bump it whenever _build_prompt changes, or
 # an answer to the old wording is served for the new one.
 PROMPT_VERSION = "column_candidates_v1"
@@ -280,10 +280,9 @@ def _finish_reason(resp: Any) -> str | None:
 
 def _ask_model(prompt: str) -> tuple[str, str | None]:
     """The one network call: (answer text, finish reason). Raises on failure."""
-    from google import genai
     from contract_upload_services.gemini_service import (
-        DETERMINISTIC_SEED, invoke_with_retry)
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        DETERMINISTIC_SEED, get_client, invoke_with_retry)
+    client = get_client()
     # Route through the shared AI gateway → inherits retry/backoff + the
     # global concurrency/rate limiter.
     resp = invoke_with_retry(
@@ -431,13 +430,13 @@ def _gemini_enrich(
     if not output_cols or not input_cols:
         return {}
     asked = list(dict.fromkeys(output_cols))
-    if not os.getenv("GEMINI_API_KEY"):
-        # Checked before anything else: gemini_service cannot even be imported
-        # without a key.
-        report.update(status="failed", error="GEMINI_API_KEY is not set",
+    from contract_upload_services.gemini_service import AI_NOT_CONFIGURED, ai_configured
+    if not ai_configured():
+        # Checked before anything else, so no prompt is built for nothing.
+        report.update(status="failed", error=AI_NOT_CONFIGURED,
                       unanswered=asked,
-                      reasons={c: "GEMINI_API_KEY is not set" for c in asked})
-        log.warning("Direct-mapper Gemini enrich skipped: GEMINI_API_KEY is not set")
+                      reasons={c: AI_NOT_CONFIGURED for c in asked})
+        log.warning("Direct-mapper Gemini enrich skipped: %s", AI_NOT_CONFIGURED)
         return {}
     try:
         model = _mapping_model()

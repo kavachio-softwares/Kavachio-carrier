@@ -456,7 +456,10 @@ def write_rules(conn, *, contract_id: int, program_id: int | None,
     if set_scope is None:
         conn.execute(text("DELETE FROM rule_sql WHERE contract_id = :cid"),
                      {"cid": contract_id})
-        conn.execute(text("DELETE FROM validation_rule WHERE contract_id = :cid"),
+        # Not a treaty's reinsurance rules (ceded_canonical): they follow the
+        # treaty's bordereau setup, not this contract's terms.
+        conn.execute(text("DELETE FROM validation_rule WHERE contract_id = :cid "
+                          "AND COALESCE(rule_spec->>'source', '') <> 'reinsurance'"),
                      {"cid": contract_id})
     else:
         which = ("output_template_id = ANY(:fam) "

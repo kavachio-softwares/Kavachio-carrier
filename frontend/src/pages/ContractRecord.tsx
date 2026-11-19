@@ -12,7 +12,12 @@
  * button the API refuses, and the user would have no way to tell which of the
  * two was wrong.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import TreatyPlacementCard from "../components/treaty/TreatyPlacementCard";
+import TreatyBasisPanel from "../components/treaty/TreatyBasisPanel";
+import { ACCESS_EVENT_LABEL, isLoopback } from "../components/treaty/ReinsurerSharing";
+import { getReinsurerAccess, type AccessEvent } from "../api/treaty";
+import { TreatyWordingRules } from "../components/treaty/TreatyWordingRules";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { canAccessPath } from "../access";
 import {
@@ -28,13 +33,18 @@ import { currentMga, getTenantBrand, isBrokerSeat } from "../auth";
 import { SignaturePlacer, signerTargets }
   from "../components/SignaturePlacer";
 import { InfoTip } from "../components/InfoTip";
+import { showDone, showError } from "../components/ResultPopup";
 import { ClauseText } from "../components/ClauseText";
 import { WordingEditor } from "../components/WordingEditor";
+import { TreatyRecordPanel } from "../components/treaty/TreatyRecordPanel";
+import TreatySetupNudge from "../components/treaty/TreatySetupNudge";
+import { ReinsurerSharing, TreatyFlowCard } from "../components/treaty/ReinsurerSharing";
 import { fmtDate, fmtStamp } from "../utils/date";
 import { describeChecks } from "../utils/contractChecks";
 import { TermDurationField, useTermDuration } from "../components/TermDuration";
 import { EXPIRY_FIELD, INCEPTION_FIELD, type TermSpec } from "../utils/term";
 import { documentsEmptyMessage } from "../utils/documentsEmpty";
+import { counterpartyWord, type CounterpartyWord } from "../utils/counterparty";
 import { Dropzone } from "../components/Dropzone";
 import { FileDrop, MultiFileDrop } from "../components/ui/FileDrop";
 
@@ -93,38 +103,41 @@ const DATE_FIELD_LABEL: Record<string, string> = {
   expiry_dt: "End date",
 };
 
-const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
+// `note` takes the other side's name: "broker" on a broker contract,
+// "reinsurer" on a treaty (utils/counterparty).
+const STATE: Record<Lifecycle, { label: string; cls: string;
+                                 note: (party: CounterpartyWord) => string }> = {
   // The note is filled in per contract — a carrier's own draft has nobody to
   // submit it to, so "not submitted" would be describing a queue that does not
   // exist for it. See draftNote().
-  draft: { label: "Draft", cls: "b-mut", note: "" },
+  draft: { label: "Draft", cls: "b-mut", note: () => "" },
   pending: { label: "Awaiting review", cls: "b-warn",
-             note: "One of your users raised this. It is with the carrier, "
-                   + "who reads the terms before they go to the broker." },
+             note: p => "One of your users raised this. It is with the carrier, "
+                   + `who reads the terms before they go to the ${p}.` },
   in_review: { label: "Out for review", cls: "b-warn",
-               note: "The terms are with the broker. They can agree them or "
+               note: p => `The terms are with the ${p}. They can agree them or `
                    + "ask for changes." },
   changes_requested: { label: "Changes requested", cls: "b-warn",
-                       note: "The broker has pushed back. Revise the terms and "
+                       note: p => `The ${p} has pushed back. Revise the terms and `
                            + "send them again." },
   // The note here says only that the terms are settled — WHO signs next is
   // not a property of the state. The carrier signs first and the broker after
   // it, and a contract stays `agreed` through both, so the sentence is
   // finished per contract from whose_turn. See turnNote().
   agreed: { label: "Terms agreed", cls: "b-ok",
-            note: "Both sides have settled the terms." },
+            note: () => "Both sides have settled the terms." },
   signed: { label: "Signed", cls: "b-ok",
-            note: "The broker signed and returned it. It is with the carrier "
+            note: p => `The ${p} signed and returned it. It is with the carrier `
                 + "to place and activate." },
   active: { label: "Active", cls: "b-ok",
-            note: "Signed by both sides and running. Bordereaux can be "
+            note: () => "Signed by both sides and running. Bordereaux can be "
                 + "produced against it." },
   expired: { label: "Expired", cls: "b-mut",
-             note: "Its term has run out. Renew it into a successor." },
+             note: () => "Its term has run out. Renew it into a successor." },
   terminated: { label: "Terminated", cls: "b-crit",
-                note: "Ended early. Nothing more can be attached to it." },
+                note: () => "Ended early. Nothing more can be attached to it." },
   superseded: { label: "Superseded", cls: "b-mut",
-                note: "Replaced by a renewal." },
+                note: () => "Replaced by a renewal." },
 };
 
 const DOC_KIND: Record<ContractDocumentKind, { label: string; blurb: string }> = {
@@ -149,7 +162,48 @@ const DOC_KIND: Record<ContractDocumentKind, { label: string; blurb: string }> =
     label: "Evidence",
     blurb: "Supports a date correction. Your organisation only.",
   },
+  // A treaty's own (26.3): the schedule to its wording, and amendments.
+  schedule: {
+    label: "Schedule",
+    blurb: "The treaty's schedule — its figures and reinsurers' lines.",
+  },
+  amendment: {
+    label: "Amendment",
+    blurb: "A change to the treaty's wording, agreed after it was signed.",
+  },
+  // A master treaty: one reinsurer's signed line slip — the evidence its
+  // signature is recorded against. Attached from Placement & signatures.
+  signed_line: {
+    label: "Signed line slip",
+    blurb: "One reinsurer's signed line — record its signature against it.",
+  },
 };
+
+/** What a document IS, said for a treaty: its signed wording is named as such. */
+function docTypeLabel(d: { kind: ContractDocumentKind; is_executed_copy: boolean },
+                      treaty: boolean): string {
+  if (treaty && d.kind === "contract") return d.is_executed_copy ? "Signed treaty wording" : "Treaty wording (draft)";
+  return DOC_KIND[d.kind]?.label ?? d.kind;
+}
+
+const LIFECYCLE_LABEL: Record<string, string> = {
+  draft: "Draft", pending: "Pending", in_review: "In review",
+  changes_requested: "Changes requested", agreed: "Agreed", signed: "Signed",
+  active: "Active", expired: "Expired", terminated: "Terminated", superseded: "Superseded",
+};
+
+/** One of the treaty's three statuses, labelled. */
+function StatusPill({ k, v, tone }: { k: string; v: string; tone: "ok" | "warn" | "info" | "mut" }) {
+  return (
+    <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+      <span className="sub">{k}</span>
+      <span className={`badge b-${tone}`}><span className="d" />{v}</span>
+    </span>
+  );
+}
+
+/** Documents shown before "Show all" — the card stays short. */
+const DOCS_SHOWN = 5;
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -164,6 +218,17 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
  *  successor, the "Renews contract N" link) keeps this same route, so without
  *  the key React reused the page — and the old contract's open forms, typed
  *  inputs and late-arriving load carried over onto the new one. */
+/** What to call the contract a renewal renews: its name and period, from the
+ *  record's renewal history — never its id. Names often repeat across a chain
+ *  ("Quota Share" renewed as "Quota Share"), so the period tells them apart. */
+function renewsLabel(rec: Rec): string {
+  const v = rec.renewal_history?.find(h => h.id === rec.renews_contract_id);
+  if (!v) return "the previous contract";
+  const span = v.inception_dt && v.expiry_dt
+    ? ` (${fmtDate(v.inception_dt)} – ${fmtDate(v.expiry_dt)})` : "";
+  return `${v.name}${span}`;
+}
+
 export default function ContractRecord() {
   const { contractId } = useParams();
   return <ContractRecordView key={contractId} />;
@@ -187,14 +252,26 @@ function ContractRecordView() {
   // document that failed to attach is reported here — where it can be retried —
   // rather than as a failure to create a contract that in fact exists.
   const navState = useLocation().state as
-    { notice?: string; acceptError?: string } | null;
+    { notice?: string; noticeOk?: boolean; acceptError?: string } | null;
   const handoff = navState?.notice;
   // A renewal is accepted automatically once created; if that was refused,
   // the reason arrives here and is shown with "Make it active".
   const acceptError = navState?.acceptError;
 
   const [rec, setRec] = useState<Rec | null>(null);
+  // A treaty's create / upload result is shown as a popup, once, when it opens.
+  const handoffShown = useRef(false);
+  useEffect(() => {
+    if (!handoff || !rec || handoffShown.current
+        || rec.contract_type !== "insurer_reinsurer") return;
+    handoffShown.current = true;
+    // Saved either way; a warning means not every reinsurer was reached.
+    if (navState?.noticeOk) showDone(handoff, "Treaty saved");
+    else showError(handoff, "Treaty saved — not everyone was reached");
+  }, [handoff, rec]); // eslint-disable-line react-hooks/exhaustive-deps
   const [history, setHistory] = useState<ApprovalEvent[]>([]);
+  // A treaty's reinsurers' link activity, shown in the same History.
+  const [accessEvents, setAccessEvents] = useState<AccessEvent[]>([]);
   // What this contract SAYS (its clauses) and what it CHECKS (the rules those
   // became). Loaded here rather than reached through a link, because both are
   // facts about the contract on this page.
@@ -217,7 +294,9 @@ function ContractRecordView() {
   // only PDFs open inline; everything else says so and offers the download
   // rather than opening a blank frame.
   const [viewing, setViewing] = useState<
-    { id: number; name: string; url: string; type: string } | null>(null);
+    { id: number; name: string; url: string; type: string;
+      /** What it is — only the contract's own unsigned wording is The wording. */
+      kind?: string; signed?: boolean } | null>(null);
 
   // Where the electronic signing round has got to. Read from the server so the
   // button and the endpoint behind it cannot disagree about whether pressing it
@@ -325,8 +404,13 @@ function ContractRecordView() {
   const [agreedOpen, setAgreedOpen] = useState(true);
   const [clausesOpen, setClausesOpen] = useState(true);
   const [rulesOpen, setRulesOpen] = useState(true);
+  // ?tab= opens a tab directly — the dashboard's treaty actions link to the
+  // one the action is about. Anything unknown falls back to the summary.
+  const tabParam = new URLSearchParams(useLocation().search).get("tab");
   const [tab, setTab] = useState<
-    "summary" | "contract" | "agreed" | "clauses" | "wording">("summary");
+    "summary" | "contract" | "agreed" | "clauses" | "wording" | "treaty"
+    | "access" | "basis">(["contract", "agreed", "clauses", "wording", "treaty", "access", "basis"]
+      .includes(tabParam ?? "") ? tabParam as "treaty" : "summary");
   // Which heading is open for renaming. A heading is not part of the clause
   // text and must not be typed into by accident — it is the thing a reader
   // navigates by — so it is a label until it is asked to be an input.
@@ -370,6 +454,9 @@ function ContractRecordView() {
       })
       .catch(e => setErr(e?.response?.data?.detail || "Could not load this contract."));
     getApprovalHistory(id).then(setHistory).catch(() => setHistory([]));
+    if (!isBrokerSeat()) {
+      getReinsurerAccess(id).then(a => setAccessEvents(a.events)).catch(() => setAccessEvents([]));
+    }
     // Its own call and its own failure: a round that cannot be read must never
     // stop the contract being shown. Absent, the buttons fall back to the
     // signature screen, which is where they pointed before there were rounds.
@@ -393,9 +480,30 @@ function ContractRecordView() {
 
   // An authored contract cannot take a replacement wording, so never leave the
   // picker sitting on a kind that is not offered.
+  // A TREATY is the exception: the reinsurer signs outside Kavachio, so the
+  // signed copy they send back has to be attached as the wording — it is the
+  // only evidence of their signature (see the treaty rule in sign_contract).
   useEffect(() => {
-    if (rec?.wording_sections?.length && kind === "contract") setKind("reference");
+    if (!rec?.wording_sections?.length || kind !== "contract") return;
+    if (rec.contract_type !== "insurer_reinsurer") setKind("reference");
+    else setExecutedCopy(true);
   }, [rec, kind]);
+
+  // Bring a refusal into view. Every action on this page reports through the
+  // one banner under the header, but the buttons that fail are far below it —
+  // Renew and Terminate sit at the bottom of the record. Without this, pressing
+  // "Create successor" on an already-renewed contract looks like nothing
+  // happened: the server's reason is on screen, a thousand pixels up.
+  const errRef = useRef<HTMLDivElement>(null);
+  // The attach form's file box — "Upload wording" takes you to it, ready.
+  const uploadRef = useRef<HTMLInputElement>(null);
+  // The Documents card stays short: the upload form is folded away until
+  // asked for, and only the first few documents show until "Show all".
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [showAllDocs, setShowAllDocs] = useState(false);
+  useEffect(() => {
+    if (err) errRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [err]);
 
   async function run(label: string, fn: () => Promise<unknown>) {
     setBusy(label);
@@ -424,12 +532,26 @@ function ContractRecordView() {
       setSatisfies("");
       setEffectiveFrom("");
       setExecutedCopy(false);
-      if (r.rules_stale) setRulesStale(true);
-      setNote(
-        r.rules_stale
-          ? `Attached. The rules on file were read without it — re-read the `
-            + `contract to bring them up to date.`
-          : "Attached.");
+      setUploadOpen(false);
+      if (r.rules_stale && !isTreaty) setRulesStale(true);
+      if (isTreaty && kind === "endorsement") {
+        nav(`/contracts/${id}/endorsements/${r.document.id}`);
+        return;
+      }
+      const v = r.document.validation;
+      if (isTreaty && kind === "contract" && executedCopy && v && v.status !== "valid") {
+        // Attached, but it may not count as the signed wording — say why.
+        setNote(`Attached — but ${v.label.charAt(0).toLowerCase()}${v.label.slice(1)}.`
+          + (v.status === "unreadable" || v.status === "missing_file"
+              ? " It does not count as the signed treaty wording." : ""));
+      } else {
+        setNote(isTreaty && kind === "contract" && executedCopy
+          ? "Signed treaty wording attached and validated. Review its terms next."
+          : r.rules_stale && !isTreaty
+            ? `Attached. The rules on file were read without it — re-read the `
+              + `contract to bring them up to date.`
+            : "Attached.");
+      }
     });
   }
 
@@ -558,6 +680,8 @@ function ContractRecordView() {
   }
 
   const st = STATE[rec.lifecycle] ?? STATE.draft;
+  // Who is across the table, in words: "reinsurer" on a treaty, else "broker".
+  const party = counterpartyWord(rec.contract_type);
   // A draft belongs to the carrier — there is no other kind now — so it means
   // one thing: written down, not live, still editable.
   const draftNote = "Not live yet — nothing is checked against it. Its terms "
@@ -566,22 +690,29 @@ function ContractRecordView() {
   // whole signing round — carrier first, then broker — so the state cannot
   // say this and the record's own whose_turn has to.
   const turnNote = rec.lifecycle !== "agreed" ? ""
-    : rec.whose_turn === "carrier" ? " The carrier signs next, then the broker."
-    : rec.whose_turn === "broker" ? " The carrier has signed. The broker signs next, and returns it."
+    : rec.whose_turn === "carrier" ? ` The carrier signs next, then the ${party}.`
+    : rec.whose_turn === "broker" ? ` The carrier has signed. The ${party} signs next, and returns it.`
     : "";
   const a = rec.actions;
   const docs = rec.documents ?? [];
   const active = docs.filter(d => d.is_active);
   const retired = docs.filter(d => !d.is_active);
+  // The signed wording first, then the newest — what is looked for most.
+  const sortedDocs = [...active].sort((x, y) =>
+    Number(y.kind === "contract" && y.is_executed_copy) - Number(x.kind === "contract" && x.is_executed_copy)
+    || (y.created_at ?? "").localeCompare(x.created_at ?? ""));
   // While renewing with no files to list, the Documents card is hidden; if
   // there is no history either, the side column is empty and the main column
   // takes the full width.
   const hideDocs = showRenew && docs.length === 0;
-  const sideEmpty = hideDocs && history.length === 0;
+  const sideEmpty = hideDocs && history.length === 0 && accessEvents.length === 0;
 
   // Was this contract WRITTEN here, or does it come from a document somebody
   // else drafted? The answer changes what may be attached to it.
   const authored = !!rec.wording_sections?.length;
+  // A reinsurance treaty (Phase 26). Its counterparty is the lead reinsurer,
+  // who — like every reinsurer — has no seat in Kavachio.
+  const isTreaty = rec.contract_type === "insurer_reinsurer";
   // No sections and no uploaded wording either: the contract exists as terms
   // alone. That is a legitimate way to start — the terms are what get
   // negotiated — but it must not be a dead end, so a draft in this state is
@@ -610,8 +741,16 @@ function ContractRecordView() {
   // agreed terms and a wording saying something else. So it is not offered.
   // Changing an authored contract's wording means changing its terms, or
   // endorsing it.
+  // Except on a treaty, where the "wording" attached is the SIGNED COPY the
+  // reinsurer returned: evidence of a signature made outside Kavachio, not a
+  // replacement text. It is ticked as the signed copy for that reason.
   const attachableKinds = (Object.keys(DOC_KIND) as ContractDocumentKind[])
-    .filter(k => k !== "evidence" && !(authored && k === "contract"));
+    .filter(k => k !== "evidence" && !(authored && k === "contract" && !isTreaty)
+      // A schedule and an amendment are a treaty's.
+      && (isTreaty || (k !== "schedule" && k !== "amendment"))
+      // Needs its reinsurer: attached from Placement & signatures.
+      && k !== "signed_line");
+  const signedCopyOnly = authored && isTreaty;
 
   const spec = specs.find(t => t.key === rec.contract_type) ?? null;
   // The counterparty is not editable here: for a broker's own contract it is
@@ -984,13 +1123,40 @@ function ContractRecordView() {
     );
   }
 
+  // ONE history: the treaty's own steps and, for a treaty, what each
+  // reinsurer's people did with their links — in time order. A run of the same
+  // event by the same link (viewed, viewed, viewed) is one line with a count.
+  type Step = { kind: "decision"; at: string | null; h: ApprovalEvent }
+            | { kind: "access"; at: string; e: AccessEvent; n: number };
+  const accessSteps: Step[] = [];
+  for (const e of [...accessEvents].sort((a, b) => a.at.localeCompare(b.at))) {
+    const last = accessSteps[accessSteps.length - 1];
+    if (last && last.kind === "access" && last.e.link_id === e.link_id && last.e.type === e.type) {
+      last.n += 1;
+      last.at = e.at;
+    } else {
+      accessSteps.push({ kind: "access", at: e.at, e, n: 1 });
+    }
+  }
+  const timeline: Step[] = [
+    ...history.map(h => ({ kind: "decision" as const, at: h.acted_at, h })),
+    ...accessSteps,
+  ].sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""));
+
   const shownTabs = ([
     { key: "summary", label: "Summary", show: true },
+    { key: "treaty", label: "Treaty structure", show: isTreaty },
+    // 27.1 / 27.2 — the terms its figures are worked from, with their dates.
+    { key: "basis", label: "Calculation basis", show: isTreaty && !isBrokerSeat() },
+    // The private read-only links — carrier only. A broker never sees a
+    // treaty, but the guard costs nothing.
+    { key: "access", label: "Reinsurer access", show: isTreaty && !isBrokerSeat() },
     { key: "contract", label: "The contract", show: true },
     { key: "agreed", label: "What was agreed",
       show: !!rec.agreed_limits && Object.keys(rec.agreed_limits).length > 0 },
+    // A treaty's always: its rules are there, and its wording can be read.
     { key: "clauses", label: "Clauses",
-      show: !!clauses?.length || !!clauseRules.length },
+      show: !!clauses?.length || !!clauseRules.length || (isTreaty && !isBrokerSeat()) },
     { key: "wording", label: "The wording",
       show: authored || wEditing || canWriteWording },
   ] as const).filter(t => t.show);
@@ -1101,7 +1267,9 @@ function ContractRecordView() {
           <div className="t">
             <h2>{rec.name}</h2>
             <p>
-              {[rec.contract_type_label ?? "type not set",
+              {[rec.treaty?.type_label
+                  ? `${rec.contract_type_label} · ${rec.treaty.type_label}`
+                  : rec.contract_type_label ?? "type not set",
                 rec.counterparty?.name, rec.programme?.name]
                 .filter(Boolean).join(" · ")}
             </p>
@@ -1134,7 +1302,8 @@ function ContractRecordView() {
         </div>
 
         {err && (
-          <div className="note warn" style={{ marginBottom: 14, maxWidth: 700 }}>{err}</div>
+          <div ref={errRef} className="note warn"
+               style={{ marginBottom: 14, maxWidth: 700 }}>{err}</div>
         )}
         {note && (
           <div className="note ok" style={{ marginBottom: 14, maxWidth: 700 }}>{note}</div>
@@ -1144,7 +1313,11 @@ function ContractRecordView() {
         {!isBrokerSeat() && (rec.period_conflicts ?? []).map(c => {
           const block = c.severity === "block";
           const tone = block ? "crit" : "warn";
-          const other = c.with_id ? `contract ${c.with_id}` : "another version";
+          // Named by how it relates to this one — the contract it renews, or
+          // its renewal — never by id; the chip below gives its name.
+          const prior = c.with_id != null && c.with_id === rec.renews_contract_id;
+          const other = c.with_id == null ? "another contract"
+            : prior ? "the previous contract" : "the next contract";
           const chip: React.CSSProperties = {
             display: "inline-flex", alignItems: "center", gap: 6,
             padding: "5px 10px", borderRadius: 8, fontSize: 12.5,
@@ -1168,14 +1341,14 @@ function ContractRecordView() {
               </div>
               <div style={{ flex: 1, minWidth: 220 }}>
                 <div style={{ fontWeight: 600, fontSize: 14, color: "var(--p-ink)" }}>
-                  {block ? `Dates overlap ${other}` : `Gap between this contract and ${other}`}
+                  {block ? `Dates overlap ${other}` : `Gap between this contract and ${other}.`}
                 </div>
                 <div style={{ fontSize: 12.5, color: "var(--p-muted)",
                               marginTop: 3, lineHeight: 1.45 }}>
                   {c.span_from
                     ? (block
                         ? "Both contracts claim the same days, so a file for those days could match either one."
-                        : "These days belong to no contract, so a file for them has nothing to match.")
+                        : "These dates are not covered by any contract, so there is no contract to match the file with.")
                     : c.message}
                 </div>
                 {c.span_from && (
@@ -1210,7 +1383,7 @@ function ContractRecordView() {
               {c.with_id && (
                 <Link to={`/contracts/${c.with_id}`} className="btn sm"
                       style={{ alignSelf: "center" }}>
-                  Open contract {c.with_id} <ArrowRight size={13} />
+                  {prior ? "Open previous contract" : "Open next contract"} <ArrowRight size={13} />
                 </Link>
               )}
             </div>
@@ -1250,8 +1423,9 @@ function ContractRecordView() {
         )}
         {/* A refused automatic accept (acceptError) is shown in the
             "Make it active" card on the Summary tab, not here. */}
-        {handoff && !note && (
-          <div className="note warn" style={{ marginBottom: 14, maxWidth: 700 }}>{handoff}</div>
+        {handoff && !note && !isTreaty && (
+          <div className={`note ${navState?.noticeOk ? "ok" : "warn"}`}
+               style={{ marginBottom: 14, maxWidth: 700 }}>{handoff}</div>
         )}
 
         {/* ── whose move it is ──
@@ -1260,7 +1434,7 @@ function ContractRecordView() {
         {rec.whose_turn && (
           <div className="note" style={{ marginBottom: 14 }}>
             {rec.whose_turn === "broker"
-              ? <>Waiting on <b>{rec.counterparty?.name ?? "the broker"}</b>{" "}
+              ? <>Waiting on <b>{rec.counterparty?.name ?? `the ${party}`}</b>{" "}
                   {rec.lifecycle === "in_review"
                     ? "to agree these terms or ask for changes."
                     : "to answer."}</>
@@ -1384,7 +1558,106 @@ function ContractRecordView() {
           ))}
         </div>
 
+        {curTab === "treaty" && isTreaty && (
+          <TreatyRecordPanel contractId={id} onSaved={load} />
+        )}
+        {curTab === "basis" && isTreaty && (
+          <TreatyBasisPanel contractId={id} />
+        )}
+        {curTab === "access" && isTreaty && (
+          <ReinsurerSharing contractId={id} lifecycle={rec.lifecycle}
+                            canSign={!!rec.actions.sign && canSignHere} />
+        )}
+
         {curTab === "summary" && (<>
+        {/* ── where the treaty stands with its reinsurers ── */}
+        {isTreaty && rec.treaty?.has_structure && !isBrokerSeat() && (
+          <TreatyFlowCard contractId={id} lifecycle={rec.lifecycle}
+                          canSign={!!rec.actions.sign && canSignHere} />
+        )}
+        {/* ── the treaty, at a glance ── */}
+        {isTreaty && rec.treaty && (
+          <div className="card" style={{ marginBottom: 14 }}>
+            <div className="card-h">
+              <ShieldCheck size={16} className="ci" />
+              <h3>{rec.treaty.headline ?? "Treaty structure not set up yet"}</h3>
+              {rec.treaty.has_structure && (rec.treaty.placement ? (
+                <>
+                  <span className={`badge ${({ fully_placed: "b-ok", over_placed: "b-crit",
+                    unplaced: "b-mut" } as Record<string, string>)[rec.treaty.placement.written_status] ?? "b-warn"}`}>
+                    <span className="d" />{rec.treaty.placement.written_label}
+                  </span>
+                  <span className={`badge ${({ fully_signed: "b-ok", unsigned: "b-mut" } as Record<string, string>)[
+                    rec.treaty.placement.signed_status] ?? "b-warn"}`}>
+                    <span className="d" />{rec.treaty.placement.signed_label}
+                    {" · "}{rec.treaty.placement.parties_signed}/{rec.treaty.placement.parties}
+                  </span>
+                </>
+              ) : (
+                <span className={`badge ${rec.treaty.fully_placed ? "b-ok" : "b-warn"}`}>
+                  <span className="d" />
+                  {rec.treaty.fully_placed ? "Fully placed"
+                    : `${rec.treaty.placed_pct ?? 0}% placed`}
+                </span>
+              ))}
+              <span className="right">
+                {rec.treaty.has_structure && !isBrokerSeat() && (rec.treaty.wording ? (
+                  <Link className="btn sm" to={`/reinsurance/setups/${id}`}>
+                    Bordereau setup
+                  </Link>
+                ) : (
+                  // 26.3 — not configured until its signed wording is supplied.
+                  <button className="btn sm" type="button" disabled
+                          title="Upload the signed treaty wording before starting treaty configuration.">
+                    Bordereau setup
+                  </button>
+                ))}{" "}
+                {rec.treaty.has_structure && (
+                  <Link className="btn sm" to={`/reinsurance/bordereaux?treaty=${id}`}>
+                    Process Bordereaux
+                  </Link>
+                )}{" "}
+                <button className="btn sm" type="button" onClick={() => setTab("treaty")}>
+                  {rec.treaty.has_structure ? "See the structure" : "Set it up"}
+                  <ArrowRight size={12} />
+                </button>
+              </span>
+            </div>
+            <div style={{ padding: "12px 20px", display: "flex", gap: 8,
+                          flexWrap: "wrap", alignItems: "center" }}>
+              <span className="sub">Protects</span>
+              {rec.treaty.programmes.map(pg => (
+                <span key={pg.id} className="badge b-mut">
+                  <span className="d" />{pg.name}
+                </span>
+              ))}
+              {rec.treaty.type_label && (
+                <span className="sub" style={{ marginLeft: "auto" }}>
+                  {rec.treaty.type_label}
+                </span>
+              )}
+            </div>
+            {/* Three statuses, kept apart (26.3): an expired treaty stays
+                expired however complete its wording and configuration are. */}
+            {rec.treaty.documentation && rec.treaty.configuration && (
+              <div style={{ padding: "0 20px 14px", display: "flex", gap: 18, flexWrap: "wrap" }}>
+                <StatusPill k="Treaty" v={LIFECYCLE_LABEL[rec.lifecycle] ?? rec.lifecycle}
+                  tone={rec.lifecycle === "active" ? "ok" : ["expired", "terminated", "superseded"]
+                    .includes(rec.lifecycle) ? "mut" : "info"} />
+                <StatusPill k="Documentation" v={rec.treaty.documentation.label}
+                  tone={rec.treaty.documentation.status === "received" ? "ok" : "warn"} />
+                <StatusPill k="Configuration" v={rec.treaty.configuration.label}
+                  tone={{ approved: "ok", pending_approval: "info", in_progress: "info",
+                          not_started: "mut" }[rec.treaty.configuration.status] as "ok" | "info" | "mut"} />
+              </div>
+            )}
+          </div>
+        )}
+        {/* ── a master treaty: each reinsurer's line and signature ── */}
+        {isTreaty && rec.treaty?.has_structure && !isBrokerSeat() && (
+          <TreatyPlacementCard contractId={id} canAct={rec.lifecycle !== "terminated"
+            && rec.lifecycle !== "superseded"} onChanged={load} />
+        )}
         {/* ── the signatures ──
             Shown wherever a contract is close to going live or already has,
             because "why is this not live yet" and "who signed this" are the
@@ -1449,7 +1722,9 @@ function ContractRecordView() {
                               g.signed_at && fmtDate(g.signed_at),
                               g.method === "typed"
                                 ? "signed in Kavachio"
-                                : "signed elsewhere, recorded here"]
+                                : g.method === "link"
+                                  ? "signed by them on their private link"
+                                  : "signed elsewhere, recorded here"]
                               .filter(Boolean).join(" · ")}
                           </div>
                         </div>
@@ -1624,7 +1899,7 @@ function ContractRecordView() {
           <div className="card-h">
             <span className={`badge ${st.cls}`}><span className="d" />{st.label}</span>
             <span className="sub">
-              {rec.lifecycle === "draft" ? draftNote : st.note + turnNote}
+              {rec.lifecycle === "draft" ? draftNote : st.note(party) + turnNote}
             </span>
           </div>
           <div style={{ padding: "16px 20px" }}>
@@ -1638,7 +1913,47 @@ function ContractRecordView() {
                 Terminated {fmtDate(rec.terminated_date)} — {rec.termination_reason}
               </div>
             )}
-            {rec.lifecycle === "agreed" && !isUploaded && (
+            {isTreaty && !isBrokerSeat()
+              && ["draft", "agreed", "signed", "active"].includes(rec.lifecycle) && (
+              <div className="note" style={{ marginTop: 0, marginBottom: 10 }}>
+                {rec.lifecycle === "draft" ? (
+                  <><b>Draft — waiting for the reinsurers&apos; approval.</b> Send
+                    it to them with <b>Send to reinsurers for approval</b> (above, or
+                    under{" "}
+                    <span className="linkish" role="button"
+                          onClick={() => setTab("access")}>Reinsurer access</span>)
+                    {" "}— each approves or asks for changes on its private link, and
+                    once every one has approved, the terms are agreed.
+                    {rec.treaty?.approvals && (
+                      <> <b>{rec.treaty.approvals.approved} of {rec.treaty.approvals.total}</b>{" "}
+                        approved so far
+                        {rec.treaty.approvals.changes_requested
+                          ? `, ${rec.treaty.approvals.changes_requested} asked for a change`
+                          : ""}.</>
+                    )}{" "}
+                    Then you sign the treaty for the carrier, and each reinsurer
+                    is emailed it to sign.</>
+                ) : rec.lifecycle === "agreed" ? (
+                  <><b>Every reinsurer approved — terms agreed.</b>{" "}
+                    {rec.unsigned_sides.includes("carrier")
+                      ? "Sign for the carrier first, on the document. "
+                      : "The carrier has signed. "}
+                    Once you sign, each reinsurer is emailed its link with a
+                    one-time code to sign — no Kavachio account needed.</>
+                ) : rec.lifecycle === "signed" ? (
+                  <>You and the lead reinsurer have signed. It is in force once
+                    every reinsurer on the treaty has signed its lines.</>
+                ) : (
+                  <><b>In force.</b> The reinsurers can see their own lines
+                    through a private link.{" "}
+                    <span className="linkish" role="button"
+                          onClick={() => setTab("access")}>
+                      Share it with them →
+                    </span></>
+                )}
+              </div>
+            )}
+            {rec.lifecycle === "agreed" && !isUploaded && !isTreaty && (
               <div className="hint">
                 {rec.whose_turn === "broker"
                   ? "The carrier has signed. The broker signs and returns it, then the carrier activates it."
@@ -1663,14 +1978,19 @@ function ContractRecordView() {
                 bordereau setup for this programme × broker. Setup reads both
                 from the link, so it opens with them already chosen. Carrier
                 only — a broker does not set up bordereaux. */}
+            {/* The same next step for a treaty: its reinsurance bordereau. */}
+            {rec.lifecycle === "active" && !isBrokerSeat() && isTreaty && (
+              <TreatySetupNudge contractId={id} />
+            )}
             {/* Whether this contract's files can be checked against it, and
                 the two ways to set it up when they can't (the server's
                 `checks_setup`). The plain "next: set up" note stays only for a
-                record the server did not answer for. */}
-            {!isBrokerSeat() && rec.checks_setup && (
+                record the server did not answer for. Not for a treaty: its
+                checks come from the reinsurance setup above. */}
+            {!isBrokerSeat() && !isTreaty && rec.checks_setup && (
               <ChecksSetupCard rec={rec} onRecord={r => setRec(r)} onNotice={setNote} />
             )}
-            {rec.lifecycle === "active" && !isBrokerSeat() && !rec.checks_setup
+            {rec.lifecycle === "active" && !isBrokerSeat() && !isTreaty && !rec.checks_setup
               && rec.programme && rec.counterparty && (
               <div className="note" style={{
                 marginTop: 12, display: "flex", gap: 14, flexWrap: "wrap",
@@ -1698,7 +2018,7 @@ function ContractRecordView() {
               <div className="hint">
                 Renews{" "}
                 <Link to={`/contracts/${rec.renews_contract_id}`} className="linkish">
-                  contract {rec.renews_contract_id}
+                  {renewsLabel(rec)}
                 </Link>
               </div>
             )}
@@ -1708,7 +2028,7 @@ function ContractRecordView() {
             {rec.awaiting_signed_copy && !rec.activation && !isBrokerSeat() && (
               <div className="note" style={{ marginTop: 14 }}>
                 <b>Next: attach the signed renewal contract.</b>{" "}
-                Contract {rec.renews_contract_id} was uploaded, so this renewal
+                The contract it renews was uploaded, so this renewal
                 needs no signing in Kavachio. Under <b>Documents</b>, choose{" "}
                 <b>Wording</b>, tick <b>This is the signed copy</b> and attach
                 the PDF — then accept it to make it active.
@@ -1781,7 +2101,7 @@ function ContractRecordView() {
                     ? <>Making it active puts it in force{rec.inception_dt
                         ? ` from ${fmtDate(rec.inception_dt)}` : ""}
                         {rec.renews_contract_id
-                          ? ` and replaces contract ${rec.renews_contract_id}` : ""}.</>
+                          ? ` and replaces ${renewsLabel(rec)}` : ""}.</>
                     : act.blockers.length === 1 ? line(act.blockers[0]) : null}
                   {!ready && act.blockers.length > 1 && (
                     <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
@@ -1872,21 +2192,30 @@ function ContractRecordView() {
                   // flow. It still has to say something true.
                   ? (a.carrier_admin_seat
                       ? "This was sent up to you before it went anywhere. Send "
-                        + "the terms to the broker, accept it as it stands, or "
+                        + `the terms to the ${party}, accept it as it stands, or `
                         + "send it back for a change."
                       : "They read it before it goes any further. They can send "
-                        + "the terms to the broker, accept it, or send it back "
+                        + `the terms to the ${party}, accept it, or send it back `
                         + "to you for a change.")
                   // The authored road, at its one gate: the broker has agreed.
+                  // A treaty's terms are settled by its reinsurers' approval
+                  // or by the carrier itself, so it does not say who agreed.
                   : (a.carrier_admin_seat
-                      ? "The broker has agreed these terms, so nothing is "
+                      ? (isTreaty ? "These terms are settled"
+                                  : "The broker has agreed these terms")
+                        + ", so nothing is "
                         + "moving any more. Read them and sign — a contract "
                         + "becomes active when both sides have signed, and the "
                         + "carrier signs first."
-                      : "The broker has agreed the terms. The carrier "
+                      : (isTreaty ? "The terms are settled"
+                                  : "The broker has agreed the terms")
+                        + ". The carrier "
                         + "signs for the company, so it sits with them now. "
-                        + "Once they have, you can build the bordereau setup "
-                        + "on it.")}
+                        + (isTreaty
+                            ? "Once they have, you can set up its reinsurance "
+                              + "bordereau."
+                            : "Once they have, you can build the bordereau setup "
+                              + "on it."))}
                 </>)}
               </div>
             )}
@@ -1931,7 +2260,7 @@ function ContractRecordView() {
                   <MessagesSquare size={13} />
                   {rec.lifecycle === "changes_requested"
                     ? "Send revised terms"
-                    : "Send to broker for review"}
+                    : `Send to ${party} for review`}
                 </button>
               )}
               {/* The carrier admin's third answer: not yet. Last in the row —
@@ -1949,7 +2278,9 @@ function ContractRecordView() {
               {a.skip_review && !isUploaded && (
                 <button className="btn" type="button" disabled={!!busy}
                         onClick={() => setShowSkip(v => !v)}>
-                  <PenLine size={13} /> Skip the review — sign it now
+                  <PenLine size={13} />{" "}
+                  {isTreaty ? "Settle the terms — sign it now"
+                            : "Skip the review — sign it now"}
                 </button>
               )}
               {a.accept_terms && (
@@ -1988,7 +2319,11 @@ function ContractRecordView() {
                   turn", which is not the same question as "may THIS SEAT
                   sign". A carrier user was shown a live Sign button on an
                   agreed contract and the endpoint behind it 403'd. */}
-              {!isUploaded && canSignHere && (round?.can_sign ? (
+              {/* A treaty is signed from its Treaty approval card ("Sign the
+                  treaty") — one button, not two. Recording a reinsurer's
+                  signature made elsewhere still lives here. */}
+              {(isTreaty ? (a.record_signature && !a.sign) : !isUploaded)
+                && canSignHere && (round?.can_sign && !isTreaty ? (
                 <a className="btn pri" href={inAppSigningUrl(id)}
                    target="_blank" rel="noreferrer">
                   <PenLine size={13} /> Sign the contract
@@ -2104,8 +2439,7 @@ function ContractRecordView() {
                   send it up again — nobody re-raises the contract.
                 </p>
                 <p style={{ margin: "6px 0 0" }}>
-                  Nothing has gone to the {rec.contract_type === "insurer_reinsurer"
-                    ? "reinsurer" : "broker"}, and nothing will until you send
+                  Nothing has gone to the {party}, and nothing will until you send
                   it out yourself.
                 </p>
                 <div className="field" style={{ marginTop: 12, marginBottom: 0 }}>
@@ -2139,8 +2473,7 @@ function ContractRecordView() {
                 <b>Agree these terms without sending them out</b>
                 <p style={{ margin: "6px 0 0" }}>
                   The contract goes straight to signing. The
-                  {" "}{rec.contract_type === "insurer_reinsurer"
-                        ? "reinsurer" : "broker"}{" "}
+                  {" "}{party}{" "}
                   is not asked to read the terms first and gets no chance to
                   push back on them — so this is for a contract with nothing
                   left to agree, or one whose counterparty has no seat in
@@ -2391,7 +2724,7 @@ function ContractRecordView() {
                       + "as it is until the renewal is accepted and active."
                     : "This creates a draft for the next term with this contract's "
                       + "terms and wording copied in. Review and edit it, then send "
-                      + "it to the broker. This contract stays as it is until the "
+                      + `it to the ${party}. This contract stays as it is until the `
                       + "renewal is signed and active."}
                 </p>
                 <div className="grid g-3" style={{ marginTop: 12 }}>
@@ -2589,113 +2922,149 @@ function ContractRecordView() {
             and (for a renewal read from a new PDF) mapping its rules onto the
             programme's existing Bordereau Setup. Nothing here runs on a
             bordereau until the renewal is accepted and active. */}
-        {rec.renews_contract_id && !isBrokerSeat() && (
+        {rec.renews_contract_id && !isBrokerSeat() && (() => {
+          const open = !["active", "expired", "terminated", "superseded"].includes(rec.lifecycle);
+          const ready = isUploaded && rec.has_clauses && !rec.awaiting_read
+            && !rec.awaiting_signed_copy && open;
+          const rc = ruleChanges;
+          const tiles: [string, number, string?][] = rc ? [
+            ["Previous contract", rc.previous_count],
+            ["This renewal", rc.renewal_count],
+            ["Unchanged", rc.unchanged],
+            ["New", rc.added.length, rc.added.length ? "var(--p-ok)" : undefined],
+            ["Changed", rc.changed.length, rc.changed.length ? "var(--p-warn)" : undefined],
+            ["No longer present", rc.removed.length,
+             rc.removed.length ? "var(--p-crit)" : undefined],
+          ] : [];
+          const rows = rc ? [
+            ...rc.changed.map(c => ({ key: `c${c.rule_id}`, name: c.rule_name,
+              badge: "b-warn", label: "Changed",
+              what: [c.settings.join(", "),
+                     c.previous_status !== c.status
+                       ? `was ${c.previous_status}, now ${c.status}` : ""]
+                .filter(Boolean).join(" · ") })),
+            ...rc.added.map(a => ({ key: `a${a.rule_id}`, name: a.rule_name,
+              badge: "b-ok", label: "New", what: "" })),
+            ...rc.removed.map((r, i) => ({ key: `r${i}`, name: r.rule_name,
+              badge: "b-crit", label: "No longer present", what: "" })),
+          ] : [];
+          return (
           <div className="card" style={{ marginBottom: 18 }}>
             <div className="card-h">
-              <h3>Rules for this renewal</h3>
-              <InfoTip text="Compared with the previous contract. These rules check bordereaux only once the renewal is accepted and active." />
-            </div>
-            <div style={{ padding: "16px 20px" }}>
-              <div className="rowacts" style={{ marginTop: 0 }}>
-                <button className="btn" type="button" disabled={!!busy}
+              <h3>
+                Rules for this renewal
+                <InfoTip text="Compared with the previous contract. These rules check bordereaux only once the renewal is accepted and active." />
+              </h3>
+              <div className="right" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <button className="btn sm" type="button" disabled={!!busy}
                   onClick={() => run("rule-changes", async () =>
                     setRuleChanges(await getRenewalRuleChanges(id)))}>
-                  {busy === "rule-changes" ? "Comparing…" : "Show rule changes"}
+                  {busy === "rule-changes" ? "Comparing…" : rc ? "Compare again" : "Show rule changes"}
                 </button>
-                {isUploaded && rec.has_clauses && !rec.awaiting_read && !rec.awaiting_signed_copy
-                  && rec.has_live_setup === false && rec.programme && rec.counterparty
-                  && !["active", "expired", "terminated", "superseded"].includes(rec.lifecycle) && (
-                  <Link className="btn pri"
+                {ready && rec.has_live_setup === false && rec.programme && rec.counterparty && (
+                  <Link className="btn pri sm"
                     to={`/direct/setup?program_id=${rec.programme.id}`
                       + `&broker_party_id=${rec.counterparty.id}`}>
                     Next: go to Bordereau Setup <ArrowRight size={13} />
                   </Link>
                 )}
-                {isUploaded && rec.has_clauses && !rec.awaiting_read && !rec.awaiting_signed_copy
-                  && rec.has_live_setup !== false
-                  && !["active", "expired", "terminated", "superseded"].includes(rec.lifecycle) && (
-                  <button className="btn pri" type="button" disabled={!!busy}
+                {ready && rec.has_live_setup !== false && (
+                  <button className="btn pri sm" type="button" disabled={!!busy}
                     onClick={() => run("reflect", async () =>
                       setRuleChanges(await reflectSetup(id)))}>
                     {busy === "reflect" ? "Working…" : "Reflect new contract rules in BDX setup"}
                   </button>
                 )}
               </div>
-              {isUploaded && !rec.has_clauses && !rec.awaiting_read
-                && !["active", "expired", "terminated", "superseded"].includes(rec.lifecycle) && (
-                <div className="hint" style={{ marginTop: 10 }}>
+            </div>
+            <div style={{ padding: "16px 20px", display: "grid", gap: 12 }}>
+              {!rc && (
+                <div className="sub">
+                  Press <b>Show rule changes</b> to compare this renewal&rsquo;s rules with
+                  the previous contract&rsquo;s.
+                </div>
+              )}
+              {isUploaded && !rec.has_clauses && !rec.awaiting_read && open && (
+                <div className="note warn">
                   No clauses yet, so there are no rules to reflect. Attach the
-                  signed PDF under Documents (Wording, “This is the signed copy”),
+                  signed PDF under Documents (Wording, &ldquo;This is the signed copy&rdquo;),
                   then read it.
                 </div>
               )}
-              {ruleChanges && (
-                <div style={{ marginTop: 12 }}>
-                  {ruleChanges.setup && (
-                    <div className="hint">
-                      Written for the live setup{ruleChanges.setup.name ? ` “${ruleChanges.setup.name}”` : ""};
-                      its templates and column mapping were not changed.
+              {rc && (<>
+                {rc.setup && (
+                  <div className="note ok">
+                    Written for the live setup{rc.setup.name ? ` “${rc.setup.name}”` : ""};
+                    its templates and column mapping were not changed.
+                  </div>
+                )}
+                <div style={{ display: "grid", gap: 10,
+                              gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))" }}>
+                  {tiles.map(([label, n, tone]) => (
+                    <div key={label} style={{ border: "1px solid var(--p-border)", borderRadius: 10,
+                                              padding: "10px 12px", background: "var(--p-surface)" }}>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: tone ?? "var(--p-ink)" }}>{n}</div>
+                      <div className="sub" style={{ fontSize: 12 }}>{label}</div>
                     </div>
-                  )}
-                  <p style={{ margin: "6px 0" }}>
-                    Previous contract: <b>{ruleChanges.previous_count}</b> rules ·
-                    this renewal: <b>{ruleChanges.renewal_count}</b> ·
-                    unchanged <b>{ruleChanges.unchanged}</b> · new <b>{ruleChanges.added.length}</b> ·
-                    no longer present <b>{ruleChanges.removed.length}</b> ·
-                    changed <b>{ruleChanges.changed.length}</b>
-                  </p>
-                  {ruleChanges.margin_note && <div className="note">{ruleChanges.margin_note}</div>}
-                  {(ruleChanges.kept_disabled?.length ?? 0) > 0 && (
-                    <div className="hint">Kept switched off as on the previous contract:{" "}
-                      {ruleChanges.kept_disabled!.join(", ")}</div>
-                  )}
-                  {ruleChanges.dates_to_review.length > 0 && (
-                    <div className="note warn" style={{ marginTop: 10 }}>
-                      <b>Check these rules.</b> They hold dates that are not the
-                      contract's start or end, so they were left as written and
-                      are still active:
-                      <ul style={{ margin: "6px 0 0" }}>
-                        {ruleChanges.dates_to_review.map(r => (
-                          <li key={r.rule_id}>{r.rule_name} — {r.dates.join(", ")}</li>))}
-                      </ul>
-                    </div>
-                  )}
-                  {ruleChanges.uncertain.length > 0 && (
-                    <div className="note warn" style={{ marginTop: 10 }}>
-                      <b>Compare by hand.</b> More than one rule checks the same
-                      column, so they could not be paired:
-                      <ul style={{ margin: "6px 0 0" }}>
-                        {ruleChanges.uncertain.map((u, i) => (
-                          <li key={i}>{String(u.column || u.check || "—")}: previous{" "}
-                            {u.previous.join(", ") || "none"} · renewal {u.renewal.join(", ") || "none"}</li>))}
-                      </ul>
-                    </div>
-                  )}
-                  {ruleChanges.changed.length > 0 && (
-                    <details style={{ marginTop: 10 }}>
-                      <summary>Changed ({ruleChanges.changed.length})</summary>
-                      <ul>{ruleChanges.changed.map(c => (
-                        <li key={c.rule_id}>{c.rule_name}{c.settings.length ? ` — ${c.settings.join(", ")}` : ""}
-                          {c.previous_status !== c.status ? ` (was ${c.previous_status}, now ${c.status})` : ""}</li>))}</ul>
-                    </details>
-                  )}
-                  {ruleChanges.added.length > 0 && (
-                    <details style={{ marginTop: 6 }}>
-                      <summary>New ({ruleChanges.added.length})</summary>
-                      <ul>{ruleChanges.added.map(a => <li key={a.rule_id}>{a.rule_name}</li>)}</ul>
-                    </details>
-                  )}
-                  {ruleChanges.removed.length > 0 && (
-                    <details style={{ marginTop: 6 }}>
-                      <summary>No longer present ({ruleChanges.removed.length})</summary>
-                      <ul>{ruleChanges.removed.map((r, i) => <li key={i}>{r.rule_name}</li>)}</ul>
-                    </details>
-                  )}
+                  ))}
                 </div>
-              )}
+                {rc.margin_note && <div className="note">{rc.margin_note}</div>}
+                {(rc.kept_disabled?.length ?? 0) > 0 && (
+                  <div className="note">
+                    <b>Kept switched off</b>, as on the previous contract:{" "}
+                    {rc.kept_disabled!.join(", ")}
+                  </div>
+                )}
+                {rc.dates_to_review.length > 0 && (
+                  <div className="note warn">
+                    <b>Check these rules.</b> They hold dates that are not the
+                    contract&rsquo;s start or end, so they were left as written and
+                    are still active:
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                      {rc.dates_to_review.map(r => (
+                        <li key={r.rule_id}>{r.rule_name} — {r.dates.join(", ")}</li>))}
+                    </ul>
+                  </div>
+                )}
+                {rc.uncertain.length > 0 && (
+                  <div className="note warn">
+                    <b>Compare by hand.</b> More than one rule checks the same
+                    column, so they could not be paired:
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                      {rc.uncertain.map((u, i) => (
+                        <li key={i}>{String(u.column || u.check || "—")}: previous{" "}
+                          {u.previous.join(", ") || "none"} · renewal {u.renewal.join(", ") || "none"}</li>))}
+                    </ul>
+                  </div>
+                )}
+                {rows.length === 0 ? (
+                  <div className="sub">No rule changed from the previous contract.</div>
+                ) : (
+                  <div className="tbl-wrap" style={{ border: "1px solid var(--p-border)", borderRadius: 10 }}>
+                    <table>
+                      <thead>
+                        <tr><th className="l">Rule</th><th className="l">Change</th>
+                            <th className="l">What changed</th></tr>
+                      </thead>
+                      <tbody>
+                        {rows.map(r => (
+                          <tr key={r.key}>
+                            <td className="l">{r.name}</td>
+                            <td className="l" style={{ whiteSpace: "nowrap" }}>
+                              <span className={`badge ${r.badge}`}><span className="d" />{r.label}</span>
+                            </td>
+                            <td className="l sub">{r.what || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>)}
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* ── renewal history ── Contract PERIODS linked by renewal, oldest
             first, the same from every contract in the chain. Kept apart from
@@ -2793,8 +3162,8 @@ function ContractRecordView() {
                     // belongs.
                     <div className="limgrp" key={g.key}>
                       <div className="limgrp-h">
-                        <div className="sub-h">{g.label}</div>
-                        <div className="hint">{g.sub}</div>
+                        <div className="sub-h">{(isTreaty && g.treaty_label) || g.label}</div>
+                        <div className="hint">{(isTreaty && g.treaty_sub) || g.sub}</div>
                       </div>
                       <div className="limgrp-b">
                       <div className="lim lim-h">
@@ -2808,7 +3177,8 @@ function ContractRecordView() {
                         return (
                           <div className="lim" key={l.name}>
                             <div className="lq">
-                              <b>{l.question}</b><span>{l.sub}</span>
+                              <b>{(isTreaty && l.treaty?.question) || l.question}</b>
+                              <span>{(isTreaty && l.treaty?.sub) || l.sub}</span>
                             </div>
                             <div className={l.kind === "choice" ? "" : "unit"}>
                               {l.choices ? (
@@ -3136,7 +3506,7 @@ function ContractRecordView() {
                           <tr key={g.key}>
                             <td colSpan={3} style={{ textAlign: "left",
                                  background: "var(--p-surface-2)" }}>
-                              <span className="sub-h">{g.label}</span>
+                              <span className="sub-h">{(isTreaty && g.treaty_label) || g.label}</span>
                             </td>
                           </tr>
                           {rows.map(l => {
@@ -3144,8 +3514,8 @@ function ContractRecordView() {
                             return (
                               <tr key={l.name}>
                                 <td>
-                                  <b>{l.question}</b>
-                                  <div className="sub">{l.sub}</div>
+                                  <b>{(isTreaty && l.treaty?.question) || l.question}</b>
+                                  <div className="sub">{(isTreaty && l.treaty?.sub) || l.sub}</div>
                                 </td>
                                 <td className="mono">
                                   {String(e.value)}{l.unit ? ` ${l.unit}` : ""}
@@ -3179,6 +3549,9 @@ function ContractRecordView() {
         </>)}
 
         {curTab === "clauses" && (<>
+        {isTreaty && !isBrokerSeat() && (
+          <TreatyWordingRules contractId={id} clauseCount={clauses?.length ?? 0} onRead={load} />
+        )}
         {/* ── what it says ──
             The clauses of this contract. For one written here they are its
             wording with the terms resolved — a clause row is READ, so it holds
@@ -3283,7 +3656,7 @@ function ContractRecordView() {
                             <span className={`badge ${
                               r.severity === "critical" ? "b-crit" : "b-warn"}`}>
                               <span className="d" />
-                              {r.severity === "critical" ? "Stopped" : "Flagged"}
+                              {r.severity === "critical" ? "Critical" : "Warning"}
                             </span>
                           </td>
                         </tr>
@@ -3593,14 +3966,16 @@ function ContractRecordView() {
             ) : (
               <div style={{ padding: "16px 20px" }}>
                 <div className="note">
-                  <b>This one cannot be shown in the page.</b> It is a Word
-                  document, and no browser renders one — the file has to be
-                  opened in Word or Pages.
-                  {authored && (
-                    <> The good news is you do not need to: this contract was
-                      written here, so the full wording is on this page under{" "}
-                      <b>The wording</b> above — that is the same text this file
-                      contains.</>
+                  <b>This file cannot be shown in the page.</b> It could not be
+                  turned into a PDF to read here —{" "}
+                  <span className="linkish" role="button"
+                        onClick={() => downloadDocument(id, viewing.id, viewing.name)}>
+                    download it</span> to open it.
+                  {/* Only the contract's OWN wording, written here, is the
+                      same text as The wording — never an uploaded endorsement
+                      or reference. */}
+                  {authored && viewing.kind === "contract" && !viewing.signed && (
+                    <> Its text is also on this page under <b>The wording</b>.</>
                   )}
                 </div>
               </div>
@@ -3623,76 +3998,142 @@ function ContractRecordView() {
               <InfoTip text="Files attached to this contract: references the wording relies on, endorsements agreed later, and the signed copy." />
             </div>
             <div style={{ padding: "16px 20px" }}>
+              {/* 26.3 — a treaty is configured from its signed wording. */}
+              {isTreaty && rec.treaty && !isBrokerSeat() && (rec.treaty.wording ? (
+                <div className="note ok" style={{ marginBottom: 12, display: "flex", gap: 10,
+                     alignItems: "center", flexWrap: "wrap" }}>
+                  <span style={{ flex: "1 1 180px" }}>
+                    <b>Signed treaty wording received.</b>{" "}
+                    {rec.treaty.configuration?.terms_confirmed
+                      ? "Its terms have been confirmed."
+                      : "Review its terms before configuring the treaty."}
+                  </span>
+                  <Link className="btn sm pri" to={`/contracts/${id}/wording`}>
+                    <FileText size={12} /> Review Wording &amp; Terms
+                  </Link>
+                </div>
+              ) : (
+                <div className="note warn" style={{ marginBottom: 12 }}>
+                  <b>Signed treaty wording required</b>
+                  <div style={{ margin: "4px 0 8px" }}>
+                    Upload the signed treaty wording before starting treaty configuration.
+                  </div>
+                  {a.upload_documents && !showRenew && (
+                    <button className="btn sm pri" type="button" onClick={() => {
+                      setKind("contract"); setExecutedCopy(true); setUploadOpen(true);
+                      // The form renders first, then its file box is ready.
+                      setTimeout(() => {
+                        uploadRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+                        uploadRef.current?.click();
+                      }, 50);
+                    }}>
+                      <Upload size={12} /> Upload Wording
+                    </button>
+                  )}
+                </div>
+              ))}
               {active.length === 0 ? (
                 <div className="empty" style={{ padding: "12px 10px", textAlign: "left" }}>
                   <b>{documentsEmptyMessage({ authored, filename: rec.filename }).title}</b>
-                  <ul style={{ margin: "6px 0 0", paddingLeft: 18, listStyle: "disc outside" }}>
-                    {documentsEmptyMessage({ authored, filename: rec.filename }).bullets
-                      .map(b => <li key={b} style={{ display: "list-item", listStyle: "disc outside" }}>{b}</li>)}
-                  </ul>
+                  {documentsEmptyMessage({ authored, filename: rec.filename }).bullets.length > 0 && (
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 18, listStyle: "disc outside" }}>
+                      {documentsEmptyMessage({ authored, filename: rec.filename }).bullets
+                        .map(b => <li key={b} style={{ display: "list-item", listStyle: "disc outside" }}>{b}</li>)}
+                    </ul>
+                  )}
                 </div>
               ) : (
-                /* A grid of tiles rather than wide rows: in a side column a
-                   row of name-then-buttons wraps into an unreadable ribbon,
-                   and each document is one thing you act on as a unit. */
-                <div className="doc-grid">
-                {active.map(d => (
-                  <div className="doc-tile" key={d.id}>
-                    <span className="k">
-                      <span className="badge b-mut" style={{ marginRight: 8 }}>
-                        <span className="d" />{DOC_KIND[d.kind]?.label ?? d.kind}
-                      </span>
-                      {d.is_executed_copy && (
-                        <span className="badge b-ok">
-                          <span className="d" />signed copy
-                        </span>
-                      )}
-                      <b className="fn" title={d.filename ?? undefined}>{d.filename}</b>
-                      <div className="sub">
-                        {d.satisfies_reference && <>answers “{d.satisfies_reference}” · </>}
-                        {d.effective_from && <>effective {fmtDate(d.effective_from)} · </>}
-                        attached {fmtStamp(d.created_at)}
+                /* One compact row per document — name, one line of what it
+                   is, its actions as icons — so the card does not grow tall
+                   with every upload. The first few show; the rest behind
+                   "Show all". */
+                <>
+                <div className="doc-list">
+                {(showAllDocs ? sortedDocs : sortedDocs.slice(0, DOCS_SHOWN)).map(d => {
+                  const meta = [docTypeLabel(d, isTreaty), d.version,
+                    d.is_executed_copy ? "signed copy" : null,
+                    d.effective_from ? `effective ${fmtDate(d.effective_from)}` : fmtDate(d.created_at),
+                  ].filter(Boolean).join(" · ");
+                  const unreviewed = isTreaty && d.kind === "endorsement" && !d.endorsement_applied;
+                  const unreadable = d.validation && d.validation.status !== "valid";
+                  return (
+                    <div className="doc-row" key={d.id}>
+                      <FileText size={15} className="doc-ic" />
+                      <div className="doc-main">
+                        <div className="fn" title={d.filename ?? undefined}>{d.filename}</div>
+                        <div className="meta" title={[meta,
+                          d.uploaded_by && `attached by ${d.uploaded_by} ${fmtStamp(d.created_at)}`,
+                          d.satisfies_reference && `answers “${d.satisfies_reference}”`,
+                          d.validation?.label].filter(Boolean).join(" · ")}>
+                          {meta}
+                        </div>
+                        {unreviewed && <div className="flag warn">Not reviewed — its terms are not applied</div>}
+                        {isTreaty && d.kind === "endorsement" && d.endorsement_applied && (
+                          d.endorsement_approval === "approved"
+                            ? <div className="flag warn">Approved by every reinsurer — sign it</div>
+                            : d.endorsement_approval === "carrier_signed"
+                            ? <div className="flag warn">Signed by you — waiting for the reinsurers to sign</div>
+                            : d.endorsement_approval === "in_force"
+                            ? <div className="flag ok">✓ Signed by every reinsurer — in force</div>
+                            : d.endorsement_approval === "pending"
+                              ? <div className="flag warn">Waiting for the reinsurers to approve</div>
+                              : d.endorsement_approval === "changes_requested"
+                                ? <div className="flag crit">A reinsurer asked for changes</div>
+                                : <div className="flag warn">Not sent for approval — not used yet</div>)}
+                        {unreadable && <div className="flag crit">⚠ {d.validation!.label}</div>}
                       </div>
-                    </span>
-                    <span className="acts">
-                      {d.has_file && (
-                        <>
-                          <button
-                            className="btn sm" type="button" disabled={!!busy}
-                            onClick={() => run("view", async () => {
-                              if (viewing) URL.revokeObjectURL(viewing.url);
-                              const { url, type } = await openDocument(id, d.id);
-                              setViewing({ id: d.id, name: d.filename ?? "Document",
-                                           url, type });
-                            })}
-                          >
-                            <Eye size={12} /> View
+                      <div className="doc-acts">
+                        {/* A treaty's endorsement is read for its terms and clauses. */}
+                        {isTreaty && d.kind === "endorsement" && !isBrokerSeat() && (
+                          <Link className={`btn sm ${unreviewed ? "pri" : ""}`}
+                                to={`/contracts/${id}/endorsements/${d.id}`}
+                                title="Review the endorsement's terms and clauses">Review</Link>
+                        )}
+                        {d.has_file && (
+                          <>
+                            <button className="btn sm ghost ic" type="button" disabled={!!busy}
+                                    title="View" aria-label={`View ${d.filename}`}
+                                    onClick={() => run("view", async () => {
+                                      if (viewing) URL.revokeObjectURL(viewing.url);
+                                      const { url, type } = await openDocument(id, d.id);
+                                      setViewing({ id: d.id, name: d.filename ?? "Document",
+                                                   kind: d.kind, signed: d.is_executed_copy,
+                                                   url, type });
+                                    })}>
+                              <Eye size={13} />
+                            </button>
+                            <button className="btn sm ghost ic" type="button" disabled={!!busy}
+                                    title="Download" aria-label={`Download ${d.filename}`}
+                                    onClick={() => run("download", () =>
+                                      downloadDocument(id, d.id, d.filename))}>
+                              <Download size={13} />
+                            </button>
+                          </>
+                        )}
+                        {a.upload_documents && !isBrokerSeat() && (
+                          <button className="btn sm ghost ic" type="button" disabled={!!busy}
+                                  title="Retire it — never deleted, because the active rules were read from it"
+                                  aria-label={`Retire ${d.filename}`}
+                                  onClick={() => run("retire", async () => {
+                                    const r = await deactivateDocument(id, d.id);
+                                    if (r.rules_stale) setRulesStale(true);
+                                  })}>
+                            <Trash2 size={13} />
                           </button>
-                          <button
-                            className="btn sm" type="button" disabled={!!busy}
-                            onClick={() => run("download", () =>
-                              downloadDocument(id, d.id, d.filename))}
-                          >
-                            <Download size={12} /> Download
-                          </button>
-                        </>
-                      )}
-                      {a.upload_documents && !isBrokerSeat() && (
-                        <button
-                          className="btn sm" type="button" disabled={!!busy}
-                          title="Retire it — never deleted, because the active rules were read from it"
-                          onClick={() => run("retire", async () => {
-                            const r = await deactivateDocument(id, d.id);
-                            if (r.rules_stale) setRulesStale(true);
-                          })}
-                        >
-                          <Trash2 size={12} /> Retire
-                        </button>
-                      )}
-                    </span>
-                  </div>
-                ))}
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
                 </div>
+                {sortedDocs.length > DOCS_SHOWN && (
+                  <button className="linkish" type="button" style={{ background: "none", border: 0,
+                          padding: 0, marginTop: 8, cursor: "pointer", fontSize: 12.5 }}
+                          onClick={() => setShowAllDocs(v => !v)}>
+                    {showAllDocs ? "Show fewer" : `Show all ${sortedDocs.length} documents`}
+                  </button>
+                )}
+                </>
               )}
 
               {retired.length > 0 && (
@@ -3721,9 +4162,22 @@ function ContractRecordView() {
                   </div>
                 </>
               )}
-              {a.upload_documents && !showRenew && (
+              {a.upload_documents && !showRenew && !uploadOpen && (
                 <>
                   <div className="divider" />
+                  <button className="btn sm" type="button" onClick={() => setUploadOpen(true)}>
+                    <Upload size={12} /> Upload a document
+                  </button>
+                </>
+              )}
+              {a.upload_documents && !showRenew && uploadOpen && (
+                <>
+                  <div className="divider" />
+                  <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
+                    <b style={{ fontSize: 13 }}>Upload a document</b>
+                    <button className="btn sm ghost" type="button" style={{ marginLeft: "auto" }}
+                            onClick={() => { setUploadOpen(false); setFile(null); }}>Cancel</button>
+                  </div>
                   <div className="grid gap-12" style={{ marginBottom: 12 }}>
                     <div className="field" style={{ marginBottom: 0 }}>
                       <label>Kind</label>
@@ -3760,7 +4214,7 @@ function ContractRecordView() {
 
                     <div className="field" style={{ marginBottom: 0 }}>
                       <label>File</label>
-                      <input type="file"
+                      <input type="file" ref={uploadRef}
                              onChange={e => setFile(e.target.files?.[0] ?? null)} />
                     </div>
                   </div>
@@ -3769,10 +4223,15 @@ function ContractRecordView() {
                     <label className="hint" style={{ display: "block", marginTop: 10 }}>
                       <input
                         type="checkbox" checked={executedCopy}
+                        disabled={signedCopyOnly}
                         onChange={e => setExecutedCopy(e.target.checked)}
                         style={{ marginRight: 6, width: "auto" }}
                       />
-                      This is the signed copy
+                      {isTreaty
+                        ? "This is the signed treaty wording (it is checked when attached)"
+                        : signedCopyOnly
+                          ? "The signed copy the reinsurer sent back"
+                          : "This is the signed copy"}
                     </label>
                   )}
 
@@ -3784,10 +4243,17 @@ function ContractRecordView() {
                     </button>
                     <span className="sub">{DOC_KIND[kind].blurb}</span>
                   </div>
-                  {authored && (
+                  {authored && !isTreaty && (
                     <div className="hint">
                       This contract's wording was written here, not uploaded —
                       change it above rather than attaching a new one.
+                    </div>
+                  )}
+                  {signedCopyOnly && (
+                    <div className="hint">
+                      The wording was written here. Attach under <b>Wording</b>{" "}
+                      only the signed slip or wording the reinsurer returned — it
+                      is what their recorded signature points to.
                     </div>
                   )}
                 </>
@@ -3797,7 +4263,7 @@ function ContractRecordView() {
           )}
 
           {/* ── how it got here ── */}
-          {history.length > 0 && (
+          {timeline.length > 0 && (
             <div className="card">
               <div className="card-h">
                 <h3>History</h3>
@@ -3810,8 +4276,29 @@ function ContractRecordView() {
                   what the card is opened for. */}
               <div style={{ padding: "16px 20px" }}>
                 <ol className="hist">
-                  {history.map((h, i) => (
-                    <li key={i} className={i === history.length - 1 ? "now" : ""}>
+                  {timeline.map((t, i) => t.kind === "access" ? (
+                    // A reinsurer's link activity, in order with the treaty's steps.
+                    <li key={`a${t.e.id}`} className={i === timeline.length - 1 ? "now" : ""}>
+                      <span className="dot" aria-hidden="true" />
+                      <div className="what">
+                        {t.e.party_name ? `${t.e.party_name}: ` : ""}
+                        {ACCESS_EVENT_LABEL[t.e.type] ?? t.e.type.replace(/_/g, " ")}
+                        {t.n > 1 && <span className="sub"> ×{t.n}</span>}
+                      </div>
+                      <div className="when">
+                        {fmtStamp(t.e.at)}
+                        {t.e.who && <> · {t.e.who}</>}
+                        {(t.e.type === "sent" || t.e.type === "sign_requested" || t.e.type === "revoked")
+                          && t.e.actor && <> · by {t.e.actor}</>}
+                        {t.e.ip && !isLoopback(t.e.ip) && <> · from {t.e.ip}</>}
+                      </div>
+                      {t.e.type === "downloaded" && t.e.detail?.filename
+                        ? <div className="said">{String(t.e.detail.filename)}</div> : null}
+                      {t.e.type === "changes_requested" && t.e.detail?.note
+                        ? <div className="said">“{String(t.e.detail.note)}”</div> : null}
+                    </li>
+                  ) : ((h: ApprovalEvent) => (
+                    <li key={i} className={i === timeline.length - 1 ? "now" : ""}>
                       <span className="dot" aria-hidden="true" />
                       <div className="what">
                         {HISTORY_ACTION[h.action] ?? h.action.replace(/_/g, " ")}
@@ -3866,7 +4353,7 @@ function ContractRecordView() {
                         </div>
                       ))}
                     </li>
-                  ))}
+                  ))(t.h))}
                 </ol>
               </div>
             </div>

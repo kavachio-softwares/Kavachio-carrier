@@ -1,13 +1,12 @@
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { TipBody } from "./tipText";
 
-// Matches the CSS width below — used to clamp the bubble inside the viewport
-// without needing a post-render measurement pass.
-const BUBBLE_WIDTH = 230;
-// Headroom (px) required above the icon to place the bubble there; below
-// this the bubble flips underneath the icon instead. Comfortably covers this
-// component's short hint-text bubbles (worst case ~4 lines ≈ 90px tall).
-const FLIP_THRESHOLD = 140;
+// The bubble sizes to its text: a short note stays compact, a longer one wraps
+// at BUBBLE_MAX (kept in step with max-width in proto.css). It is measured
+// once drawn, so it is clamped by its REAL width and height, never a guess.
+const BUBBLE_MAX = 340;
+const GAP = 9;  // between the icon and the bubble
 const EDGE = 8; // min gap kept from the viewport's left/right/top/bottom edges
 
 // Small "i" icon that reveals a floating tooltip bubble on hover/focus.
@@ -28,18 +27,31 @@ const EDGE = 8; // min gap kept from the viewport's left/right/top/bottom edges
 // right edge either.
 export function InfoTip({ text }: { text: string }) {
   const ref = useRef<HTMLSpanElement>(null);
-  const [pos, setPos] = useState<{ top: number; left: number; placement: "above" | "below" } | null>(null);
+  const bubble = useRef<HTMLSpanElement>(null);
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; arrow: number; placement: "above" | "below" } | null>(null);
 
   function show() {
     const r = ref.current?.getBoundingClientRect();
-    if (!r) return;
-    const placement: "above" | "below" = r.top < FLIP_THRESHOLD ? "below" : "above";
-    const half = BUBBLE_WIDTH / 2;
-    const center = r.left + r.width / 2;
-    const left = Math.min(Math.max(center, half + EDGE), window.innerWidth - EDGE - half);
-    setPos({ top: placement === "above" ? r.top : r.bottom, left, placement });
+    if (r) setAnchor(r);
   }
-  function hide() { setPos(null); }
+  function hide() { setAnchor(null); setPos(null); }
+
+  // Place the bubble from its measured size: above the icon when it fits,
+  // otherwise below; centred on the icon but never past either edge.
+  useLayoutEffect(() => {
+    const b = bubble.current;
+    if (!anchor || !b) return;
+    const w = Math.min(b.offsetWidth || BUBBLE_MAX, window.innerWidth - 2 * EDGE);
+    const h = b.offsetHeight;
+    const placement: "above" | "below" = anchor.top - GAP - h >= EDGE ? "above" : "below";
+    const half = w / 2;
+    const center = anchor.left + anchor.width / 2;
+    const left = Math.min(Math.max(center, half + EDGE), window.innerWidth - EDGE - half);
+    // The arrow points at the icon, not the bubble's middle, once clamped.
+    const arrow = Math.min(Math.max(center - (left - half), 12), w - 12);
+    setPos({ top: placement === "above" ? anchor.top : anchor.bottom, left, arrow, placement });
+  }, [anchor, text]);
 
   return (
     <span ref={ref} className="info-tip" tabIndex={0}
@@ -49,15 +61,17 @@ export function InfoTip({ text }: { text: string }) {
         <path d="M8 7.2v4.3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
         <circle cx="8" cy="4.7" r="0.9" fill="currentColor" />
       </svg>
-      {pos && createPortal(
-        <span className="info-tip-bubble" role="tooltip" data-placement={pos.placement}
-          style={{
+      {anchor && createPortal(
+        <span ref={bubble} className="info-tip-bubble" role="tooltip"
+          data-placement={pos?.placement ?? "above"}
+          style={pos ? {
             top: pos.top, left: pos.left,
+            ["--tip-arrow" as string]: `${pos.arrow}px`,
             transform: pos.placement === "above"
-              ? "translate(-50%, -100%) translateY(-9px)"
-              : "translate(-50%, 0) translateY(9px)",
-          }}>
-          {text}
+              ? `translate(-50%, -100%) translateY(-${GAP}px)`
+              : `translate(-50%, 0) translateY(${GAP}px)`,
+          } : { top: 0, left: 0, visibility: "hidden" }}>
+          <TipBody text={text} />
         </span>,
         document.body,
       )}

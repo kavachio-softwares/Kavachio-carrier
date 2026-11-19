@@ -366,7 +366,7 @@ export default function FixLink() {
               <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                 <span style={{ fontSize: 20, fontWeight: 600 }}>{p.fixed} of {p.total}</span>
                 <span style={{ fontSize: 13, color: "var(--p-muted)" }}>exceptions resolved</span>
-                <InfoTip text={`Counted from version 1. Resolve the highlighted cells, then submit them as version ${nextVersion}. You can also send a corrected file through your usual channel — it is matched to this one automatically.`} />
+                <InfoTip text={`Counted from version 1. Fix the highlighted cells and submit them as version ${nextVersion}, or send a corrected file through your usual channel.`} />
               </div>
               <div style={{ marginTop: 10, height: 6, borderRadius: 99, background: "var(--p-border)", overflow: "hidden" }}>
                 <div style={{ width: `${pct}%`, height: "100%", background: "var(--p-primary)", borderRadius: 99,

@@ -74,10 +74,7 @@ export default function BrokerExceptions() {
                 ? `, ${data!.replaced!.open.toLocaleString()} exception${data!.replaced!.open === 1 ? "" : "s"} still open`
                 : ""}.
             </span>
-            <InfoTip text={"When a contract is replaced, its files are kept for audit. Once the "
-              + "new contract has a file for the same month, the old file's exceptions are no "
-              + "longer yours to work, so they are left out of these numbers. You can still open "
-              + "those files from Processed Files."} />
+            <InfoTip text={"A replaced contract's files are kept for audit. Once the new contract has a file for that month, the old file's exceptions are left out of these numbers."} />
             <Link className="linkish" to="/broker/runs">Processed Files →</Link>
           </div>
         )}

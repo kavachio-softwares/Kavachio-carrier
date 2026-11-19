@@ -19,7 +19,7 @@ from types import SimpleNamespace
 # would turn every later database test read-only. Nothing below reaches the
 # database — ai_cache is replaced by the `cache` fixture.
 # gemini_service builds its client at import and refuses to without a key.
-os.environ.setdefault("GEMINI_API_KEY", "test-key")
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-key")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pytest
@@ -68,7 +68,7 @@ def answer_for(cols):
 @pytest.fixture(autouse=True)
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("KAVACHIO_DECISION_LOG", str(tmp_path / "decisions.log"))
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-key")
     for k in ("KAVACHIO_AI_CACHE", "KAVACHIO_AI_CACHE_COLUMN_CANDIDATES",
               "KAVACHIO_AI_CACHE_CONTRACT_FIELDS", "KAVACHIO_MODEL_COLUMN_MAPPING",
               "KAVACHIO_MODEL_CONTRACT_FIELDS", "KAVACHIO_CONTRACT_FIELDS_MODEL",

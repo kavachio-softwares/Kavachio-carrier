@@ -49,7 +49,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
-os.environ.setdefault("GEMINI_API_KEY", "test-key-not-used")
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-key-not-used")
 # The value-driven deriver is OFF in production (see derive_verified_rate_formulas):
 # across the whole template estate it proposes far more than anyone reviewed. The
 # tests that exercise it opt in here; `test_the_pass_is_off_unless_asked_for`

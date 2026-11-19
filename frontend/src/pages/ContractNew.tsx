@@ -26,12 +26,22 @@
  * Nothing is written until the last step. A programme or broker created inline
  * is the exception, and says so: those are shared things.
  */
+import {
+  DEFAULT_PROFIT, DEFAULT_SCALE, ProfitCommissionEditor, SlidingScaleEditor, profitText, scaleText,
+} from "../components/treaty/CommissionEditors";
+import type { ProfitCommission, SlidingScale } from "../api/treaty";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Check, Download, FileText, PenLine, Plus, Trash2 } from "lucide-react";
 import { canAccessPath } from "../access";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import AddContractModal from "../components/AddContractModal";
+import { UploadTreatyModal } from "../components/treaty/UploadTreatyModal";
+import {
+  EMPTY_TREATY, TreatyEditor, firstTreatyError, treatyForSave,
+} from "../components/treaty/TreatyEditor";
+import {
+  getTreaty, getTreatyTypes, type TreatyInput, type TreatyTypeSpec, approvalNotice, type ApprovalSent } from "../api/treaty";
 import { FLOW_PARAM, ProgrammeFlowBar } from "../components/ProgrammeFlowBar";
 import { SubSteps } from "../components/FlowStepper";
 import { InfoTip } from "../components/InfoTip";
@@ -45,6 +55,7 @@ import {
   chipEdits, readTermMove, restoreChips, type TermMove,
 } from "../utils/wordingEdits";
 import { currentMga, getTenantBrand } from "../auth";
+import { counterpartyWord } from "../utils/counterparty";
 import {
   createContract, createEndorsement, downloadDraft, fieldErrors, getContract,
   getContractTypes, getCounterparties, listContracts, previewEndorsement,
@@ -112,8 +123,8 @@ export default function ContractNew() {
   const [kind, setKind] = useState<string>("new");
 
   const [specs, setSpecs] = useState<ContractTypeSpec[] | null>(null);
-  const [limitSpec, setLimitSpec] = useState<AgreedLimitSpec[]>([]);
-  const [limitGroups, setLimitGroups] = useState<LimitGroup[]>([]);
+  const [allLimits, setLimitSpec] = useState<AgreedLimitSpec[]>([]);
+  const [allGroups, setLimitGroups] = useState<LimitGroup[]>([]);
   const [termSpec, setTermSpec] = useState<TermSpec | null>(null);
   // What a signature block may contain, and what this contract's will. Both
   // come from the SERVER — the vocabulary so the form cannot offer a line the
@@ -129,7 +140,21 @@ export default function ContractNew() {
   const sevLabel = (k?: string | null) =>
     sevSpec.find(x => x.key === k)?.label ?? k ?? "—";
   const [sigLayout, setSigLayout] = useState<SignatureLayout | null>(null);
-  const [typeKey, setTypeKey] = useState("");
+  // ?type=insurer_reinsurer arrives from the Treaties list and a programme's
+  // Reinsurance page, so "Raise a treaty" opens on the treaty already.
+  const [typeKey, setTypeKey] = useState(params.get("type") ?? "");
+  // A treaty asks only the limits a treaty has, worded for a reinsurer — and
+  // checks them on its reinsurance bordereau, not on the brokers' files.
+  const treatyLimits = typeKey === "insurer_reinsurer";
+  const limitSpec = useMemo(() => !treatyLimits ? allLimits
+    : allLimits.filter(l => l.treaty).map(l => ({
+        ...l, question: l.treaty!.question, sub: l.treaty!.sub,
+        checkable: l.treaty!.checkable, common: l.treaty!.common,
+        default_severity: l.treaty!.checkable ? l.default_severity : null })),
+    [allLimits, treatyLimits]);
+  const limitGroups = useMemo(() => !treatyLimits ? allGroups
+    : allGroups.map(g => ({ ...g, label: g.treaty_label ?? g.label, sub: g.treaty_sub ?? g.sub })),
+    [allGroups, treatyLimits]);
 
   const [programmes, setProgrammes] = useState<HierarchyProgramme[]>([]);
   const [programId, setProgramId] = useState(params.get("program_id") ?? "");
@@ -146,6 +171,17 @@ export default function ContractNew() {
 
   const [values, setValues] = useState<Record<string, string>>({});
   const [limits, setLimits] = useState<AgreedLimits>({});
+
+  // A reinsurance treaty's structure (Phase 26) — only asked for when the type
+  // is insurer ↔ reinsurer. Its form is built from the server's treaty spec.
+  const [treatyTypes, setTreatyTypes] = useState<TreatyTypeSpec[] | null>(null);
+  const [treaty, setTreaty] = useState<TreatyInput>(EMPTY_TREATY);
+  // Programmes the treaty protects besides the one it is raised on.
+  const [treatyProgs, setTreatyProgs] = useState<number[]>([]);
+  const [treatyErrors, setTreatyErrors] = useState<Record<string, string>>({});
+  useEffect(() => {
+    getTreatyTypes().then(setTreatyTypes).catch(() => setTreatyTypes([]));
+  }, []);
 
   const [sections, setSections] = useState<WordingSection[] | null>(null);
   const [activeSection, setActiveSection] = useState(0);
@@ -176,6 +212,17 @@ export default function ContractNew() {
   const [endorseId, setEndorseId] = useState("");
   const [endorsable, setEndorsable] = useState<ContractRecordT[]>([]);
   const [endorseFrom, setEndorseFrom] = useState("");
+  // A treaty's calculation terms the endorsement changes: "term:layer" → new value.
+  const [endorseBasis, setEndorseBasis] = useState<Record<string, string>>({});
+  // The sliding-scale and profit commission an endorsement replaces, as their
+  // own small structures: "term:layer" → the new terms.
+  const [endorseComm, setEndorseComm] = useState<Record<string, SlidingScale | ProfitCommission>>({});
+  const basisMoves: { term: string; layer: number | null; value: unknown }[] = [
+    ...Object.entries(endorseBasis).filter(([, v]) => v.trim() !== "")
+      .map(([k, v]) => ({ k, value: Number(v) as unknown })),
+    ...Object.entries(endorseComm).map(([k, v]) => ({ k, value: v as unknown })),
+  ].map(({ k, value }) => { const [term, layer] = k.split(":");
+    return { term, layer: layer === "" ? null : Number(layer), value }; });
   const [endorseNote, setEndorseNote] = useState("");
   const [endorsePv, setEndorsePv] = useState<EndorsementPreview | null>(null);
 
@@ -193,7 +240,11 @@ export default function ContractNew() {
   /** What a chip is called in the toolbar and in its tooltip. The limits use
    *  the plain-English question from step 1; the handful that are not limits
    *  (the parties, the term) are named here. */
-  const tokenLabels = useMemo(() => wordingTokenLabels(limitSpec), [limitSpec]);
+  const tokenLabels = useMemo((): Record<string, string> => ({
+    ...wordingTokenLabels(limitSpec),
+    // A treaty's counterparty is its lead reinsurer, not a broker.
+    ...(typeKey === "insurer_reinsurer" ? { counterparty_name: "Lead reinsurer" } : {}),
+  }), [limitSpec, typeKey]);
 
   useEffect(() => {
     getContractTypes()
@@ -255,9 +306,10 @@ export default function ContractNew() {
     try {
       setEndorsePv(await previewEndorsement(Number(endorseId), {
         agreed_limits: limits, effective_from: endorseFrom || null,
-        note: endorseNote || null }));
+        note: endorseNote || null, basis: basisMoves }));
     } catch (e) { setMessage(fieldErrors(e).message); }
-  }, [endorseId, limits, endorseFrom, endorseNote]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endorseId, limits, endorseFrom, endorseNote, JSON.stringify(basisMoves)]);
 
   useEffect(() => {
     if (kind !== "endorse" || !endorseId) return;
@@ -272,7 +324,7 @@ export default function ContractNew() {
     try {
       const r = await createEndorsement(Number(endorseId), {
         agreed_limits: limits, effective_from: endorseFrom || null,
-        note: endorseNote || null, sections: endorsePv?.sections });
+        note: endorseNote || null, sections: endorsePv?.sections, basis: basisMoves });
       nav(`/contracts/${r.id}`, { state: { notice:
         `Endorsement ${r.endorsement.number} attached. The wording and the `
         + `endorsement are both active — re-read the contract to rebuild its `
@@ -309,6 +361,16 @@ export default function ContractNew() {
           ? String(prior.notice_period_days) : (v.notice_period_days ?? ""),
       }));
       if (prior.agreed_limits) setLimits(prior.agreed_limits);
+      // A treaty brings its structure and programmes: the same markets on the
+      // same layers is the ordinary renewal, so the carrier edits what moved.
+      if (prior.contract_type === "insurer_reinsurer") {
+        const t = await getTreaty(prior.id).catch(() => null);
+        if (t?.structure) {
+          setTreaty({ treaty_type: t.structure.treaty_type,
+                      terms: t.structure.terms, layers: t.structure.layers });
+        }
+        if (t) setTreatyProgs(t.programmes.filter(p => !p.is_home).map(p => p.id));
+      }
       // Its wording too, so the broker reads the same document with new numbers.
       if (prior.wording_sections?.length) {
         setSections(prior.wording_sections);
@@ -375,6 +437,19 @@ export default function ContractNew() {
   // reinsurer has no such gate, so making it wait for a programme would be a
   // condition the server does not impose.
   const gatedOnProgramme = spec?.counterparty_must_be_on_programme ?? true;
+  const isTreaty = typeKey === "insurer_reinsurer";
+  // The other side in words: "reinsurer" on a treaty, else "broker".
+  const party = counterpartyWord(typeKey);
+  // ON A TREATY THE PANEL NAMES THE REINSURER. The lead — the starred share
+  // on the first layer — is who the contract is with, so The basics does not
+  // ask for it separately: two pickers for one fact drift apart, and a
+  // reinsurer not yet on file could only be added in the panel anyway.
+  const treatyLead = treaty.layers[0]?.shares.find(sh => sh.is_lead)
+    ?.reinsurer_party_id ?? null;
+  useEffect(() => {
+    if (!isTreaty) return;
+    setBrokerId(treatyLead != null ? String(treatyLead) : "");
+  }, [isTreaty, treatyLead]);
   const counterpartyLabel = spec?.counterparty_label ?? "Counterparty";
 
   useEffect(() => {
@@ -511,11 +586,14 @@ export default function ContractNew() {
     // Sections and terms deleted here, so the server's top-up leaves them out.
     dropped_sections: dropped.sections,
     dropped_terms: dropped.terms,
+    // A treaty's clauses are written from its structure, so the wording a
+    // carrier reads on step 2 already states the layers and the cession.
+    treaty: isTreaty && treaty.treaty_type ? treatyForSave(treaty) : null,
     // No `signers`: nobody is named at this step any more, so the draft prints
     // the two unnamed blocks — "For the Carrier" over a ruled line — which is
     // what an unsigned contract looks like on paper anyway.
   }), [typeKey, values, limits, carrierName, counterparty, programme,
-       sigLayout, dropped]);
+       sigLayout, dropped, isTreaty, treaty]);
 
   /** The document the signature blocks are dragged onto, on step 4.
    *
@@ -560,7 +638,7 @@ export default function ContractNew() {
       desc: "The lines printed under each signature on the document." },
     { heading: "How the two blocks sit on the page",
       desc: "Kavachio can place them for you, or you can drop them where your "
-            + "broker's lawyers want them." },
+            + `${party}'s lawyers want them.` },
     { heading: "What you are about to create",
       desc: "None of the three ways to finish makes the contract active: both "
             + "signatures do that, on its own signature page." },
@@ -747,13 +825,18 @@ export default function ContractNew() {
     const out: string[] = [];
     if (!programId) out.push("Choose the programme this contract sits on.");
     if (!brokerId && spec) {
-      out.push(`Choose the ${spec.counterparty_label.toLowerCase()} this `
-               + `contract is with.`);
+      out.push(isTreaty
+        ? "Star the lead reinsurer on the first layer under Treaty structure."
+        : `Choose the ${spec.counterparty_label.toLowerCase()} this `
+          + `contract is with.`);
     }
     for (const f of basicFields) {
       if (f.required && !(values[f.name] ?? "").trim()) {
         out.push(`${f.label} is required.`);
       }
+    }
+    if (isTreaty && !treaty.treaty_type) {
+      out.push("Pick the treaty type under Treaty structure.");
     }
     return out;
   }
@@ -764,9 +847,9 @@ export default function ContractNew() {
       if (gaps.length) {
         setTouched(true);
         setMessage(gaps[0]);
-        // Everything `missing()` names lives in The basics, so open it rather
-        // than leaving the message pointing at a panel that is not on screen.
-        setSec("basics");
+        // Open the section the first gap lives in, rather than leaving the
+        // message pointing at a panel that is not on screen.
+        setSec(gaps[0].includes("Treaty structure") ? "treaty" : "basics");
         return;
       }
     }
@@ -827,6 +910,10 @@ export default function ContractNew() {
         dropped_sections: dropped.sections,
         dropped_terms: dropped.terms,
         create_as: mode === "sign" ? "draft" : mode,
+        ...(isTreaty ? {
+          treaty: treaty.treaty_type ? treatyForSave(treaty) : null,
+          program_ids: treatyProgs,
+        } : {}),
       } as never);
       if (mode === "sign") {
         // The draft is SAVED at this point. If settling the terms is refused —
@@ -849,9 +936,23 @@ export default function ContractNew() {
         }
         return;
       }
-      nav(`/contracts/${created.id}`);
+      nav(`/contracts/${created.id}`, isTreaty
+        ? { state: approvalNotice((created as { approval_sent?: ApprovalSent }).approval_sent) }
+        : undefined);
     } catch (err) {
       const { message: m, errors: fe } = fieldErrors(err);
+      // The treaty structure's own objections point at its own boxes, so they
+      // go to the editor and the carrier is taken to it.
+      const tKeys = Object.keys(fe).filter(k =>
+        k === "treaty_type" || k === "layers" || k.startsWith("terms.")
+        || k.startsWith("layers."));
+      if (tKeys.length) {
+        setTreatyErrors(fe as Record<string, string>);
+        setMessage(`${m} ${firstTreatyError(fe as Record<string, string>) ?? ""}`.trim());
+        setStep(0);
+        setSec("treaty");
+        return;
+      }
       // Name the fields in the message. The server's own sentence says only
       // that something is missing, which is no use on step 4 where none of
       // those inputs are on screen.
@@ -881,7 +982,9 @@ export default function ContractNew() {
   const [showAllLimits, setShowAllLimits] = useState(false);
   // Which section of step 1 is open. The step asks exactly what it always
   // asked — the one long card is cut into panels and the rail picks one.
-  const [sec, setSec] = useState("start");
+  // Opens on "Who is it with?", the first section of a new contract. An
+  // endorsement has no such section, and the rail falls back to its first.
+  const [sec, setSec] = useState("with");
   const [showMoreBasics, setShowMoreBasics] = useState(false);
   const [openBecomes, setOpenBecomes] = useState<string | null>(null);
 
@@ -974,7 +1077,7 @@ export default function ContractNew() {
             <b>In the contract:</b> the clause quoting{" "}
             <span className="term">{preview?.tokens[l.name]}</span>
             <span className="arrow">→</span>
-            <b>On every row:</b>{" "}
+            <b>{treatyLimits ? "On every reinsurance bordereau row:" : "On every row:"}</b>{" "}
             <span className="mono">{becomes.expression}</span>
             <span className="arrow">→</span>
             <span className={`badge ${becomes.severity === "critical" ? "b-crit" : "b-warn"}`}>
@@ -997,7 +1100,7 @@ export default function ContractNew() {
     { key: "sum", heading: "Summary",
       desc: "What this contract adds up to, before you read it." },
     { key: "doc", heading: "The document",
-      desc: "Exactly what the broker will open, with every live value filled in." },
+      desc: `Exactly what the ${party} will open, with every live value filled in.` },
     { key: "checks", heading: "Rules to be set up",
       desc: "From the moment both parties sign. These do nothing until the "
             + "contract is created and active — a draft never checks anything." },
@@ -1030,7 +1133,7 @@ export default function ContractNew() {
         )}
         <div className="fh">
           What are you making?
-          <InfoTip text="They end in different places, so this is the first question." />
+          <InfoTip text="A broker contract and a reinsurance treaty are set up, approved and signed differently, so choose this first." />
         </div>
         <div className="startpick">
           {KINDS.map(k => (
@@ -1047,7 +1150,7 @@ export default function ContractNew() {
           <div className="note" style={{ marginTop: 12 }}>
             <b>Which contract is this the renewal of?</b>
             <p style={{ margin: "4px 0 10px" }}>
-              Its terms, limits and wording come across so the broker only
+              Its terms, limits and wording come across so the {party} only
               reads the numbers that moved. Last year's contract is not
               touched — everything already checked against it keeps its
               meaning.
@@ -1135,7 +1238,7 @@ export default function ContractNew() {
               <>
                 <div className="fh">
                   The contract you are changing
-                  <InfoTip text="None of this moves — an endorsement changes terms, not parties." />
+                  <InfoTip text="An endorsement changes only terms. It can't change who the contract is with or its programme; for that, create a new contract." />
                 </div>
                 <div className="grid g-3" style={{ marginBottom: 18 }}>
                   <div className="field" style={{ marginBottom: 0 }}>
@@ -1172,7 +1275,7 @@ export default function ContractNew() {
             rearrange themselves. */}
         <div className="fh">
           Who is it with?
-          <InfoTip text="This decides what the contract has to state." />
+          <InfoTip text="The type of party (broker or reinsurer) decides which terms and clauses the contract needs." />
         </div>
         {/* Two across, not the three the class assumes: there are two
             types, and a trailing empty column reads as a missing option. */}
@@ -1215,7 +1318,10 @@ export default function ContractNew() {
             <label>Programme</label>
             <select
               value={programId}
-              onChange={e => { setProgramId(e.target.value); setBrokerId(""); }}
+              // A broker must be on the programme, so changing it clears the
+              // broker. A treaty's lead comes from its panel and is kept.
+              onChange={e => { setProgramId(e.target.value);
+                               if (!isTreaty) setBrokerId(""); }}
               style={touched && !programId
                 ? { borderColor: "var(--p-crit)" } : undefined}
             >
@@ -1226,6 +1332,13 @@ export default function ContractNew() {
             </select>
 
           </div>
+          {isTreaty ? (
+          <div className="field">
+            <label>Lead reinsurer</label>
+            <input className="ro" readOnly
+                   value={counterparty?.name ?? "Star one in Treaty structure"} />
+          </div>
+          ) : (
           <div className="field">
             <label>{counterpartyLabel}</label>
             <select
@@ -1245,6 +1358,7 @@ export default function ContractNew() {
             </select>
 
           </div>
+          )}
         </div>
 
 
@@ -1284,15 +1398,50 @@ export default function ContractNew() {
         )}
     </>
   );
+  const secTreaty = (
+    <>
+      <div className="fh">
+        Treaty structure
+        <InfoTip text={"The kind of treaty, its layers, and which reinsurers "
+          + "hold what share. Its clauses are written into the wording from "
+          + "this, so the two always agree."} />
+      </div>
+      <div className="note" style={{ marginBottom: 14 }}>
+        Add the reinsurers on each layer and <b>star the lead</b> on the first
+        layer — the treaty is with them. A reinsurer not on file yet can be
+        added from the panel.
+      </div>
+      <TreatyEditor
+        value={treaty}
+        onChange={v => { setTreaty(v); setTreatyErrors({}); }}
+        types={treatyTypes}
+        reinsurers={(counterparties ?? []).map(c => ({ id: c.id, name: c.name }))}
+        onReinsurerAdded={r => setCounterparties(list => [...(list ?? []),
+          { id: r.id, name: r.name, party_type: "reinsurer" }])}
+        errors={treatyErrors}
+        showErrors={touched}
+        programmes={{
+          all: programmes.map(p => ({ id: p.id, name: p.name })),
+          selected: treatyProgs,
+          homeId: programId ? Number(programId) : null,
+          onChange: setTreatyProgs,
+        }}
+      />
+    </>
+  );
   const limitsHead = (
     <>
         <div className="fh">
-          {kind === "endorse" ? "The terms — change what moved" : "The limits you agreed"}
+          {kind === "endorse" ? "The terms — change what moved"
+            : treatyLimits ? "The limits of the treaty" : "The limits you agreed"}
           <InfoTip text={kind === "endorse"
             ? "These are its current terms — edit the ones the "
               + "endorsement changes and leave the rest alone."
-            : "Each line becomes a clause in the contract and a check "
-              + "that runs on every file the broker sends."} />
+            : treatyLimits
+              ? "Each line becomes a clause in the treaty. Cover and per-risk "
+                + "limits are also checked on every reinsurance bordereau."
+              : "Each line becomes a clause in the contract and a check "
+                + "that runs on every file the broker sends."} />
         </div>
     </>
   );
@@ -1308,7 +1457,9 @@ export default function ContractNew() {
                 ? "Show fewer"
                 : `＋ ${hiddenCount} more you can set`}
             </button>
-            <InfoTip text="Brokerage, profit commission, settlement, tax — leave them out and the contract simply does not mention them." />
+            <InfoTip text={treatyLimits
+              ? "The referral limit, settlement and tax — leave them out and the treaty simply does not mention them."
+              : "Brokerage, profit commission, settlement, tax — leave them out and the contract simply does not mention them."} />
           </div>
         )}
     </>
@@ -1321,18 +1472,16 @@ export default function ContractNew() {
         <div style={{ display: "flex", alignItems: "center" }}>
           <span className="badge b-ok" style={{ flex: "0 0 auto" }}>
             <span className="d" />
-            {preview?.checks.length
+            {/* A treaty's limits are checked on its reinsurance bordereau, so
+                they are counted from the treaty's own list, not the broker
+                preview's checks. */}
+            {(treatyLimits ? undefined : preview?.checks.length)
               ?? (Object.entries(limits).filter(([k]) =>
                     limitSpec.find(l => l.name === k)?.checkable).length
                   + (values.inception_dt && values.expiry_dt ? 1 : 0))}{" "}
             checks
           </span>
-          <InfoTip text={"One for each limit above that a spreadsheet can be "
-            + "measured against, plus one from the dates — a risk that "
-            + "starts outside the contract term is not covered by it. "
-            + "Because you typed these numbers rather than us reading "
-            + "them out of somebody else's PDF, every one of them can be "
-            + "checked automatically."} />
+          <InfoTip text={"One check for each limit above that a bordereau can be measured against, plus one for the dates: a risk starting outside the contract term is not covered."} />
         </div>
         </>
         )}
@@ -1463,7 +1612,7 @@ export default function ContractNew() {
 
   /* What the rail lists, in the order the card used to run. The counts are
      read off the answers already in state — nothing new is stored. */
-  const basicsShort = (programId ? 0 : 1) + (brokerId || !spec ? 0 : 1)
+  const basicsShort = (programId ? 0 : 1) + (brokerId || !spec || isTreaty ? 0 : 1)
     + basicFields.filter(f => f.required && !(values[f.name] ?? "").trim()).length;
   const limitsSet = (key: string) =>
     limitSpec.filter(l => l.group === key && limits[l.name] !== undefined).length;
@@ -1493,27 +1642,109 @@ export default function ContractNew() {
       done: limitsSet(g.key) > 0, short: false,
       body: <>{limitsHead}{limitPanel(g)}{limitsFold}</>,
     })),
+    // A treaty: the calculation basis it changes, from its effective date.
+    ...(endorsePv?.basis?.length ? [{
+      key: "basis", label: "Calculation basis",
+      meta: basisMoves.length ? `${basisMoves.length} changed` : "Unchanged",
+      done: basisMoves.length > 0, short: false,
+      body: (
+        <>
+          <div className="fh">
+            The calculation basis — change what moved
+            <InfoTip text="Each term you change applies from this endorsement's effective date. Earlier statements keep the terms they were worked out with." />
+          </div>
+          <div className="hint" style={{ marginBottom: 10 }}>
+            Applies from {endorseFrom || "the endorsement's effective date (set it on “What this endorsement says”)"}.
+            Leave a term empty to keep it as it is.
+          </div>
+          <div className="tbl-wrap">
+            <table className="panel-tbl" style={{ textAlign: "left" }}>
+              <thead><tr><th>Term</th><th>In force{endorseFrom ? ` on ${endorseFrom}` : " today"}</th>
+                <th style={{ width: 200 }}>From this endorsement</th></tr></thead>
+              <tbody>
+                {endorsePv.basis.map(t => {
+                  const k = `${t.term}:${t.layer ?? ""}`;
+                  if (t.kind === "sliding" || t.kind === "profit") {
+                    // A commission term: changed as a whole, with its editor.
+                    const now = t.value as SlidingScale | ProfitCommission | null;
+                    const next = endorseComm[k];
+                    return (
+                      <tr key={k} style={{ verticalAlign: "top" }}>
+                        <td><b style={{ fontWeight: 600 }}>{t.label}</b></td>
+                        <td className="sub">{t.kind === "sliding"
+                          ? scaleText(now as SlidingScale) : profitText(now as ProfitCommission)}</td>
+                        <td>
+                          {next ? (
+                            <>
+                              {t.kind === "sliding"
+                                ? <SlidingScaleEditor value={next as SlidingScale}
+                                    onChange={v => setEndorseComm(m => ({ ...m, [k]: v }))} />
+                                : <ProfitCommissionEditor value={next as ProfitCommission}
+                                    onChange={v => setEndorseComm(m => ({ ...m, [k]: v }))} />}
+                              <button className="btn sm" type="button" style={{ marginTop: 6 }}
+                                      onClick={() => setEndorseComm(m => {
+                                        const c = { ...m }; delete c[k]; return c; })}>
+                                Keep as it is</button>
+                            </>
+                          ) : (
+                            <button className="btn sm" type="button"
+                                    onClick={() => setEndorseComm(m => ({ ...m, [k]:
+                                      now ?? (t.kind === "sliding" ? DEFAULT_SCALE : DEFAULT_PROFIT) }))}>
+                              {now ? "Change it" : "Agree it from this date"}</button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  }
+                  return (
+                    <tr key={k}>
+                      <td><b style={{ fontWeight: 600 }}>{t.label}</b>
+                        {t.layer_name && <div className="sub">{t.layer_name}</div>}</td>
+                      <td className="mono">{t.value == null ? "—"
+                        : t.kind === "pct" ? `${t.value}%` : Number(t.value).toLocaleString()}</td>
+                      <td>
+                        <input inputMode="decimal" value={endorseBasis[k] ?? ""}
+                               placeholder={t.kind === "pct" ? "new %" : "new value"}
+                               onChange={e => setEndorseBasis(m => ({ ...m, [k]: e.target.value }))} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ),
+    }] : []),
     { key: "attach", label: "What this endorsement says",
       meta: endorseChanges
         ? `${endorseChanges} change${endorseChanges !== 1 ? "s" : ""}`
         : "No change yet",
       done: endorseChanges > 0, short: false, body: endorseAttach },
   ] : [
+    { key: "with", label: "Who is it with?",
+      meta: spec?.label ?? "—", done: !!typeKey, short: false,
+      body: secWho },
     { key: "start", label: "What are you making?",
       meta: KINDS.find(k => k.key === kind)?.title ?? "—",
       done: kind !== "renew" || !!renewsId,
       short: kind === "renew" && !renewsId,
       body: secKind },
-    { key: "with", label: "Who is it with?",
-      meta: spec?.label ?? "—", done: !!typeKey, short: false,
-      body: secWho },
+    ...(isTreaty ? [{
+      key: "treaty", label: "Treaty structure",
+      meta: !treaty.treaty_type ? "Type not chosen"
+        : !brokerId ? "No lead reinsurer yet"
+        : treatyTypes?.find(t => t.key === treaty.treaty_type)?.label ?? "",
+      done: !!treaty.treaty_type && !!brokerId,
+      short: !treaty.treaty_type || !brokerId,
+      body: secTreaty }] : []),
     { key: "basics", label: "The basics",
       meta: basicsShort ? `${basicsShort} still to answer` : "All answered",
       done: basicsShort === 0, short: basicsShort > 0,
       body: secBasics },
     ...limitGroups.map((g, i) => ({
       key: g.key, label: g.label,
-      cap: i === 0 ? "The limits you agreed" : undefined,
+      cap: i === 0 ? (isTreaty ? "The limits of the treaty" : "The limits you agreed") : undefined,
       meta: limitsSet(g.key) ? `${limitsSet(g.key)} set` : "None set",
       done: limitsSet(g.key) > 0, short: false,
       body: <>{limitsHead}{limitPanel(g)}{limitsFold}</>,
@@ -1605,14 +1836,8 @@ export default function ContractNew() {
                 <h2>
                   {kind === "endorse" ? "Endorse a Contract" : "Create a Contract"}
                   <InfoTip text={kind === "endorse"
-                    ? "Change some terms of a contract that is already running. "
-                      + "Kavachio writes the endorsement, attaches it beside the "
-                      + "wording, and moves the checks — nothing is attached "
-                      + "until you press the button."
-                    : "Answer these questions once. Kavachio writes the "
-                      + "document, you read it through, then it goes out for "
-                      + "signature — and nothing is sent to anybody until that "
-                      + "last step."} />
+                    ? "Change some terms of a running contract. Kavachio writes the endorsement and updates the checks. Nothing is attached until you press the button."
+                    : "Answer these questions once. Kavachio writes the document, you read it through, then it goes out for signature. Nothing is sent before that."} />
                 </h2>
               </div>
               <div className="actions">
@@ -1698,13 +1923,17 @@ export default function ContractNew() {
                 {kind !== "endorse" && (
                 <p className="muted" style={{ fontSize: 12.5, lineHeight: 1.6,
                      textAlign: "center", margin: "16px auto 0", maxWidth: 640 }}>
-                  Already have a contract somebody else drafted?{" "}
+                  {isTreaty ? "Already have the treaty document?"
+                            : "Already have a contract somebody else drafted?"}{" "}
                   <span className="linkish" role="button" onClick={() => setUploading(true)}>
-                    Upload the signed PDF instead →
+                    {isTreaty ? "Upload the treaty instead →"
+                              : "Upload the signed PDF instead →"}
                   </span>
-                  <InfoTip text={"Kavachio reads the terms out of it and builds "
-                    + "what checks it can — but a contract written from its own "
-                    + "terms never has a clause the checks cannot read."} />
+                  <InfoTip text={isTreaty
+                    ? "Kavachio reads its terms and who holds it from the document. "
+                      + "It is saved as a draft and goes to the reinsurers to approve, "
+                      + "then both sides sign."
+                    : "Kavachio reads the terms from the PDF and builds what checks it can. A contract written here can have every clause checked."} />
                 </p>
                 )}
                 </div>
@@ -1720,12 +1949,7 @@ export default function ContractNew() {
               <div className="t">
                 <h2>
                   Write the Wording
-                  <InfoTip text={"Kavachio has written the wording from your "
-                    + "terms. The shaded bits are live values, not typed text — "
-                    + "click one to change it without leaving this page, or "
-                    + "change it on Terms; either way every sentence quoting it "
-                    + "updates, and so does the check behind it. Anything you "
-                    + "type yourself stays exactly as you typed it."} />
+                  <InfoTip text={"Kavachio wrote this from your terms. Shaded bits are live values: change one and every sentence and check using it updates.\nText you type yourself stays as typed."} />
                 </h2>
                 <p>
                   {values.name || "This contract"}
@@ -1795,10 +2019,8 @@ export default function ContractNew() {
                   </button>
                   <div className="sub" style={{ textAlign: "center" }}>
                     What these do
-                    <InfoTip text={"“Refresh from my terms” rewrites the "
-                      + "clauses your terms drive and keeps what you typed."
-                      + "\n\n“Start the wording again” throws away your edits "
-                      + "and rewrites every section from the terms."} />
+                    <InfoTip text={"“Refresh from my terms”: rewrites the clauses your terms drive, keeps what you typed."
+                      + "\n\n“Start the wording again”: throws away your edits and rewrites everything."} />
                   </div>
                 </>
               }
@@ -1849,12 +2071,7 @@ export default function ContractNew() {
                     <span className="muted" style={{ fontSize: 11.5,
                           alignSelf: "center", marginRight: 2 }}>
                       Drop in a live value
-                      <InfoTip text={"A chip is tied to the term you set in "
-                        + "step 1. Click one to change it — here, on Terms, and "
-                        + "in the check behind it, all at once — or change it "
-                        + "on Terms and every sentence quoting it follows. "
-                        + "Either way the contract and the checks say the same "
-                        + "thing."} />
+                      <InfoTip text={"Each chip is a term from step 1. Click one to change it in the wording, on Terms and in its check at once."} />
                     </span>
                     {Object.keys(preview?.tokens ?? {}).map(t => (
                       <button
@@ -1977,7 +2194,7 @@ export default function ContractNew() {
                   <div className="note">
                     <b>Kavachio adds the signature page.</b> Both signature
                     blocks are placed on it for you. You can move them in the
-                    next step if your broker's lawyers want them somewhere else.
+                    next step if your {party}'s lawyers want them somewhere else.
                   </div>
                 </>
               )}
@@ -2039,10 +2256,7 @@ export default function ContractNew() {
               <div className="t">
                 <h2>
                   Set up the signing
-                  <InfoTip text={"Choose what each side has to fill in when "
-                    + "they sign. None of these buttons makes the contract "
-                    + "active — it becomes active when both sides have signed it, "
-                    + "on its own signature page."} />
+                  <InfoTip text={"Choose what each side fills in when they sign. The contract becomes active only once both sides have signed it."} />
                 </h2>
                 {/* Kept on screen, not in the (i): see the note above this step
                     — a carrier who thinks a link went out waits for a reply
@@ -2103,12 +2317,19 @@ export default function ContractNew() {
               ]}
               title={SIGN_PARTS[signPane].heading}
               desc={SIGN_PARTS[signPane].desc}
-              foot={`${signPane + 1} of 3 · nothing is emailed from this step`}
+              foot={`${signPane + 1} of 3 · ${isTreaty
+                ? "the reinsurers are emailed only when you create it"
+                : "nothing is emailed from this step"}`}
               nextLabel={signPane < 2
                 ? "Next →"
-                : busy === "create" ? "Creating…" : "Create and send it for review"}
+                : busy === "create" ? "Creating…"
+                // A treaty's terms are agreed by its reinsurers on their
+                // private links: it is saved as a draft and sent to every one
+                // of them for approval. The carrier signs only once all agree.
+                : isTreaty ? "Create and send for approval" : "Create and send it for review"}
               nextDisabled={signPane === 2 && (!!busy || blocksUnplaced)}
-              onNext={() => (signPane < 2 ? setSignPane(signPane + 1) : create("review"))}
+              onNext={() => (signPane < 2 ? setSignPane(signPane + 1)
+                             : create(isTreaty ? "draft" : "review"))}
             >
               {/* What the signature page ASKS FOR. Every contract used to get
                   the same four lines because they were written into the
@@ -2241,13 +2462,8 @@ export default function ContractNew() {
                       />
                       <div className="hint">
                         How placing works
-                        <InfoTip text={"Drop a block anywhere — the wording "
-                          + "moves down to make room for it, so it never covers "
-                          + "a clause.\n\nOne block per side here — nobody is "
-                          + "named to sign until the contract exists. Name them "
-                          + "afterwards on the contract's own signature page, "
-                          + "and each person gets a block of their own to place "
-                          + "next to these."} />
+                        <InfoTip text={"Drop a block anywhere; the wording moves down so it never covers a clause."
+                          + "\n\nOne block per side for now. Name the signers later on the contract's signature page; each gets their own block."} />
                       </div>
                     </>
                   )}
@@ -2280,7 +2496,9 @@ export default function ContractNew() {
                     </div>
                     <div className="kv">
                       <span className="k">Rules to be set up</span>
-                      <span className="v">{preview?.checks.length ?? 0}</span>
+                      <span className="v">{treatyLimits
+                        ? Object.keys(limits).filter(k => limitSpec.find(l => l.name === k)?.checkable).length
+                        : preview?.checks.length ?? 0}</span>
                     </div>
                   </div>
                   {/* Named, never "they": the other side is a specific
@@ -2288,6 +2506,16 @@ export default function ContractNew() {
                   {(() => {
                     const other = counterparty?.name
                       ?? `the ${spec?.counterparty_label?.toLowerCase() ?? "broker"}`;
+                    if (isTreaty) return (
+                      <ul className="hint" style={{ paddingLeft: 18, listStyle: "disc" }}>
+                        <li><b>Create and send for approval</b> — it is saved as a
+                          draft and every reinsurer on it is emailed its private
+                          link, where it approves or asks for changes — no
+                          Kavachio account needed.</li>
+                        <li>Once every reinsurer has approved, you sign it for the
+                          carrier, then each reinsurer signs. That puts it in force.</li>
+                      </ul>
+                    );
                     return (
                       <ul className="hint" style={{ paddingLeft: 18, listStyle: "disc" }}>
                         <li><b>Save as a draft</b> — only you can see it. {other} is
@@ -2302,6 +2530,7 @@ export default function ContractNew() {
                       </ul>
                     );
                   })()}
+                  {!isTreaty && (
                   <div className="rowacts">
                     <button className="btn" type="button"
                             disabled={!!busy || blocksUnplaced}
@@ -2320,6 +2549,7 @@ export default function ContractNew() {
                       {busy === "create" ? "Creating…" : "Create and sign it now"}
                     </button>
                   </div>
+                  )}
                 </>
               )}
             </WizardStep>
@@ -2333,8 +2563,12 @@ export default function ContractNew() {
         )}
       </div>
 
+      {/* A treaty signed outside Kavachio has its own upload. */}
+      <UploadTreatyModal open={uploading && isTreaty}
+        programId={programId ? Number(programId) : undefined}
+        onClose={() => setUploading(false)} />
       <AddContractModal
-        open={uploading}
+        open={uploading && !isTreaty}
         onClose={() => setUploading(false)}
         programId={programId ? Number(programId) : undefined}
         brokerId={brokerId ? Number(brokerId) : undefined}

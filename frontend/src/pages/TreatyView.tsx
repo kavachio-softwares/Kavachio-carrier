@@ -1,0 +1,1369 @@
+/**
+ * A reinsurer's private, read-only view of one treaty — /treaty-view?token=…
+ *
+ * The reader has no account and never will: reinsurers have no seat in
+ * Kavachio. The carrier sent them a link and, in the same email, a six-digit
+ * code. The link alone opens NOTHING but the code screen — not even the
+ * treaty's name — and the code is asked for again in every new browser
+ * session (the unlock lives in sessionStorage).
+ *
+ * Once open, they see the treaty's structure and THEIR OWN lines: their share
+ * of each layer, which layers they lead, how placed each layer is. Never
+ * another reinsurer's name or share — the server does not send them.
+ *
+ * A link the carrier has withdrawn, one past its date, or one whose treaty has
+ * ended says exactly that, in a sentence, rather than "invalid link".
+ */
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import {
+  Ban, CalendarClock, CheckCircle2, Download, FileText, KeyRound, Loader2,
+  ListChecks, Lock, Mail, MessageSquare, PenLine, ShieldCheck, Star,
+} from "lucide-react";
+import KavachioLogo from "../components/KavachioLogo";
+import { TreatyTower } from "../components/treaty/TreatyTower";
+import { TermsUsed } from "../components/treaty/TermsUsed";
+import { showDone, showError } from "../components/ResultPopup";
+import {
+  approveBasisOnLink, requestBasisChanges, type TreatyViewBasisChange,
+  approveEndorsementOnLink, approveTreaty, clearViewSession, downloadTreatyDocument,
+  requestEndorsementChanges, signEndorsementOnLink, type TreatyViewEndorsement,
+  downloadTreatyWording, openTreatyView, requestTreatyChanges,
+  resendTreatyCode, signTreatyOnLink, verifyTreatyCode,
+  type TreatyView as View, type TreatyViewLocked, type TreatyViewOpen,
+} from "../api/treaty";
+import { fmtDate } from "../utils/date";
+import {
+  approveLinkRule, getLinkRules, requestLinkRuleChanges, type ReinsurerRule,
+} from "../api/programmeRules";
+import {
+  answerLinkStatement, downloadLinkStatement, type LinkStatement,
+} from "../api/ceded";
+
+const LIFE: Record<string, string> = {
+  draft: "Draft — not yet in force", pending: "Being settled",
+  agreed: "Terms agreed — awaiting signature", signed: "Signed",
+  active: "In force", expired: "Expired",
+};
+
+function errText(e: unknown, fallback: string): string {
+  const d = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  return typeof d === "string" ? d : fallback;
+}
+
+/** An action's failure in the result popup — unless the app-wide popup has
+ *  already shown it (a 5xx, or no answer at all). */
+function popError(e: unknown, fallback: string) {
+  if ((e as { _friendlyHandled?: boolean })?._friendlyHandled) return;
+  showError(errText(e, fallback));
+}
+
+export default function TreatyView() {
+  const [params] = useSearchParams();
+  const token = params.get("token") ?? "";
+  const [view, setView] = useState<View | null>(null);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(() => {
+    if (!token) { setErr("This link is missing its key. Open it again from the email."); setLoading(false); return; }
+    setLoading(true);
+    openTreatyView(token)
+      .then(v => { setView(v); setErr(""); })
+      .catch(e => setErr(errText(e, "This link is not valid.")))
+      .finally(() => setLoading(false));
+  }, [token]);
+  useEffect(load, [load]);
+
+  // Never let the link sit in the page title or get shared by the browser.
+  useEffect(() => { document.title = "Treaty · Kavachio"; }, []);
+
+  if (loading && !view) {
+    return (
+      <div className="proto tv" style={{ display: "grid", placeItems: "center" }}>
+        <span className="muted" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <Loader2 className="animate-spin" size={18} /> Opening…
+        </span>
+      </div>
+    );
+  }
+
+  if (err && !view) {
+    return <Message icon={Ban} title="This link doesn't work" body={err}
+                    foot="Ask whoever sent it to send you a new one." />;
+  }
+  if (!view) return null;
+
+  if (view.closed) {
+    return <Message icon={view.status === "expired" ? CalendarClock : Ban}
+                    title={view.title} body={view.message} />;
+  }
+  if (view.locked) {
+    return <CodeGate token={token} gate={view}
+                     onUnlocked={() => { load(); }} />;
+  }
+  return <Treaty token={token} v={view} onView={setView}
+                 onLock={() => { clearViewSession(token); load(); }} />;
+}
+
+function Message({ icon: Icon, title, body, foot }: {
+  icon: React.ElementType; title: string; body: string; foot?: string;
+}) {
+  return (
+    <div className="proto tv" style={{ display: "grid", placeItems: "center", padding: 16 }}>
+      <div style={{ maxWidth: 440, textAlign: "center" }}>
+        <div style={{ display: "flex", justifyContent: "center", gap: 8,
+                      alignItems: "center", marginBottom: 22 }}>
+          <KavachioLogo className="h-7 w-7" /><b>Kavachio</b>
+        </div>
+        <div className="card pad">
+          <div style={{ width: 48, height: 48, borderRadius: 99, margin: "0 auto 14px",
+                        display: "grid", placeItems: "center",
+                        background: "var(--p-surface-3)", color: "var(--p-muted)" }}>
+            <Icon size={22} />
+          </div>
+          <h1 style={{ fontSize: 17, margin: "0 0 8px" }}>{title}</h1>
+          <p className="muted" style={{ fontSize: 13.5, lineHeight: 1.6, margin: 0 }}>{body}</p>
+          {foot && <p className="sub" style={{ marginTop: 14 }}>{foot}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── the code ─────────────────────────────────────────────────────────────────
+function CodeGate({ token, gate, onUnlocked }: {
+  token: string; gate: TreatyViewLocked; onUnlocked: () => void;
+}) {
+  const LEN = 6;
+  const [digits, setDigits] = useState<string[]>(Array(LEN).fill(""));
+  const [busy, setBusy] = useState(false);
+  // The code's own error stays beside the boxes it marks; a resend's result
+  // is a popup.
+  const [err, setErr] = useState("");
+  const [left, setLeft] = useState(gate.lockout_seconds);
+  const boxes = useRef<(HTMLInputElement | null)[]>([]);
+
+  useEffect(() => {
+    if (left <= 0) return;
+    const t = setInterval(() => setLeft(v => Math.max(0, v - 1)), 1000);
+    return () => clearInterval(t);
+  }, [left]);
+  useEffect(() => { boxes.current[0]?.focus(); }, []);
+
+  const code = digits.join("");
+  const lockedOut = left > 0;
+
+  function put(i: number, raw: string) {
+    const only = raw.replace(/\D/g, "");
+    if (!only) { setDigits(d => d.map((v, n) => (n === i ? "" : v))); return; }
+    setDigits(d => {
+      const next = [...d];
+      for (let k = 0; k < only.length && i + k < LEN; k++) next[i + k] = only[k];
+      return next;
+    });
+    boxes.current[Math.min(i + only.length, LEN - 1)]?.focus();
+  }
+
+  async function submit(e?: React.FormEvent) {
+    e?.preventDefault();
+    if (code.length !== LEN || busy || lockedOut) return;
+    setBusy(true); setErr("");
+    try {
+      await verifyTreatyCode(token, code);
+      onUnlocked();
+    } catch (ex) {
+      const detail = errText(ex, "That code did not work.");
+      setErr(detail);
+      setDigits(Array(LEN).fill(""));
+      boxes.current[0]?.focus();
+      const m = /(\d+)\s*minutes?/.exec(detail);
+      const status = (ex as { response?: { status?: number } })?.response?.status;
+      if (status === 429 && /locked|Too many/.test(detail)) {
+        setLeft(m ? Number(m[1]) * 60 : 15 * 60);
+      }
+    } finally { setBusy(false); }
+  }
+
+  useEffect(() => {
+    if (code.length === LEN && !busy && !lockedOut) submit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [code]);
+
+  async function resend() {
+    setBusy(true); setErr("");
+    try {
+      const r = await resendTreatyCode(token);
+      if (r.ok) showDone(`A new code is on its way to ${r.sent_to}.`);
+      else showError("We could not send a new code just now.");
+    } catch (ex) {
+      popError(ex, "Could not send a new code.");
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="proto tv">
+      <div className="tv-gate">
+        <div style={{ display: "flex", justifyContent: "center", gap: 8,
+                      alignItems: "center", marginBottom: 22 }}>
+          <KavachioLogo className="h-8 w-8" /><b style={{ fontSize: 15 }}>Kavachio</b>
+        </div>
+        <form className="card pad" onSubmit={submit} style={{ padding: "30px 26px" }}>
+          <div style={{ width: 48, height: 48, borderRadius: 99, margin: "0 auto 14px",
+                        display: "grid", placeItems: "center",
+                        background: "var(--p-primary-soft)", color: "var(--p-primary)" }}>
+            <KeyRound size={22} />
+          </div>
+          <h1 style={{ textAlign: "center", fontSize: 17, margin: 0 }}>Enter your code</h1>
+          <p className="muted" style={{ textAlign: "center", fontSize: 13, lineHeight: 1.6,
+                                        margin: "8px auto 0", maxWidth: 330 }}>
+            {gate.carrier} shared a treaty with you. The email that brought you
+            here has a six-digit code in it — type it below to open it.
+          </p>
+          <div className="sub" style={{ display: "flex", gap: 6, justifyContent: "center",
+                                        alignItems: "center", marginTop: 10 }}>
+            <Mail size={13} /> {gate.email_hint}
+          </div>
+          <div className="tv-digits">
+            {digits.map((d, i) => (
+              <input key={i} ref={el => { boxes.current[i] = el; }}
+                     value={d} className={err ? "bad" : ""}
+                     onChange={e => put(i, e.target.value)}
+                     onKeyDown={e => {
+                       if (e.key === "Backspace" && !digits[i] && i > 0) boxes.current[i - 1]?.focus();
+                     }}
+                     disabled={busy || lockedOut} inputMode="numeric"
+                     autoComplete={i === 0 ? "one-time-code" : "off"}
+                     maxLength={LEN} aria-label={`Digit ${i + 1}`} />
+            ))}
+          </div>
+          {err && <p style={{ textAlign: "center", color: "var(--p-crit-ink)",
+                              fontSize: 13, marginTop: 14 }}>{err}</p>}
+          {lockedOut && (
+            <div className="note warn" style={{ marginTop: 14, textAlign: "center" }}>
+              Too many wrong codes. Try again in{" "}
+              <b>{Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")}</b>.
+            </div>
+          )}
+          {!err && !lockedOut && gate.attempts_left > 0 && gate.attempts_left < 5 && (
+            <p className="sub" style={{ textAlign: "center", marginTop: 12 }}>
+              {gate.attempts_left} attempt{gate.attempts_left === 1 ? "" : "s"} left.
+            </p>
+          )}
+          <button type="submit" className="btn pri"
+                  disabled={busy || lockedOut || code.length !== LEN}
+                  style={{ width: "100%", justifyContent: "center", marginTop: 20,
+                           padding: "12px 15px" }}>
+            {busy ? <Loader2 className="animate-spin" size={15} /> : <Lock size={14} />}
+            Open the treaty
+          </button>
+          {gate.can_resend && (
+            <button type="button" className="btn ghost" onClick={resend} disabled={busy}
+                    style={{ width: "100%", justifyContent: "center", marginTop: 8 }}>
+              Didn't get it? Send a new code
+            </button>
+          )}
+          <p className="sub" style={{ textAlign: "center", marginTop: 18, paddingTop: 14,
+                                      borderTop: "1px solid var(--p-border)" }}>
+            Nobody at Kavachio will ever ask you for this code. If you were not
+            expecting this, do not enter it — tell the sender instead.
+          </p>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ── the treaty ───────────────────────────────────────────────────────────────
+function Treaty({ token, v, onLock, onView }: {
+  token: string; v: TreatyViewOpen; onLock: () => void;
+  onView: (v: TreatyViewOpen) => void;
+}) {
+  const [busy, setBusy] = useState("");
+  const mine = useMemo(
+    () => new Set(v.layers.filter(l => l.your_share).map(l => l.index)), [v.layers]);
+  const myLayers = v.layers.filter(l => l.your_share);
+  const leads = myLayers.filter(l => l.your_share?.is_lead).length;
+
+  async function dl(key: string, fn: () => Promise<void>) {
+    setBusy(key);
+    try { await fn(); }
+    catch (e) {
+      const status = (e as { response?: { status?: number } })?.response?.status;
+      if (status === 401) { onLock(); return; }
+      showError("That download did not work. Try again, or ask the sender for a copy.");
+    } finally { setBusy(""); }
+  }
+
+  return (
+    <div className="proto tv">
+      <div className="tv-bar">
+        <div className="tv-bar-in">
+          <KavachioLogo className="h-7 w-7" />
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontWeight: 600, fontSize: 14, overflow: "hidden",
+                          textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {v.treaty.name}
+            </div>
+            <div className="sub" style={{ overflow: "hidden", textOverflow: "ellipsis",
+                                          whiteSpace: "nowrap" }}>
+              Shared by {v.carrier} with {v.viewer.name}
+              {v.viewer.organisation ? `, ${v.viewer.organisation}` : ""}
+            </div>
+          </div>
+          <span className="badge b-mut" title="You can read this page; nothing on it can be changed.">
+            <span className="d" />Read only
+          </span>
+        </div>
+      </div>
+
+      <div className="tv-wrap">
+        {/* Their position, first — it is what they came for. */}
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="card-h">
+            <ShieldCheck size={16} className="ci" />
+            <h3>Your lines on this treaty</h3>
+            <span className="sub">{v.viewer.organisation}</span>
+          </div>
+          <div style={{ padding: "16px 20px" }}>
+            {myLayers.length === 0 ? (
+              <div className="sub">
+                {v.carrier} has not recorded a share for your organisation yet.
+              </div>
+            ) : (
+              <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(200px,1fr))",
+                                             gap: 12 }}>
+                {myLayers.map(l => (
+                  <div key={l.index} className="card pad" style={{ boxShadow: "none" }}>
+                    <div className="sub">{l.name}</div>
+                    <div className="tv-mine">
+                      {l.your_share!.share_pct}%
+                      <span className="sub" style={{ fontWeight: 500 }}>of the layer</span>
+                    </div>
+                    {l.your_share!.is_lead && (
+                      <div className="badge b-ok" style={{ marginTop: 6 }}>
+                        <Star size={11} fill="currentColor" /> You lead this layer
+                      </div>
+                    )}
+                    {l.your_share!.slip_reference && (
+                      <div className="sub mono" style={{ marginTop: 6 }}>
+                        Slip {l.your_share!.slip_reference}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {leads > 0 && myLayers.length > 1 && (
+              <div className="sub" style={{ marginTop: 10 }}>
+                You lead {leads} of the {myLayers.length} layers you are on.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {v.signature && (
+          <SignCard token={token} v={v} onView={onView} onLock={onLock} />
+        )}
+
+        <ApprovalCard token={token} v={v} onView={onView} onLock={onLock} />
+
+        <ProgrammeRulesCard token={token} v={v} onLock={onLock} />
+
+        {!!v.basis_changes?.length && (
+          <BasisChangesCard token={token} v={v} onView={onView} onLock={onLock} />
+        )}
+
+        {!!v.endorsements?.length && (
+          <EndorsementsCard token={token} v={v} onView={onView} onLock={onLock} />
+        )}
+
+        {!!v.statements?.length && (
+          <StatementsCard token={token} v={v} onLock={onLock}
+                          onStatements={sts => onView({ ...v, statements: sts })} />
+        )}
+
+        <div className="grid g-2" style={{ alignItems: "start", marginBottom: 16 }}>
+          <div className="card">
+            <div className="card-h">
+              <h3>{v.summary?.headline ?? "The treaty"}</h3>
+            </div>
+            <div style={{ padding: "16px 20px" }}>
+              {v.summary ? (
+                <TreatyTower summary={v.summary} mine={mine} carrier={v.carrier}
+                             yourShare={v.summary.split
+                               ? v.layers[0]?.your_share?.share_pct ?? null : null} />
+              ) : (
+                <div className="sub">The structure has not been set out yet.</div>
+              )}
+              {v.summary && !v.summary.split && (
+                <div className="sub" style={{ marginTop: 12 }}>
+                  &ldquo;Placed&rdquo; on a layer is how much of it all the
+                  reinsurers together have signed for.
+                </div>
+              )}
+              <div className="sub" style={{ marginTop: 10 }}>
+                Only your own share is shown here. The other reinsurers on this
+                treaty are not named, and they cannot see your share.
+              </div>
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-h"><h3>Terms</h3></div>
+            <div style={{ padding: "6px 20px 12px" }}>
+              <div className="kv"><span className="k">Type</span>
+                <span className="v">{v.summary?.type_label ?? "—"}</span></div>
+              <div className="kv"><span className="k">Term</span>
+                <span className="v">{fmtDate(v.treaty.inception_dt)} → {fmtDate(v.treaty.expiry_dt)}</span></div>
+              {v.treaty.year_of_account && (
+                <div className="kv"><span className="k">Year of account</span>
+                  <span className="v">{v.treaty.year_of_account}</span></div>
+              )}
+              <div className="kv"><span className="k">Status</span>
+                <span className="v">{LIFE[v.treaty.lifecycle] ?? v.treaty.lifecycle}</span></div>
+              <div className="kv"><span className="k">Reinsured</span>
+                <span className="v">{v.carrier}</span></div>
+              {v.treaty.programmes.length > 0 && (
+                <div className="kv"><span className="k">Protects</span>
+                  <span className="v" style={{ textAlign: "right" }}>
+                    {v.treaty.programmes.join(", ")}</span></div>
+              )}
+              {(v.summary?.facts ?? []).map(f => (
+                <div className="kv" key={f.label}>
+                  <span className="k">{f.label}</span><span className="v">{f.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {v.layers.length > 0 && (
+          <div className="card" style={{ marginBottom: 16 }}>
+            <div className="card-h"><h3>Layers</h3></div>
+            <div className="tbl-wrap">
+              <table>
+                <thead>
+                  <tr><th>Layer</th><th>Terms</th><th>Placed in total</th><th>Your share</th></tr>
+                </thead>
+                <tbody>
+                  {v.layers.map(l => (
+                    <tr key={l.index}>
+                      <td><b>{l.name}</b></td>
+                      <td className="sub">
+                        {l.facts.length ? l.facts.map(f => `${f.label} ${f.value}`).join(" · ") : "—"}
+                      </td>
+                      <td className="mono">{l.placed_pct}%</td>
+                      <td>
+                        {l.your_share
+                          ? <b className="mono">{l.your_share.share_pct}%</b>
+                          : <span className="sub">—</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        <div className="card">
+          <div className="card-h"><FileText size={16} className="ci" /><h3>Documents</h3></div>
+          <div style={{ padding: "12px 20px 16px" }}>
+            {v.documents.length === 0 && !v.wording_pdf && (
+              <div className="sub">No document has been shared yet.</div>
+            )}
+            {v.documents.map(d => (
+              <div key={d.id} className="kv">
+                <span>
+                  <b style={{ fontSize: 13 }}>{d.filename ?? "Treaty wording"}</b>
+                  <div className="sub">
+                    {d.is_executed_copy ? "Signed copy" : "Wording"}
+                    {d.uploaded_at ? ` · added ${fmtDate(d.uploaded_at)}` : ""}
+                  </div>
+                </span>
+                <button className="btn sm" type="button" disabled={!!busy}
+                        onClick={() => dl(`d${d.id}`, () =>
+                          downloadTreatyDocument(token, d.id, d.filename ?? "treaty"))}>
+                  {busy === `d${d.id}` ? <Loader2 className="animate-spin" size={13} />
+                                       : <Download size={13} />} Download
+                </button>
+              </div>
+            ))}
+            {v.wording_pdf && (
+              <div className="kv">
+                <span>
+                  <b style={{ fontSize: 13 }}>Treaty wording (PDF)</b>
+                  <div className="sub">As written — the signed copy will replace it once returned.</div>
+                </span>
+                <button className="btn sm" type="button" disabled={!!busy}
+                        onClick={() => dl("w", () => downloadTreatyWording(token, v.treaty.name))}>
+                  {busy === "w" ? <Loader2 className="animate-spin" size={13} />
+                                : <Download size={13} />} Download
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <p className="sub" style={{ textAlign: "center", marginTop: 22, lineHeight: 1.6 }}>
+          This link is yours alone{v.expires_on ? ` and works until ${fmtDate(v.expires_on)}` : ""}.
+          Every visit is recorded for {v.carrier}. Close this page and you will be
+          asked for a code again next time.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+
+// ── the reinsurer's answer ───────────────────────────────────────────────────
+/** Approve your lines and the treaty's terms, or say what should change.
+ *  The name typed is the person approving; the code they entered to get here
+ *  is what shows they hold the mailbox the link was sent to. An answer is
+ *  tied to the treaty as it stands — if the carrier changes it afterwards,
+ *  the reinsurer is asked again. */
+/** The lead reinsurer was asked to sign — the signature box, on the treaty
+ *  they have just read. Their name, typed here after the emailed code, is
+ *  their signature; it is stored with this address and the time. */
+function SignCard({ token, v, onView, onLock }: {
+  token: string; v: TreatyViewOpen; onView: (v: TreatyViewOpen) => void;
+  onLock: () => void;
+}) {
+  const sg = v.signature!;
+  const [name, setName] = useState(v.viewer.name ?? "");
+  const [title, setTitle] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const org = v.viewer.organisation ?? "your organisation";
+
+  async function sign() {
+    setBusy(true);
+    try {
+      const r = await signTreatyOnLink(token, name.trim(), title.trim(), consent);
+      onView(r.view);
+      showDone(r.in_force
+        ? `Signed. Both sides have now signed, so the treaty is in force — ${v.carrier} sees your signature on their side.`
+        : r.blocked_by
+          ? `Signed. ${v.carrier} still has to sort out one thing before it is in force: ${r.blocked_by}.`
+          : `Signed. ${v.carrier} sees your signature on their side.`);
+    } catch (e) {
+      const status = (e as { response?: { status?: number } })?.response?.status;
+      if (status === 401) { onLock(); return; }
+      popError(e, "That did not go through. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 16, borderColor: sg.signed ? undefined : "var(--p-primary)" }}>
+      <div className="card-h">
+        <PenLine size={16} className="ci" />
+        <h3>Sign the treaty</h3>
+        <span className={`badge ${sg.signed ? "b-ok" : "b-info"}`}>
+          <span className="d" />{sg.signed ? "Signed" : "Waiting for your signature"}
+        </span>
+      </div>
+      <div style={{ padding: "14px 20px 16px" }}>
+        {sg.signed ? (
+          <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
+            Signed for {org} by <b>{sg.signed.name}</b>
+            {sg.signed.title ? `, ${sg.signed.title}` : ""}
+            {sg.signed.at ? ` on ${fmtDate(sg.signed.at)}` : ""}.
+            {sg.active ? " The treaty is in force." : ""}
+          </p>
+        ) : sg.can_sign ? (
+          <>
+            <p className="muted" style={{ margin: "0 0 12px", fontSize: 13.5 }}>
+              {v.carrier} has signed this treaty and asks you to sign it for {org}.
+              Read the treaty below and its wording under Documents, then type
+              your name. Your signature is recorded with your name, your email
+              ({v.viewer.email}) and the time.
+            </p>
+            <div className="grid g-2" style={{ gap: 12 }}>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Your full name</label>
+                <input value={name} onChange={e => setName(e.target.value)} />
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Your title <span className="muted" style={{ fontWeight: 500 }}>— optional</span></label>
+                <input value={title} onChange={e => setTitle(e.target.value)}
+                       placeholder="Underwriter" />
+              </div>
+            </div>
+            {name.trim() && (
+              <div style={{ marginTop: 12, padding: "10px 14px", borderBottom: "1.5px solid var(--p-ink)",
+                            fontFamily: "'Brush Script MT', 'Segoe Script', cursive", fontSize: 26,
+                            maxWidth: 420 }}>
+                {name.trim()}
+              </div>
+            )}
+            <label style={{ display: "flex", gap: 8, alignItems: "flex-start",
+                            marginTop: 12, fontSize: 13, color: "var(--p-ink)" }}>
+              <input type="checkbox" checked={consent} style={{ marginTop: 3 }}
+                     onChange={e => setConsent(e.target.checked)} />
+              <span>
+                I am authorised to sign for <b>{org}</b>, and I sign its lines on this
+                treaty — {v.layers.filter(l => l.your_share)
+                  .map(l => `${l.name} ${l.your_share!.share_pct}%`).join(", ") || "its share"} — under
+                the treaty&rsquo;s wording, shared by every reinsurer on it, on its behalf.
+                My name, the time and this device are recorded.
+              </span>
+            </label>
+            <div className="rowacts">
+              <button className="btn pri" type="button"
+                      disabled={busy || !name.trim() || !consent} onClick={sign}>
+                <PenLine size={14} /> {busy ? "Signing…" : "Sign the treaty"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="sub" style={{ margin: 0 }}>
+            It cannot be signed right now{sg.why_not ? ` — ${sg.why_not}` : ""}.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ApprovalCard({ token, v, onView, onLock }: {
+  token: string; v: TreatyViewOpen; onView: (v: TreatyViewOpen) => void;
+  onLock: () => void;
+}) {
+  const a = v.approval;
+  const [mode, setMode] = useState<"" | "approve" | "change">("");
+  const [name, setName] = useState(v.viewer.name ?? "");
+  const [title, setTitle] = useState("");
+  const [confirm, setConfirm] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function go(fn: () => Promise<{ view: TreatyViewOpen; terms_agreed?: boolean }>,
+                    ok: (agreed: boolean) => string) {
+    setBusy(true);
+    try {
+      const r = await fn();
+      onView(r.view);
+      setMode("");
+      showDone(ok(!!r.terms_agreed));
+    } catch (e) {
+      const status = (e as { response?: { status?: number } })?.response?.status;
+      if (status === 401) { onLock(); return; }
+      popError(e, "That did not go through. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const org = v.viewer.organisation ?? "your organisation";
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-h">
+        <CheckCircle2 size={16} className="ci" />
+        <h3>Your approval</h3>
+        <span className={`badge ${a.status === "approved" ? "b-ok"
+          : a.status === "changes_requested" ? "b-warn" : "b-mut"}`}>
+          <span className="d" />
+          {a.status === "approved" ? "Approved"
+            : a.status === "changes_requested" ? "Change asked for"
+            : a.status === "stale" ? "Changed since you answered" : "Waiting for you"}
+        </span>
+      </div>
+      <div style={{ padding: "14px 20px 16px" }}>
+        {a.status === "approved" && (
+          <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
+            Approved for {org} by <b>{a.signer_name}</b>
+            {a.signer_title ? `, ${a.signer_title}` : ""} on {fmtDate(a.at)}.
+          </p>
+        )}
+        {a.status === "changes_requested" && (
+          <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
+            You asked for a change on {fmtDate(a.at)}: <i>&ldquo;{a.note}&rdquo;</i>.{" "}
+            {v.carrier} will update the treaty and you will be asked again.
+          </p>
+        )}
+        {a.status === "stale" && (
+          <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
+            {v.carrier} changed the treaty after you{" "}
+            {a.last_status === "approved" ? "approved it" : "asked for a change"}.
+            Check it again and give your answer on the treaty as it is now.
+          </p>
+        )}
+        {a.status === "pending" && (
+          <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
+            {a.settles_terms
+              ? `${v.carrier} is waiting for each reinsurer to approve the treaty. `
+                + "Once every reinsurer has approved, its terms are agreed."
+              : "This treaty is signed, so its terms are fixed. Approve it to "
+                + "confirm the treaty and your lines above are right."}
+          </p>
+        )}
+
+        {a.can_answer && mode === "" && (
+          <div className="rowacts" style={{ marginTop: 12 }}>
+            {a.status !== "approved" && (
+              <button className="btn pri" type="button" onClick={() => setMode("approve")}>
+                <CheckCircle2 size={14} /> Approve
+              </button>
+            )}
+            {a.can_request_changes && (
+              <button className="btn" type="button" onClick={() => setMode("change")}>
+                <MessageSquare size={14} /> Ask for a change
+              </button>
+            )}
+          </div>
+        )}
+
+        {mode === "approve" && (
+          <div className="note" style={{ marginTop: 12 }}>
+            <div className="grid g-2" style={{ gap: 12 }}>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Your name</label>
+                <input value={name} onChange={e => setName(e.target.value)} />
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Your title <span className="muted" style={{ fontWeight: 500 }}>— optional</span></label>
+                <input value={title} onChange={e => setTitle(e.target.value)}
+                       placeholder="Underwriter" />
+              </div>
+            </div>
+            <label style={{ display: "flex", gap: 8, alignItems: "flex-start",
+                            marginTop: 12, fontSize: 13, color: "var(--p-ink)" }}>
+              <input type="checkbox" checked={confirm} style={{ marginTop: 3 }}
+                     onChange={e => setConfirm(e.target.checked)} />
+              <span>
+                On behalf of <b>{org}</b>, I approve this treaty and the shares
+                shown above as ours.
+              </span>
+            </label>
+            <div className="rowacts">
+              <button className="btn pri" type="button"
+                      disabled={busy || !name.trim() || !confirm}
+                      onClick={() => go(() => approveTreaty(token, name.trim(), title.trim()),
+                        agreed => agreed
+                          ? `Approved. Every reinsurer has now approved, so the terms are agreed. ${v.carrier} has been told.`
+                          : `Approved. ${v.carrier} has been told.`)}>
+                {busy ? "Approving…" : "Approve"}
+              </button>
+              <button className="btn" type="button" onClick={() => setMode("")}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {mode === "change" && (
+          <div className="note" style={{ marginTop: 12 }}>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>What should change?</label>
+              <textarea rows={3} value={note} onChange={e => setNote(e.target.value)}
+                        placeholder="e.g. Our line on layer 2 is 20%, not 25%." />
+            </div>
+            <div className="rowacts">
+              <button className="btn pri" type="button" disabled={busy || !note.trim()}
+                      onClick={() => go(() => requestTreatyChanges(token, note.trim()),
+                        () => `Sent to ${v.carrier}. You will be asked again once the treaty is updated.`)}>
+                {busy ? "Sending…" : "Send"}
+              </button>
+              <button className="btn" type="button" onClick={() => setMode("")}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {!a.can_answer && a.why_not && (
+          <p className="sub" style={{ marginTop: 10 }}>{a.why_not}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+// ── endorsements to approve ──────────────────────────────────────────────────
+/** Each endorsement the carrier sent the reinsurers: what it changes and from
+ *  when, and this reinsurer's answer. It is used only once every reinsurer on
+ *  the treaty has approved it. */
+function fmtChange(v: unknown): string {
+  if (v == null || v === "") return "—";
+  if (typeof v === "number") return v.toLocaleString();
+  if (typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    if ("provisional_pct" in o) return `provisional ${o.provisional_pct}%`;
+    if ("rate_pct" in o) return `${o.rate_pct}% of profit`;
+    return JSON.stringify(v);
+  }
+  return String(v);
+}
+
+function EndorsementsCard({ token, v, onView, onLock }: {
+  token: string; v: TreatyViewOpen; onView: (v: TreatyViewOpen) => void;
+  onLock: () => void;
+}) {
+  const [open, setOpen] = useState<{ id: number; mode: "approve" | "change" | "sign" } | null>(null);
+  const [name, setName] = useState(v.viewer.name ?? "");
+  const [title, setTitle] = useState("");
+  const [confirm, setConfirm] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const org = v.viewer.organisation ?? "your organisation";
+
+  async function answer(e: TreatyViewEndorsement) {
+    if (!open) return;
+    setBusy(true);
+    try {
+      const r = open.mode === "approve"
+        ? await approveEndorsementOnLink(token, e.id, name.trim())
+        : open.mode === "sign"
+          ? await signEndorsementOnLink(token, e.id, name.trim(), title.trim(), confirm)
+          : await requestEndorsementChanges(token, e.id, note.trim());
+      onView(r.view);
+      showDone(open.mode === "approve"
+        ? `Approved. ${v.carrier} has been told. Once every reinsurer has approved, `
+          + `${v.carrier} signs it and you are asked to sign.`
+        : open.mode === "sign"
+          ? (r.in_force ? `Signed. Every reinsurer has now signed ${e.label}, so it is in force.`
+                        : `Signed. ${e.label} is in force once every reinsurer has signed.`)
+          : `Sent to ${v.carrier}. You will be asked again once ${e.label} is updated.`);
+      setOpen(null); setNote(""); setConfirm(false);
+    } catch (x) {
+      const status = (x as { response?: { status?: number } })?.response?.status;
+      if (status === 401) { onLock(); return; }
+      popError(x, "That did not go through. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-h">
+        <FileText size={16} className="ci" />
+        <h3>Endorsements</h3>
+      </div>
+      <div style={{ padding: "14px 20px 16px", display: "grid", gap: 14 }}>
+        {(v.endorsements ?? []).map(e => {
+          const mine = e.my_answer;
+          const badge = e.status === "in_force" ? ["b-ok", "In force"]
+            : e.can_sign ? ["b-warn", "Waiting for your signature"]
+            : e.my_signature ? ["b-ok", "You signed"]
+            : e.status === "approved" ? ["b-ok", `Approved — ${v.carrier} signs next`]
+            : e.status === "changes_requested" ? ["b-warn", "Changes asked for"]
+            : mine?.status === "approved" ? ["b-ok", "You approved"]
+            : ["b-mut", "Waiting for you"];
+          return (
+            <div key={e.id} style={{ borderTop: "1px solid var(--p-border)", paddingTop: 12 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <b>{e.label}</b>
+                {e.effective_from && <span className="sub">from {fmtDate(e.effective_from)}</span>}
+                <span className={`badge ${badge[0]}`}><span className="d" />{badge[1]}</span>
+                {e.has_file && (
+                  <button className="btn sm" type="button" style={{ marginLeft: "auto" }}
+                          onClick={() => downloadTreatyDocument(token, e.id, `${e.label}.pdf`)
+                            .catch(() => showError("The document could not be downloaded."))}>
+                    <Download size={13} /> Document
+                  </button>
+                )}
+              </div>
+              {e.changes.length > 0 && (
+                <table className="panel-tbl" style={{ textAlign: "left", marginTop: 8 }}>
+                  <thead><tr><th>Term</th><th>Before</th><th>From this endorsement</th></tr></thead>
+                  <tbody>
+                    {e.changes.map((c, i) => (
+                      <tr key={i}><td>{c.label ?? "—"}</td><td className="sub">{fmtChange(c.from)}</td>
+                        <td><b>{fmtChange(c.to)}</b></td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {e.clauses.filter(Boolean).length > 0 && (
+                <div className="sub" style={{ marginTop: 6 }}>
+                  Clauses: {e.clauses.filter(Boolean).join(", ")}
+                </div>
+              )}
+              {mine?.status === "approved" && (
+                <p className="muted" style={{ margin: "8px 0 0", fontSize: 13.5 }}>
+                  Approved for {org} by <b>{mine.signer_name}</b> on {fmtDate(mine.at)}.
+                </p>
+              )}
+              {mine?.status === "changes_requested" && (
+                <p className="muted" style={{ margin: "8px 0 0", fontSize: 13.5 }}>
+                  You asked for a change on {fmtDate(mine.at)}: <i>&ldquo;{mine.note}&rdquo;</i>.
+                </p>
+              )}
+              {e.can_answer && mine?.status !== "approved" && open?.id !== e.id && (
+                <div className="rowacts" style={{ marginTop: 10 }}>
+                  <button className="btn pri" type="button"
+                          onClick={() => { setOpen({ id: e.id, mode: "approve" }); }}>
+                    <CheckCircle2 size={14} /> Approve
+                  </button>
+                  <button className="btn" type="button"
+                          onClick={() => { setOpen({ id: e.id, mode: "change" }); }}>
+                    <MessageSquare size={14} /> Ask for a change
+                  </button>
+                </div>
+              )}
+              {e.my_signature && (
+                <p className="muted" style={{ margin: "8px 0 0", fontSize: 13.5 }}>
+                  Signed for {org} by <b>{e.my_signature.name}</b> on {fmtDate(e.my_signature.at)}.
+                </p>
+              )}
+              {e.can_sign && open?.id !== e.id && (
+                <div className="rowacts" style={{ marginTop: 10 }}>
+                  <button className="btn pri" type="button"
+                          onClick={() => { setOpen({ id: e.id, mode: "sign" }); setConfirm(false); }}>
+                    <PenLine size={14} /> Sign
+                  </button>
+                </div>
+              )}
+              {open?.id === e.id && open.mode === "sign" && (
+                <div className="note" style={{ marginTop: 10 }}>
+                  <div className="grid g-2" style={{ gap: 12 }}>
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <label>Your name</label>
+                      <input value={name} onChange={x => setName(x.target.value)} />
+                    </div>
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <label>Your title <span className="muted" style={{ fontWeight: 500 }}>— optional</span></label>
+                      <input value={title} onChange={x => setTitle(x.target.value)} placeholder="Underwriter" />
+                    </div>
+                  </div>
+                  <label style={{ display: "flex", gap: 8, alignItems: "flex-start",
+                                  marginTop: 12, fontSize: 13, color: "var(--p-ink)" }}>
+                    <input type="checkbox" checked={confirm} style={{ marginTop: 3 }}
+                           onChange={x => setConfirm(x.target.checked)} />
+                    <span>I sign {e.label} on behalf of <b>{org}</b>.</span>
+                  </label>
+                  <div className="rowacts">
+                    <button className="btn pri" type="button" disabled={busy || !name.trim() || !confirm}
+                            onClick={() => answer(e)}>{busy ? "Signing…" : "Sign"}</button>
+                    <button className="btn" type="button" onClick={() => setOpen(null)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+              {open?.id === e.id && open.mode === "approve" && (
+                <div className="note" style={{ marginTop: 10 }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>Your name</label>
+                    <input value={name} onChange={x => setName(x.target.value)} />
+                  </div>
+                  <label style={{ display: "flex", gap: 8, alignItems: "flex-start",
+                                  marginTop: 12, fontSize: 13, color: "var(--p-ink)" }}>
+                    <input type="checkbox" checked={confirm} style={{ marginTop: 3 }}
+                           onChange={x => setConfirm(x.target.checked)} />
+                    <span>On behalf of <b>{org}</b>, I approve {e.label}.</span>
+                  </label>
+                  <div className="rowacts">
+                    <button className="btn pri" type="button" disabled={busy || !name.trim() || !confirm}
+                            onClick={() => answer(e)}>{busy ? "Approving…" : "Approve"}</button>
+                    <button className="btn" type="button" onClick={() => setOpen(null)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+              {open?.id === e.id && open.mode === "change" && (
+                <div className="note" style={{ marginTop: 10 }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>What should change?</label>
+                    <textarea rows={3} value={note} onChange={x => setNote(x.target.value)}
+                              placeholder="e.g. The new cession should be 35%, not 30%." />
+                  </div>
+                  <div className="rowacts">
+                    <button className="btn pri" type="button" disabled={busy || !note.trim()}
+                            onClick={() => answer(e)}>{busy ? "Sending…" : "Send"}</button>
+                    <button className="btn" type="button" onClick={() => setOpen(null)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Changes to the treaty's terms the carrier asks the reinsurers to approve.
+ *  None is used until every reinsurer on the treaty has approved. */
+function BasisChangesCard({ token, v, onView, onLock }: {
+  token: string; v: TreatyViewOpen; onView: (v: TreatyViewOpen) => void;
+  onLock: () => void;
+}) {
+  const [open, setOpen] = useState<{ id: number; mode: "approve" | "change" } | null>(null);
+  const [name, setName] = useState(v.viewer.name ?? "");
+  const [confirm, setConfirm] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const org = v.viewer.organisation ?? "your organisation";
+
+  async function answer(r: TreatyViewBasisChange) {
+    if (!open) return;
+    setBusy(true);
+    try {
+      const res = open.mode === "approve"
+        ? await approveBasisOnLink(token, r.id, name.trim())
+        : await requestBasisChanges(token, r.id, note.trim());
+      onView(res.view);
+      showDone(open.mode === "approve"
+        ? (res.in_force ? "Approved. Every reinsurer has now approved, so the changes apply from their dates."
+                        : `Approved. ${v.carrier} has been told. The changes apply once every reinsurer has approved.`)
+        : `Sent to ${v.carrier}. You will be asked again once the changes are updated.`);
+      setOpen(null); setNote(""); setConfirm(false);
+    } catch (x) {
+      const status = (x as { response?: { status?: number } })?.response?.status;
+      if (status === 401) { onLock(); return; }
+      popError(x, "That did not go through. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-h">
+        <CalendarClock size={16} className="ci" />
+        <h3>Changes to the treaty&rsquo;s terms</h3>
+      </div>
+      <div style={{ padding: "14px 20px 16px", display: "grid", gap: 14 }}>
+        {(v.basis_changes ?? []).map(r => {
+          const mine = r.my_answer;
+          const badge = r.status === "approved" ? ["b-ok", "Approved — in use"]
+            : r.status === "changes_requested" ? ["b-warn", "Changes asked for"]
+            : mine?.status === "approved" ? ["b-ok", "You approved"]
+            : ["b-mut", "Waiting for you"];
+          return (
+            <div key={r.id} style={{ borderTop: "1px solid var(--p-border)", paddingTop: 12 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <b>Sent {fmtDate(r.sent_at)}</b>
+                <span className={`badge ${badge[0]}`}><span className="d" />{badge[1]}</span>
+              </div>
+              <table className="panel-tbl" style={{ textAlign: "left", marginTop: 8 }}>
+                <thead><tr><th>Term</th><th>New value</th><th>From</th></tr></thead>
+                <tbody>
+                  {r.changes.map(c => (
+                    <tr key={c.id}><td>{c.label}{c.note && <div className="sub">{c.note}</div>}</td>
+                      <td><b>{c.value}</b></td><td>{fmtDate(c.effective_from)}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+              {mine?.status === "approved" && (
+                <p className="muted" style={{ margin: "8px 0 0", fontSize: 13.5 }}>
+                  Approved for {org} by <b>{mine.signer_name}</b> on {fmtDate(mine.at)}.
+                </p>
+              )}
+              {mine?.status === "changes_requested" && (
+                <p className="muted" style={{ margin: "8px 0 0", fontSize: 13.5 }}>
+                  You asked for a change on {fmtDate(mine.at)}: <i>&ldquo;{mine.note}&rdquo;</i>.
+                </p>
+              )}
+              {r.can_answer && mine?.status !== "approved" && open?.id !== r.id && (
+                <div className="rowacts" style={{ marginTop: 10 }}>
+                  <button className="btn pri" type="button"
+                          onClick={() => { setOpen({ id: r.id, mode: "approve" }); }}>
+                    <CheckCircle2 size={14} /> Approve
+                  </button>
+                  <button className="btn" type="button"
+                          onClick={() => { setOpen({ id: r.id, mode: "change" }); }}>
+                    <MessageSquare size={14} /> Ask for a change
+                  </button>
+                </div>
+              )}
+              {open?.id === r.id && open.mode === "approve" && (
+                <div className="note" style={{ marginTop: 10 }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>Your name</label>
+                    <input value={name} onChange={x => setName(x.target.value)} />
+                  </div>
+                  <label style={{ display: "flex", gap: 8, alignItems: "flex-start",
+                                  marginTop: 12, fontSize: 13, color: "var(--p-ink)" }}>
+                    <input type="checkbox" checked={confirm} style={{ marginTop: 3 }}
+                           onChange={x => setConfirm(x.target.checked)} />
+                    <span>On behalf of <b>{org}</b>, I approve these changes.</span>
+                  </label>
+                  <div className="rowacts">
+                    <button className="btn pri" type="button" disabled={busy || !name.trim() || !confirm}
+                            onClick={() => answer(r)}>{busy ? "Approving…" : "Approve"}</button>
+                    <button className="btn" type="button" onClick={() => setOpen(null)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+              {open?.id === r.id && open.mode === "change" && (
+                <div className="note" style={{ marginTop: 10 }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>What should change?</label>
+                    <textarea rows={3} value={note} onChange={x => setNote(x.target.value)}
+                              placeholder="e.g. The new cession should be 35%, not 30%." />
+                  </div>
+                  <div className="rowacts">
+                    <button className="btn pri" type="button" disabled={busy || !note.trim()}
+                            onClick={() => answer(r)}>{busy ? "Sending…" : "Send"}</button>
+                    <button className="btn" type="button" onClick={() => setOpen(null)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
+// ── the reinsurer's bordereaux ───────────────────────────────────────────────
+/** Every reinsurance bordereau the carrier has sent this reinsurer for the
+ *  treaty: its own totals, the workbook, and its answer — agreed, or a query. */
+function StatementsCard({ token, v, onLock, onStatements }: {
+  token: string; v: TreatyViewOpen; onLock: () => void;
+  onStatements: (s: LinkStatement[]) => void;
+}) {
+  const [open, setOpen] = useState<{ id: number; mode: "agree" | "query" } | null>(null);
+  // The statement whose terms are shown under its row (27.3).
+  const [termsOf, setTermsOf] = useState<number | null>(null);
+  const [name, setName] = useState(v.viewer.name ?? "");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const m = (x: number | null | undefined, cur: string | null) =>
+    x == null ? "—" : `${cur ? cur + " " : ""}${x.toLocaleString(undefined,
+      { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  async function answer() {
+    if (!open) return;
+    setBusy(true);
+    try {
+      const r = await answerLinkStatement(token, open.id, open.mode, name.trim(), note.trim());
+      onStatements(r.statements);
+      setOpen(null); setNote("");
+    } catch (e) {
+      const status = (e as { response?: { status?: number } })?.response?.status;
+      if (status === 401) { onLock(); return; }
+      popError(e, "That did not go through.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-h">
+        <FileText size={16} className="ci" />
+        <h3>Your bordereaux</h3>
+        <span className="sub">your share of every line, period by period</span>
+      </div>
+      <div className="tbl-wrap">
+        <table>
+          <thead>
+            <tr><th>Period</th><th>Ceded premium</th><th>Net premium due</th>
+                <th>Recovery</th><th>Your answer</th><th /></tr>
+          </thead>
+          <tbody>
+            {(v.statements ?? []).map(st => (<Fragment key={st.id}>
+              <tr style={st.superseded ? { opacity: .55 } : undefined}>
+                <td className="mono">
+                  {st.period}
+                  {st.version_no > 1 && <div className="sub">version {st.version_no}</div>}
+                  {st.superseded && <div className="sub">replaced by a newer version</div>}
+                </td>
+                <td className="mono">{m(st.totals.ceded_premium, st.currency)}</td>
+                <td className="mono">{m(st.totals.net_premium, st.currency)}</td>
+                <td className="mono">{m(st.totals.recovery, st.currency)}</td>
+                <td>
+                  <span className={`badge ${st.status === "agreed" ? "b-ok"
+                    : st.status === "queried" ? "b-warn" : "b-mut"}`}>
+                    <span className="d" />
+                    {st.status === "agreed" ? "Agreed" : st.status === "queried"
+                      ? "Query raised" : "Waiting for you"}
+                  </span>
+                  {st.answer_note && <div className="sub">&ldquo;{st.answer_note}&rdquo;</div>}
+                </td>
+                <td style={{ whiteSpace: "nowrap" }}>
+                  <button className="btn sm" type="button"
+                          onClick={() => downloadLinkStatement(token, st).catch(e => {
+                            const s = (e as { response?: { status?: number } })?.response?.status;
+                            if (s === 401) onLock(); else showError("That download did not work.");
+                          })}>
+                    <Download size={12} /> Excel
+                  </button>{" "}
+                  <button className="btn sm" type="button" aria-expanded={termsOf === st.id}
+                          onClick={() => setTermsOf(t => t === st.id ? null : st.id)}>
+                    Terms used
+                  </button>{" "}
+                  {!st.superseded && st.status !== "agreed" && (
+                    <button className="btn sm pri" type="button"
+                            onClick={() => setOpen({ id: st.id, mode: "agree" })}>Agree</button>
+                  )}{" "}
+                  {!st.superseded && (
+                    <button className="btn sm" type="button"
+                            onClick={() => setOpen({ id: st.id, mode: "query" })}>Query</button>
+                  )}
+                </td>
+              </tr>
+              {termsOf === st.id && (
+                <tr>
+                  <td colSpan={6} style={{ background: "var(--p-surface-2)" }}>
+                    <div className="sub" style={{ marginBottom: 6 }}>
+                      Every figure for {st.period} was worked out with these terms
+                      {st.basis?.as_of ? `, in force on ${fmtDate(st.basis.as_of)}` : ""}.
+                      Each line&rsquo;s sum is in the Excel file.
+                    </div>
+                    <TermsUsed bare basis={st.basis} />
+                  </td>
+                </tr>
+              )}
+            </Fragment>))}
+          </tbody>
+        </table>
+      </div>
+      {open && (
+        <div className="note" style={{ margin: "0 20px 16px" }}>
+          <b>{open.mode === "agree" ? "Agree this statement" : "Raise a query"}</b>
+          <div className="grid g-2" style={{ gap: 12, marginTop: 10 }}>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>Your name</label>
+              <input value={name} onChange={e => setName(e.target.value)} />
+            </div>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>{open.mode === "agree" ? "Note — optional" : "What is wrong?"}</label>
+              <input value={note} onChange={e => setNote(e.target.value)}
+                     placeholder={open.mode === "query" ? "e.g. policy KVC-01001 is not on our line" : ""} />
+            </div>
+          </div>
+          <div className="rowacts">
+            <button className="btn pri" type="button"
+                    disabled={busy || !name.trim() || (open.mode === "query" && !note.trim())}
+                    onClick={answer}>
+              {busy ? "Sending…" : open.mode === "agree" ? "Agree" : "Send query"}
+            </button>
+            <button className="btn" type="button" onClick={() => setOpen(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ── Programme Rules sent to this reinsurer (programme_rule_routes) ───────────
+/** Rules the carrier set for every treaty on a programme, waiting for this
+ *  reinsurer's approval. Each checks its statements only once it approves.
+ *  Loaded on its own call, so the treaty shows even if this one fails. */
+function ProgrammeRulesCard({ token, v, onLock }: {
+  token: string; v: TreatyViewOpen; onLock: () => void;
+}) {
+  const [rules, setRules] = useState<ReinsurerRule[]>([]);
+  const [open, setOpen] = useState<{ id: number; mode: "approve" | "change" } | null>(null);
+  const [name, setName] = useState(v.viewer.name ?? "");
+  const [confirm, setConfirm] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const org = v.viewer.organisation ?? "your organisation";
+
+  // Once per link: the page may hand down a new onLock on every render.
+  const lock = useRef(onLock);
+  lock.current = onLock;
+  useEffect(() => {
+    getLinkRules(token).then(d => setRules(d.rules)).catch(x => {
+      if ((x as { response?: { status?: number } })?.response?.status === 401) lock.current();
+    });
+  }, [token]);
+
+  async function answer(r: ReinsurerRule) {
+    if (!open) return;
+    setBusy(true);
+    try {
+      const d = open.mode === "approve"
+        ? await approveLinkRule(token, r.id, name.trim())
+        : await requestLinkRuleChanges(token, r.id, note.trim());
+      setRules(d.rules);
+      showDone(open.mode === "approve"
+        ? `Approved. ${v.carrier} has been told, and the rule now checks your statements.`
+        : `Sent to ${v.carrier}. You will be asked again once the rule is changed.`);
+      setOpen(null); setNote(""); setConfirm(false);
+    } catch (x) {
+      if ((x as { response?: { status?: number } })?.response?.status === 401) { onLock(); return; }
+      popError(x, "That did not go through. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (rules.length === 0) return null;
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-h">
+        <ListChecks size={16} className="ci" />
+        <h3>Programme rules</h3>
+      </div>
+      <div style={{ padding: "14px 20px 16px", display: "grid", gap: 14 }}>
+        {rules.map(r => {
+          const badge = r.status === "approved" ? ["b-ok", "You approved"]
+            : r.status === "changes_requested" ? ["b-warn", "Changes asked for"] : ["b-mut", "Waiting for you"];
+          return (
+            <div key={r.id} style={{ borderTop: "1px solid var(--p-border)", paddingTop: 12 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <b>{r.name}</b>
+                <span className={`badge ${badge[0]}`}><span className="d" />{badge[1]}</span>
+              </div>
+              <p style={{ margin: "6px 0 2px", fontSize: 14 }}>{r.sentence}</p>
+              <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+                {r.programme ?? "Programme"} · {r.treaties.join(", ")}{r.description ? ` · ${r.description}` : ""}
+              </p>
+              {r.status === "approved" && (
+                <p className="muted" style={{ margin: "8px 0 0", fontSize: 13.5 }}>
+                  Approved for {org} by <b>{r.by}</b> on {fmtDate(r.at)}.
+                </p>
+              )}
+              {r.status === "changes_requested" && (
+                <p className="muted" style={{ margin: "8px 0 0", fontSize: 13.5 }}>
+                  You asked for a change on {fmtDate(r.at)}: <i>&ldquo;{r.note}&rdquo;</i>.
+                </p>
+              )}
+              {r.status === "pending" && open?.id !== r.id && (
+                <div className="rowacts" style={{ marginTop: 10 }}>
+                  <button className="btn pri" type="button" onClick={() => setOpen({ id: r.id, mode: "approve" })}>
+                    <CheckCircle2 size={14} /> Approve
+                  </button>
+                  <button className="btn" type="button" onClick={() => setOpen({ id: r.id, mode: "change" })}>
+                    <MessageSquare size={14} /> Ask for a change
+                  </button>
+                </div>
+              )}
+              {open?.id === r.id && open.mode === "approve" && (
+                <div className="note" style={{ marginTop: 10 }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>Your name</label>
+                    <input value={name} onChange={x => setName(x.target.value)} />
+                  </div>
+                  <label style={{ display: "flex", gap: 8, alignItems: "flex-start",
+                                  marginTop: 12, fontSize: 13, color: "var(--p-ink)" }}>
+                    <input type="checkbox" checked={confirm} style={{ marginTop: 3 }}
+                           onChange={x => setConfirm(x.target.checked)} />
+                    <span>On behalf of <b>{org}</b>, I approve this rule.</span>
+                  </label>
+                  <div className="rowacts">
+                    <button className="btn pri" type="button" disabled={busy || !name.trim() || !confirm}
+                            onClick={() => answer(r)}>{busy ? "Approving…" : "Approve"}</button>
+                    <button className="btn" type="button" onClick={() => setOpen(null)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+              {open?.id === r.id && open.mode === "change" && (
+                <div className="note" style={{ marginTop: 10 }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>What should change?</label>
+                    <textarea rows={3} value={note} onChange={x => setNote(x.target.value)}
+                              placeholder="e.g. The cap should be 6,000,000, not 5,000,000." />
+                  </div>
+                  <div className="rowacts">
+                    <button className="btn pri" type="button" disabled={busy || !note.trim()}
+                            onClick={() => answer(r)}>{busy ? "Sending…" : "Send"}</button>
+                    <button className="btn" type="button" onClick={() => setOpen(null)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

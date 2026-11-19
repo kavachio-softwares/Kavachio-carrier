@@ -65,7 +65,10 @@ type Platform = {
     carriers_clear: number; brokers_clear: number;
   };
   // on_time / late: absent on an older server, and the box shows "—".
-  overdue: { total: number; brokers: number; carriers: number; on_time?: number; late?: number };
+  /** `total` is every missing file: `waiting` still overdue, `never` the ones
+   *  whose period has closed. */
+  overdue: { total: number; brokers: number; carriers: number; on_time?: number; late?: number;
+             waiting: number; never: number };
   signatures: { awaiting: number; over_7d: number };
   tenants_table: {
     tenant_id: number; code: string; name: string; users: number; brokers: number;
@@ -271,8 +274,7 @@ export default function KavachioAdminDashboard() {
         {/* ===== The Kavachio team's own work (never filtered by carrier/broker) ===== */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18, marginBottom: 24 }}>
           <ChartCard title="Data Mapping Queue"
-            info={<InfoTip text={"Work for the Kavachio team: a file layout nobody has seen before waits here "
-              + "until its columns are mapped. Until then that layout cannot be processed automatically. "
+            info={<InfoTip text={"New file layouts waiting for the Kavachio team to map their columns, so they can be processed automatically.\n"
               + (SHOW_BORDEREAU_WORK
                 ? "Waiting / in progress = raised in this period; finished = finished in it."
                 : "Counts cover all time.")} />}>
@@ -367,7 +369,8 @@ export default function KavachioAdminDashboard() {
             info="Still waiting on files run in this period. Pick All time for the whole backlog."
             tone={ox.critical > 0 ? "alert" : undefined}
             subtitle={ox.total ? `across ${plural(brokersWithOpen, "broker", "brokers")}` : "nothing waiting"} />
-          <ArrivalsCard onTime={d.overdue.on_time} late={d.overdue.late} never={d.overdue.total}
+          <ArrivalsCard onTime={d.overdue.on_time} late={d.overdue.late}
+            overdue={d.overdue.waiting} never={d.overdue.never}
             info="Bordereaux due this calendar month, by how they arrived — the same month the Bordereau Calendar opens on, regardless of the period picked above."
             subtitle={d.overdue.total ? `Overdue from ${plural(d.overdue.brokers, "broker", "brokers")}` : "Nothing overdue"}
             // Carries this card's own carrier/broker scope onto the calendar it
@@ -393,9 +396,7 @@ export default function KavachioAdminDashboard() {
           </ChartCard>
 
           <ChartCard title="Open Exceptions by Severity"
-            info={<InfoTip text={"Exceptions still waiting on files run in this period (each file's latest "
-              + "run), counted the way the Exception Triage screen counts them. \"Resolved\" = decisions made "
-              + "in this period. Pick All time for the whole backlog."} />}>
+            info={<InfoTip text={"Exceptions still open on files run in this period. \"Resolved\" = decisions made in this period. Pick All time for the whole backlog."} />}>
             {ox.total === 0 ? <div className="empty">Nothing is waiting to be reviewed.</div> : (
               <>
                 <div style={{ display: "flex", gap: 2, height: 14, marginBottom: 10 }}>
@@ -444,10 +445,7 @@ export default function KavachioAdminDashboard() {
         {/* ===== Where the open exceptions are ===== */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18, marginBottom: 18 }}>
           <ChartCard title="Exceptions by Carrier"
-            info={<InfoTip text={"Per carrier, most open first. Each bar is that carrier's own 100% — "
-              + "every exception raised on its files this period, split into what is still open and "
-              + "what has been put right. Bar LENGTH is not compared between carriers; the counts "
-              + "beside them are. A carrier opens its Recent File Submissions."} />}>
+            info={<InfoTip text={"Carriers with the most open exceptions first. Each bar splits that carrier's exceptions this period into open and put right.\nCompare the counts, not bar lengths. Click a carrier to see its recent files."} />}>
             <RankedBars cap={6} unit="open" title="Exceptions by Carrier"
               rows={ox.by_carrier.map(r => ({ id: r.id, name: r.name, value: r.open,
                                               settled: r.settled }))}
@@ -460,10 +458,7 @@ export default function KavachioAdminDashboard() {
             )}
           </ChartCard>
           <ChartCard title="Exceptions by Broker"
-            info={<InfoTip text={"Per broker, most open first — across every carrier they send to. "
-              + "Each bar is that broker's own 100%: every exception raised on its files this "
-              + "period, split into what is still open and what has been put right. Bar LENGTH is "
-              + "not compared between brokers; the counts beside them are."} />}>
+            info={<InfoTip text={"Brokers with the most open exceptions first, across all their carriers. Each bar splits that broker's exceptions this period into open and put right.\nCompare the counts, not bar lengths."} />}>
             <RankedBars cap={6} unit="open" title="Exceptions by Broker"
               rows={ox.by_broker.map(r => ({ id: r.id, name: r.name, value: r.open,
                                              settled: r.settled }))}

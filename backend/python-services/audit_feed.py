@@ -284,6 +284,7 @@ ACTION_WORDS = {
     "output_template_activated": "Activated an output template",
     "output_template_refreshed": "Refreshed an output template",
     "canonical_fields_saved":    "Saved the data-model fields",
+    "datamodel_mapping_started": "Started mapping a file's columns to the data model",
     "datamodel_mapping_proposed": "Proposed a data-model mapping",
     "mapping_task_resolved":     "Resolved a data-mapping task",
     # the book
@@ -293,9 +294,47 @@ ACTION_WORDS = {
     "party_updated":    "Updated a party",
     "party_contact_added":   "Added a party contact",
     "party_contact_removed": "Removed a party contact",
+    # reinsurance treaties
+    "treaty_structure_saved":         "Saved a treaty's structure",
+    "signed_treaty_uploaded":         "Uploaded a signed treaty",
+    "treaty_wording_read":            "Read a treaty's signed wording",
+    "treaty_clauses_read":            "Read a treaty's clauses and rules",
+    "treaty_term_changed":            "Changed a treaty's calculation basis from a date",
+    "treaty_endorsement_read":        "Read an uploaded treaty endorsement",
+    "treaty_endorsement_applied":     "Applied a treaty endorsement's terms and clauses",
+    "treaty_term_change_removed":     "Removed a dated change to a treaty's terms",
+    "treaty_terms_confirmed":         "Confirmed a treaty's terms from its wording",
+    "reinsurance_bordereau_prepared": "Prepared a reinsurance bordereau",
+    "reinsurance_exception_decided": "Decided reinsurance bordereau exceptions",
+    "reinsurance_bordereau_validated": "Fixed & validated a reinsurance bordereau",
+    "reinsurance_setup_saved":        "Saved a reinsurance bordereau setup",
+    "reinsurance_setup_activated":    "Activated a reinsurance bordereau setup",
+    "reinsurance_setup_submitted":    "Sent a reinsurance bordereau setup for approval",
+    "reinsurance_setup_sent_back":    "Sent back a reinsurance bordereau setup",
+    "reinsurance_bordereau_sent":     "Sent a reinsurance bordereau",
+    "reinsurance_bordereau_agreed":   "A reinsurer agreed a reinsurance bordereau",
+    "reinsurance_bordereau_queried":  "A reinsurer queried a reinsurance bordereau",
+    "treaty_approved_by_reinsurer":   "A reinsurer approved a treaty",
+    "treaty_sent_for_approval":       "Sent a treaty to its reinsurers for approval",
+    "treaty_endorsement_sent_for_approval": "Sent a treaty endorsement to the reinsurers for approval",
+    "treaty_endorsement_approved_by_reinsurer": "A reinsurer approved a treaty endorsement",
+    "treaty_endorsement_changes_requested_by_reinsurer": "A reinsurer asked for changes to a treaty endorsement",
+    "treaty_endorsement_signed":      "Signed a treaty endorsement for the carrier",
+    "treaty_basis_sent_for_approval": "Sent changes to a treaty's terms to the reinsurers for approval",
+    "treaty_basis_approved_by_reinsurer": "A reinsurer approved changes to a treaty's terms",
+    "treaty_basis_changes_requested_by_reinsurer": "A reinsurer sent back proposed changes to a treaty's terms",
+    "treaty_endorsement_signed_by_reinsurer": "A reinsurer signed a treaty endorsement",
+    "treaty_signed_by_reinsurer":     "A reinsurer signed a treaty on its link",
+    "treaty_changes_requested_by_reinsurer": "A reinsurer asked for a treaty change",
+    "treaty_programmes_updated":      "Changed the programmes a treaty protects",
+    "treaty_attached_to_programme":   "Attached a treaty to a programme",
+    "treaty_detached_from_programme": "Took a treaty off a programme",
+    "treaty_shared_with_reinsurer":   "Shared a treaty with a reinsurer",
+    "treaty_link_resent":             "Re-sent a reinsurer's treaty link",
+    "treaty_link_revoked":            "Withdrew a reinsurer's treaty link",
     "program_created":  "Created a programme",
     "program_updated":  "Updated a programme",
-    "submission_schedule_updated": "Updated a submission schedule",
+    "submission_schedule_updated": "Changed a programme's deadlines",
     # contracts + rules
     "contract.rules_generated":  "Built the checks from a contract's terms",
     "contract.rules_built":      "Built the contract rules",
@@ -425,6 +464,24 @@ ACTION_WORDS = {
     "bdx_submission_on_hold":     "Put a received file on hold",
     "bdx_submission_deadline_hold": "Held a file because its deadline passed",
     "bdx_delivery_rule_updated":  "Changed a programme's delivery rule",
+    # MOPR 41 — the carrier's target for fixing problems (fix_performance.py)
+    "fix_target_updated":         "Changed the target time to fix problems",
+    # MOPR 42.2 — sending the Monthly Report (report_delivery.py)
+    "monthly_report_settings_updated": "Changed how the operational report is sent",
+    "monthly_report_sent":        "Sent the operational report",
+    "executive_report_settings_updated": "Changed how the executive report is sent",
+    "executive_report_sent":      "Sent the executive report",
+    "executive_report_sends_cleared": "Cleared the sent executive reports list",
+    # 43.2 / 43.3 — the policy list taken out of Kavachio (policy_export.py)
+    "policies_exported":          "Downloaded the policy list",
+    "policies_sent":              "Emailed the policy list",
+    "programme_rule_created":     "Added a programme rule",
+    "programme_rule_updated":     "Changed a programme rule",
+    "programme_rule_sent":        "Sent a programme rule for approval",
+    "programme_rule_retired":     "Retired a programme rule",
+    "programme_rule_deleted":     "Deleted a draft programme rule",
+    "programme_rule_approved":    "Approved a programme rule",
+    "programme_rule_changes_requested": "Asked for changes to a programme rule",
     # The status messages about a file — to the broker, or the carrier when a
     # deadline needs a decision. Which message, and to whom, is the detail.
     "bdx_notice_sent":            "Emailed a file status update",
@@ -463,6 +520,18 @@ ACTION_WORDS = {
     "submission_due_soon":  "Reminded that a bordereau is due soon",
     "submission_due_today": "Reminded that a bordereau is due today",
     "submission_chased":    "Chased a broker for a late bordereau",
+    # MOPR 39.2 — the case on a missing bordereau (submission_case.py)
+    "submission_delinquent":       "Marked a late bordereau as delinquent",
+    "submission_dispute_raised":   "Disputed a late bordereau",
+    "submission_dispute_entered":  "Entered a dispute for a broker",
+    "submission_dispute_waiting":  "Reminded the carrier a dispute is waiting",
+    "submission_dispute_accepted": "Accepted a dispute on a late bordereau",
+    "submission_dispute_rejected": "Rejected a dispute on a late bordereau",
+    "submission_waived":           "Marked a late bordereau as not needed",
+    "submission_extended":         "Gave a broker more time for a bordereau",
+    "submission_case_reopened":    "Reopened a late bordereau — extra time ran out",
+    "submission_case_reopened_by_carrier": "Reopened a closed late-file case",
+    "submission_case_resolved":    "Closed a late bordereau's case — the file arrived",
 }
 
 # What the badge says, and how it is coloured. Everything not listed is read
@@ -471,6 +540,8 @@ _STATUS = {
     "login_success":    ("Successful", "ok"),
     "login_failed":     ("Failed", "bad"),
     "logout":           ("Signed out", "muted"),
+    # The admin's click; the AI's own "Suggested…" row follows when it is done.
+    "datamodel_mapping_started": ("Started", "info"),
     "forgot_request":   ("Reset requested", "info"),
     "password_reset":   ("Password reset", "info"),
     "password_changed": ("Password changed", "info"),
@@ -1224,7 +1295,20 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "program_created", "program_updated", "party_created", "party_updated",
       "party_contact_added", "party_contact_removed",
       "submission_schedule_updated", "submission_chased",
-      "bdx_delivery_rule_updated"), CARRIER_SEATS),
+      "submission_delinquent", "submission_dispute_raised",
+      "submission_dispute_entered", "submission_dispute_waiting",
+      "submission_dispute_accepted", "submission_dispute_rejected",
+      "submission_waived", "submission_extended", "submission_case_reopened",
+      "submission_case_reopened_by_carrier", "submission_case_resolved",
+      "bdx_delivery_rule_updated", "fix_target_updated",
+      "monthly_report_settings_updated", "monthly_report_sent",
+      "executive_report_settings_updated", "executive_report_sent",
+      "executive_report_sends_cleared"), CARRIER_SEATS),
+    # Programme Rules: the carrier sets them, brokers and reinsurers answer.
+    ("programme_rules", "Programme rules",
+     ("programme_rule_created", "programme_rule_updated", "programme_rule_sent",
+      "programme_rule_retired", "programme_rule_deleted", "programme_rule_approved",
+      "programme_rule_changes_requested"), ALL_SEATS),
     # How files reach the CARRIER — mailboxes, routes and keys. The broker
     # sends; it is the carrier that sets up the ways in.
     ("intake", "Ingestion channels",
@@ -1235,7 +1319,8 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "intake_guide_emailed", "intake.arrival.released",
       "intake.arrival.discarded", "intake_arrival_rerun", "itd_config_saved",
       "itd_file_withdrawn", "itd_dropped_decided"), CARRIER_SEATS),
-    ("downloads", "Downloads and views", ("download", "read", "export"), ALL_SEATS),
+    ("downloads", "Downloads and views", ("download", "read", "export",
+                                          "policies_exported", "policies_sent"), ALL_SEATS),
     # The browser silently renewing its token. Kept out of the default feed
     # (see _rows) because it is the machine working, not a person acting — but
     # it is real security evidence, so it stays one click away.
@@ -1477,7 +1562,9 @@ def _decision_query(s, sc: Scope, f: Filters, q_ids):
     if f.actor_system:
         # Nobody signed in never decides an exception — a person always does.
         return None
-    q = s.query(E)
+    # A reinsurance decision is already in the feed as its request
+    # ("reinsurance_exception_decided"); its log row is for the data model.
+    q = s.query(E).filter(E.lane != "reinsurance")
     if clause is not None:
         q = q.filter(clause)
     if f.since is not None:
@@ -1833,12 +1920,27 @@ def _safe_detail(details) -> str:
         return ""
 
 
+def _schedule_detail(details) -> Optional[str]:
+    """A deadline change (MOPR 39.3) in full — every field's old → new, the
+    reason and what it did to the calendar. The generic wording would clip it
+    at 80 characters and print the list of changes as "3 items"."""
+    if not (isinstance(details, dict) and details.get("changes")):
+        return None
+    try:
+        from submission_calendar_service import schedule_change_words
+        return schedule_change_words(details)
+    except Exception:  # noqa: BLE001 — never fail the page over one row
+        return None
+
+
 def _activity_raw(e) -> dict:
     """One stored activity row as a feed row."""
     return {
         "kind": "activity", "id": e.id, "at": e.created_at,
         "action": e.action, "target": e.target, "details": e.details,
-        "detail": _safe_detail(e.details),
+        "detail": ((_schedule_detail(e.details)
+                    if e.action == "submission_schedule_updated" else None)
+                   or _safe_detail(e.details)),
         "actor": e.actor, "user_id": getattr(e, "actor_user_id", None),
         "role": getattr(e, "actor_role", None),
         "broker_party_id": getattr(e, "actor_broker_party_id", None),
@@ -2507,7 +2609,9 @@ def categories_for_group(group: str) -> tuple[str, ...]:
     if group in ("auth", "sessions"):
         return ("auth",)
     if group == "downloads":
-        return ("access",)
+        # The access log, plus the named rows that record data leaving
+        # Kavachio with what was in it: the policy list downloaded or emailed (43.3).
+        return ("access", "activity")
     # Exceptions live in exception_decision_log now, not activity_events —
     # except the review link's own rows (code asked for, signed in, checked,
     # submitted), which are the broker working through them.

@@ -159,7 +159,7 @@ export default function Tenants() {
                     .map(([value, label]) => ({ value, label }))],
               },
             ]}
-            dateRange={{ from: dateFrom, onFromChange: setDateFrom, to: dateTo, onToChange: setDateTo }}
+            dateRange={{ label: "Added between", from: dateFrom, onFromChange: setDateFrom, to: dateTo, onToChange: setDateTo }}
             onClear={clearFilters}
             active={filtersActive}
           />

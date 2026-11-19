@@ -69,6 +69,7 @@ export const ROUTE_ACCESS: {
   // Active Contracts tile (it has no sidebar entry). An operator never sees a
   // contract at all — same rule as /contracts/:contractId below.
   { pattern: "/broker/contracts", requires: "broker_admin", only: ["broker_admin"] },
+  { pattern: "/broker/programme-rules", requires: "broker_admin", only: ["broker_admin"] },
   // Running the bordereau is BOTH broker seats' — the operator's day-to-day
   // job, and the admin's when they do it themselves. It was the operator's
   // alone, which read as a division of labour and worked as a blocker: a small
@@ -125,6 +126,24 @@ export const ROUTE_ACCESS: {
   { pattern: "/programs", requires: "carrier_admin" },
   { pattern: "/programs/new", requires: "carrier_admin" },
   { pattern: "/programs/:programId/setup", requires: "carrier_admin" },
+  // A programme's reinsurance (Phase 26.2): the treaties protecting it. The
+  // carrier's book — `only`, like the contract screens it links to, because a
+  // treaty is between the carrier and its reinsurers and Kavachio is not a
+  // party to it. The reinsurer's own view is /treaty-view, which is public
+  // and unlisted for the same reason /sign is: it has no session at all.
+  { pattern: "/programs/:programId/reinsurance", requires: "carrier_admin",
+    only: ["carrier_admin"] },
+  // Reinsurance (ceded) bordereaux — the carrier's statements to its
+  // reinsurers. Its book, and Kavachio is not a party to it.
+  { pattern: "/reinsurance/bordereaux", requires: "carrier_admin",
+    only: ["carrier_admin"] },
+  { pattern: "/reinsurance/bordereaux/:id", requires: "carrier_admin",
+    only: ["carrier_admin"] },
+  { pattern: "/reinsurance/setups", requires: "carrier_admin", only: ["carrier_admin"] },
+  { pattern: "/reinsurance/setups/:contractId", requires: "carrier_admin",
+    only: ["carrier_admin"] },
+  { pattern: "/reinsurance/setups/:contractId/edit", requires: "carrier_admin",
+    only: ["carrier_admin"] },
   // `only`, not `requires`: a bare `requires` lets kavachio_admin in by rank,
   // and this is the contract record by another route.
   { pattern: "/programs/:programId/contracts/:contractId",
@@ -215,6 +234,33 @@ export const ROUTE_ACCESS: {
   { pattern: "/runs", requires: "carrier_admin" },
   { pattern: "/calendar", requires: "carrier_admin" },
   { pattern: "/bordereau-calendar", requires: "carrier_admin" },
+  // MOPR 42 — the Operational Report and its tabs: Data Quality (MOPR 40, the
+  // month's files, checks and volumes) and Exception Resolution (MOPR 41, how
+  // fast problems get fixed, and what is still waiting). The two old paths
+  // redirect to their tab.
+  { pattern: "/monthly-report", requires: "carrier_admin" },
+  // MOPR 42.2 — Send & Schedule: who receives the report, when, and how.
+  { pattern: "/monthly-report/send-schedule", requires: "carrier_admin" },
+  { pattern: "/monthly-report/:tab", requires: "carrier_admin" },
+  { pattern: "/data-quality", requires: "carrier_admin" },
+  { pattern: "/exception-resolution", requires: "carrier_admin" },
+  // 44 — every open problem across the book and who has to act. Carrier only;
+  // the server refuses every other seat too (require_carrier_admin).
+  { pattern: "/open-problems", requires: "carrier_admin", only: ["carrier_admin"] },
+  { pattern: "/executive-report", requires: "carrier_admin", only: ["carrier_admin"] },
+  // 36 — Partner Performance: every broker of the carrier ranked side by side,
+  // so the carrier seat only (brokers would see each other). The server
+  // refuses broker seats too (partner_performance_routes).
+  { pattern: "/partner-performance", requires: "carrier_admin", only: ["carrier_admin"] },
+  { pattern: "/executive-report/programmes", requires: "carrier_admin", only: ["carrier_admin"] },
+  // Policy Search (43.1) — the policies inside the processed bordereaux. The
+  // carrier sees its whole book, a broker only what it sent; Kavachio is not
+  // a party to policy data, so `only` keeps it out by rank. The server refuses
+  // it too (policy_search.seat_of).
+  { pattern: "/policies", requires: "broker_admin", only: ["carrier_admin", "broker_admin"] },
+  // Financial Summary (35) — the money in the same processed bordereaux, so the
+  // same two seats and the same server-side refusal (policy_search.seat_of).
+  { pattern: "/financial-summary", requires: "broker_admin", only: ["carrier_admin", "broker_admin"] },
   // How files reach this carrier, and everything that has landed. Carrier-only:
   // the routes name the carrier's brokers and their folder addresses.
   { pattern: "/files", requires: "carrier_admin" },

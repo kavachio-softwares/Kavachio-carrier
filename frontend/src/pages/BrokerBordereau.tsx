@@ -383,8 +383,7 @@ export default function BrokerBordereau() {
             <div className="field">
               <label>
                 Contract
-                <InfoTip text={"Each contract has its own rules, so the same "
-                  + "spreadsheet can pass under one and fail under another."
+                <InfoTip text={"Each contract has its own rules, so a file can pass under one and fail under another."
                   // Named rather than hidden: a broker looking for a contract
                   // they know they sent should find out why it is not here.
                   + (waiting.length === 1

@@ -317,6 +317,9 @@ export type TemplateField = {
    *  Null on every template built before that check existed. */
   input_match: { column: string | null; method: string | null;
                  confidence: number | null } | null;
+  /** Financial Summary: columns of one sheet that feed the same money figure
+   *  are added up only when every one of them is ticked. */
+  add_together?: boolean;
 };
 
 export type Finding = {

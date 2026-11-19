@@ -3,25 +3,30 @@ import { CalendarX } from "lucide-react";
 import { InfoTip } from "./InfoTip";
 
 /** The "Overdue Bordereaux" box: how the files that fell due actually turned
- *  up — on time, late, or not at all — in one tile, with a bar showing the
- *  split. The same three counts, and the same words, as the headline tiles on
- *  the Bordereau Calendar, which is where the box opens. */
-export function ArrivalsCard({ onTime, late, never, subtitle, info, to = "/bordereau-calendar" }: {
+ *  up — on time, late, still overdue, or never (the period closed with nothing
+ *  in it) — in one tile, with a bar showing the split. The same four counts,
+ *  and the same words, as the headline tiles on the Bordereau Calendar, which
+ *  is where the box opens. */
+export function ArrivalsCard({ onTime, late, overdue, never, subtitle, info, to = "/bordereau-calendar" }: {
   onTime: number | null | undefined;
   late: number | null | undefined;
+  overdue: number | null | undefined;
   never: number | null | undefined;
   subtitle?: string;
   info?: string;
   to?: string;
 }) {
   const nav = useNavigate();
+  // Overdue and Never arrived share red: both are a missing file. The darker
+  // one is the period that has closed.
   const rows = [
     { label: "Arrived on time", v: onTime, c: "var(--p-ok)" },
     { label: "Arrived late", v: late, c: "var(--p-warn)" },
-    { label: "Never arrived", v: never, c: "var(--p-crit)" },
+    { label: "Overdue", v: overdue, c: "var(--p-crit)" },
+    { label: "Never arrived", v: never, c: "var(--p-crit-ink)" },
   ];
   const total = rows.reduce((a, r) => a + (r.v ?? 0), 0);
-  const alert = (never ?? 0) > 0;
+  const alert = (overdue ?? 0) + (never ?? 0) > 0;
   const shadow = "0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05)";
 
   return (

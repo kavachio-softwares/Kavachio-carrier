@@ -46,3 +46,9 @@ certs/
 *.pfx
 flow diagram/
 backend/python-services/pipeline_decisions.log
+
+# Google Cloud service-account keys (Agent Platform / Vertex AI). A committed key
+# is a key anyone with repo access can spend the GCP project with.
+*gcp-credetials*.json
+*gcp-credentials*.json
+Kavachio-website/
