@@ -20,9 +20,11 @@ recognised by its SHAPE:
 Joining the two BY CODE gives, for any jurisdiction, exactly which fields it
 reports and which of them are mandatory — no fuzzy matching of territory text.
 
-Dropping a newer workbook into ``backend/assests`` is all it takes to offer a
-new version; removing one withdraws it. If the directory is empty every call
-here returns empty and the UI hides the option — it never raises.
+Dropping a newer workbook into ``backend/python-services/assests`` is all it
+takes to offer a new version; removing one withdraws it. The folder sits inside
+the backend's Docker build context, so the workbook ships in the image. If the
+directory is empty every call here returns empty and the UI hides the option —
+it never raises.
 """
 from __future__ import annotations
 
@@ -31,11 +33,18 @@ import re
 import threading
 from typing import Any, Optional
 
-# backend/python-services/reporting_standards.py -> backend/assests
-_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The workbooks live next to this file, in backend/python-services/assests,
+# because the Docker image is built from backend/python-services (COPY . .):
+# anything outside that folder never reaches the deployed app. The old
+# location one level up (backend/assests) is still read, so a checkout that
+# keeps a copy there goes on working.
+_SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
+_BACKEND_DIR = os.path.dirname(_SERVICE_DIR)
 # The folder is spelled "assests" in this repo. Accept either spelling so the
 # module keeps working if it is ever corrected, without a second deployment step.
-_ASSET_DIRS = [os.path.join(_BACKEND_DIR, "assests"),
+_ASSET_DIRS = [os.path.join(_SERVICE_DIR, "assests"),
+               os.path.join(_SERVICE_DIR, "assets"),
+               os.path.join(_BACKEND_DIR, "assests"),
                os.path.join(_BACKEND_DIR, "assets")]
 
 _REF_LABEL = "ref"
@@ -52,10 +61,15 @@ def asset_dirs() -> list[str]:
 
 
 def _asset_files() -> list[str]:
+    # A workbook found in more than one folder is offered once, from the first
+    # folder in _ASSET_DIRS order (the one inside the build context).
     out: list[str] = []
+    seen: set[str] = set()
     for d in asset_dirs():
         for name in sorted(os.listdir(d)):
-            if name.lower().endswith((".xlsx", ".xlsm")) and not name.startswith("~$"):
+            if name.lower().endswith((".xlsx", ".xlsm")) and not name.startswith("~$") \
+                    and name.lower() not in seen:
+                seen.add(name.lower())
                 out.append(os.path.join(d, name))
     return out
 
