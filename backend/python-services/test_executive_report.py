@@ -144,7 +144,9 @@ def sources(monkeypatch):
     monkeypatch.setattr(er, "_quality", lambda s, tid, a, b: asked.more.update(quality=(a, b)) or {})
     monkeypatch.setattr(er, "_late", lambda s, tid, a, b, at: asked.more.update(late=(a, b, at)) or {})
     monkeypatch.setattr(er, "_contracts", lambda s, tid, a, b, at, daily: asked.more.update(contracts=(a, b, at, daily)) or {})
-    monkeypatch.setattr(er, "_scorecard", lambda s, tid, w, prem: {})
+    monkeypatch.setattr(er, "_scorecard", lambda s, tid, w, prem, **k: {})
+    monkeypatch.setattr(er, "_history", lambda s, tid, cadence, end: asked.more.update(history=(cadence, end)) or [])
+    monkeypatch.setattr(er, "_errors_by_programme", lambda s, tid, a, b: asked.more.update(ebp=(a, b)) or {})
     return asked
 
 
@@ -163,7 +165,8 @@ def test_a_monthly_pack_compares_the_month_with_the_one_before(sources):
     assert sources.at == {"problems": end, "portfolio": end, "reinsurance": end}
     # The new sections follow the month too.
     a, b = dt.date(2026, 10, 1), dt.date(2026, 11, 1)
-    assert sources.more == {"quality": (a, b), "late": (a, b, end), "contracts": (a, b, end, False)}
+    assert sources.more == {"quality": (a, b), "late": (a, b, end), "contracts": (a, b, end, False),
+                            "history": ("month", b), "ebp": (a, b)}
 
 
 def test_a_custom_pack_is_worked_out_at_its_to_date(sources):
@@ -349,7 +352,8 @@ def test_each_filter_reads_needs_attention_at_its_own_last_day(timeline, monkeyp
                                          "clean_first_time": 0, "clean_first_time_pct": None}),
                        ("_timeliness", {"on_time_pct": None}), ("_money", {}), ("_trend", []),
                        ("_portfolio", {}), ("_reinsurance", {}), ("_quality", {}),
-                       ("_late", {}), ("_contracts", {}), ("_scorecard", {})):
+                       ("_late", {}), ("_contracts", {}), ("_scorecard", {}),
+                       ("_history", []), ("_errors_by_programme", {})):
         monkeypatch.setattr(er, name, lambda *a, _v=stub, **k: dict(_v) if isinstance(_v, dict) else list(_v))
     today = dt.date(2026, 12, 1)
     got = {
@@ -443,7 +447,8 @@ def test_daily_premium_is_from_the_files_processed_that_day(monkeypatch):
     monkeypatch.setattr(fs, "_bytes", lambda s, o: xlsx(heads, o._rows))
     m = er._money_processed(None, 7, er.window("day", "2026-11-12", dt.date(2026, 11, 12)))
     assert (m["currency"], m["files"], m["other_currencies"]) == ("USD", 2, 1)
-    assert m["gross_premium"] == {"current": 1200, "previous": 999, "change": 20.1}
+    assert m["gross_premium"] == {"current": 1200, "previous": 999, "change": 20.1,
+                                  "last_year": None, "change_last_year": None}   # nothing a year ago
     assert m["commission"]["current"] == 120
     assert [(x["name"], x["gross_premium"]) for x in m["top_programmes"]] == [("Fleet", 1000), ("Cargo", 200)]
 
@@ -532,6 +537,33 @@ def test_late_lists_files_due_in_the_period_that_came_late_or_not_at_all(timelin
     assert [(x["month"], x["status"], x["days_late"], x["arrived_on"]) for x in out["list"]] == [
         ("E1", "Not yet", 21, None), ("D1", "Not yet", 26, None)]
     assert out["list"][0]["programme"] == "Fleet" and out["list"][0]["broker"] == "#50"
+
+
+def test_the_money_trend_is_six_months_from_three_reads(monkeypatch):
+    asked = []
+
+    def money(s, tid, month, **k):
+        asked.append(month)
+        n = int(month[-2:])
+        fig = lambda v: {"current": v, "previous": v - 1}  # noqa: E731
+        return {"currency": "GBP" if month == "2026-06" else "USD",
+                "gross_premium": fig(100.0 * n), "commission": fig(10.0 * n), "earned_premium": fig(n)}
+    monkeypatch.setattr(er, "_money", money)
+    got = er.money_trend(None, 7, "month", "2026-10", today=dt.date(2026, 11, 18))
+    assert asked == ["2026-10", "2026-08", "2026-06"]
+    # June was in another currency: June and May are left out.
+    assert got["currency"] == "USD"
+    assert [m["month"] for m in got["months"]] == ["2026-07", "2026-08", "2026-09", "2026-10"]
+    assert got["months"][-1] == {"month": "2026-10", "gross": 1000.0, "commission": 100.0, "earned": 10.0}
+    assert got["months"][-2]["gross"] == 999.0          # September: October's "previous"
+    assert er.money_trend(None, 7, "day", "2026-11-11", today=dt.date(2026, 11, 18)) == {"currency": None, "months": []}
+
+
+def test_late_files_narrow_to_one_programme(timeline):
+    # Programme reports: every file in the timeline is Fleet's (programme 1).
+    oct_ = (dt.date(2026, 10, 1), dt.date(2026, 11, 1), dt.date(2026, 10, 31))
+    assert er._late(timeline, 7, *oct_, program_id=1)["total"] == 2
+    assert er._late(timeline, 7, *oct_, program_id=2)["total"] == 0
 
 
 def test_a_file_that_came_after_the_period_ended_is_still_missing_at_its_end(timeline):
@@ -633,3 +665,50 @@ def test_premium_written_counts_each_file_once_in_the_contracts_term_and_currenc
         "gross_premium": {"value": cells["g"]}, "currency": {"status": ff.REPORTED, "value": cells["c"]}})
     out = er._written(None, 7, [c], dt.date(2026, 10, 31))
     assert out == {1: {"written": 500.0, "files": 2, "other_currency_rows": 1}}
+
+
+# ── 37.2: the error history before the report's own period ─────────────────
+def test_the_error_history_looks_back_by_the_reports_cadence():
+    unit, p = er.history_buckets("month", dt.date(2026, 11, 1))
+    assert unit == "month" and len(p) == 12
+    assert (p[0][2], p[-1][2]) == ("Nov 2025", "Oct 2026")
+    assert p[-1][:2] == (dt.datetime(2026, 10, 1), dt.datetime(2026, 11, 1))
+    unit, p = er.history_buckets("custom", dt.date(2026, 10, 16))        # 1–15 Oct
+    assert unit == "month" and p[-1][2] == "Oct 2026"
+    unit, p = er.history_buckets("week", dt.date(2026, 11, 9))           # week of 2 Nov
+    assert unit == "week" and len(p) == 12
+    assert (p[0][2], p[-1][2]) == ("17 Aug", "2 Nov")
+    assert p[-1][:2] == (dt.datetime(2026, 11, 2), dt.datetime(2026, 11, 9))
+    unit, p = er.history_buckets("day", dt.date(2026, 11, 13))           # 12 Nov
+    assert unit == "day" and len(p) == 14
+    assert (p[0][2], p[-1][2]) == ("30 Oct", "12 Nov")
+
+
+def test_the_error_history_counts_each_period(monkeypatch):
+    import check_record as cr
+    calls = []
+
+    def summary(s, tid, a, b, **k):
+        calls.append((a, b))
+        n = len(calls)
+        return {"volumes": {"files": n}, "quality": {"errors": 2 * n},
+                "no_human_help": {"files_pct": 50.0}}
+    monkeypatch.setattr(cr, "summary", summary)
+    h = er._history(None, 7, "week", dt.date(2026, 11, 9))
+    assert len(h) == 12 and h[-1] == {"unit": "week", "label": "2 Nov", "from": "2026-11-02T00:00:00",
+                                      "to": "2026-11-09T00:00:00", "files": 12, "errors": 24,
+                                      "clean_first_time_pct": 50.0}
+
+
+def test_errors_by_programme_are_split_by_severity_most_first(monkeypatch):
+    import check_record as cr
+    rows = [{"id": 1, "errors": 9, "critical": 4, "warning": 5, "info": 0},
+            {"id": None, "errors": 7, "critical": 7, "warning": 0, "info": 0},   # no programme
+            {"id": 2, "errors": 3, "critical": 0, "warning": 1, "info": 2},
+            {"id": 3, "errors": 0, "critical": 0, "warning": 0, "info": 0}]       # clean
+    monkeypatch.setattr(cr, "summary", lambda s, tid, a, b, **k: {"by_programme": rows})
+    monkeypatch.setattr(er, "_names", lambda s, p, b: {"programme": {1: "Fleet", 2: "Cargo"}, "broker": {}})
+    got = er._errors_by_programme(None, 7, dt.date(2026, 10, 1), dt.date(2026, 11, 1))
+    assert got["total"] == 2
+    assert got["rows"] == [{"id": 1, "name": "Fleet", "errors": 9, "critical": 4, "warning": 5, "info": 0},
+                           {"id": 2, "name": "Cargo", "errors": 3, "critical": 0, "warning": 1, "info": 2}]

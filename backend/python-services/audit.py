@@ -408,6 +408,13 @@ _SELF_LOGGED = [
     # 43.3: emailing the policy list writes its own named row (policy_export),
     # with how many policies, the filters and who it went to.
     ("POST",   re.compile(r"^/policies/send$")),
+    # Programme Rules: every write names itself (programme_rule_routes).
+    ("POST",   re.compile(r"^/programs/\d+/rules$")),
+    ("PUT",    re.compile(r"^/programs/\d+/rules/\d+$")),
+    ("DELETE", re.compile(r"^/programs/\d+/rules/\d+$")),
+    ("POST",   re.compile(r"^/programs/\d+/rules/\d+/(send|retire)$")),
+    ("POST",   re.compile(r"^/broker/programme-rules/\d+/(approve|request-changes)$")),
+    ("POST",   re.compile(r"^/treaty-view/[^/]+/programme-rules/\d+/(approve|request-changes)$")),
     ("PUT",    re.compile(r"^/intake/routes/\d+/contacts$")),
     ("POST",   re.compile(r"^/extra-fields$")),
     ("POST",   re.compile(r"^/extra-fields/[^/]+/adopt$")),

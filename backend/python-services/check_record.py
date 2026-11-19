@@ -553,7 +553,7 @@ def summary(s, tenant_id: int, start: datetime, end: datetime,
         tally: dict[str, dict] = {}
         for cr in (s.query(CheckResult).filter(CheckResult.run_id.in_(file_ids),
                                                CheckResult.outcome == FAILED).all()):
-            t = tally.setdefault(cr.check_key, {"check": cr.name or cr.check_key,
+            t = tally.setdefault(cr.check_key, {"check": cr.name or cr.check_key, "key": cr.check_key,
                                                 "kind": cr.kind, "severity": None,
                                                 "files": 0, "errors": 0})
             t["files"] += 1
@@ -569,8 +569,12 @@ def summary(s, tenant_id: int, start: datetime, end: datetime,
             k = tuple(getattr(f, a) for a in attrs)
             ids = {"id": k[0]} if len(attrs) == 1 else dict(zip(attrs, k))
             row = rows.setdefault(k, {**ids, "files": 0, "rows": 0, "errors": 0,
+                                      "critical": 0, "warning": 0, "info": 0,
                                       "rows_with_errors": 0, "straight_through": 0})
             row["files"] += 1
+            row["critical"] += f.critical_count or 0
+            row["warning"] += f.warning_count or 0
+            row["info"] += f.info_count or 0
             row["rows"] += (f.rows_checked if f.rows_checked is not None else f.rows_out) or 0
             row["errors"] += f.errors_total or 0
             row["rows_with_errors"] += f.rows_with_errors or 0

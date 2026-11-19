@@ -69,6 +69,7 @@ export const ROUTE_ACCESS: {
   // Active Contracts tile (it has no sidebar entry). An operator never sees a
   // contract at all — same rule as /contracts/:contractId below.
   { pattern: "/broker/contracts", requires: "broker_admin", only: ["broker_admin"] },
+  { pattern: "/broker/programme-rules", requires: "broker_admin", only: ["broker_admin"] },
   // Running the bordereau is BOTH broker seats' — the operator's day-to-day
   // job, and the admin's when they do it themselves. It was the operator's
   // alone, which read as a division of labour and worked as a blocker: a small
@@ -251,6 +252,7 @@ export const ROUTE_ACCESS: {
   // so the carrier seat only (brokers would see each other). The server
   // refuses broker seats too (partner_performance_routes).
   { pattern: "/partner-performance", requires: "carrier_admin", only: ["carrier_admin"] },
+  { pattern: "/executive-report/programmes", requires: "carrier_admin", only: ["carrier_admin"] },
   // Policy Search (43.1) — the policies inside the processed bordereaux. The
   // carrier sees its whole book, a broker only what it sent; Kavachio is not
   // a party to policy data, so `only` keeps it out by rank. The server refuses

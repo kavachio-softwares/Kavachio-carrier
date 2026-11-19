@@ -18,7 +18,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useSearchParams } from "react-router-dom";
 import {
   Ban, CalendarClock, CheckCircle2, Download, FileText, KeyRound, Loader2,
-  Lock, Mail, MessageSquare, PenLine, ShieldCheck, Star,
+  ListChecks, Lock, Mail, MessageSquare, PenLine, ShieldCheck, Star,
 } from "lucide-react";
 import KavachioLogo from "../components/KavachioLogo";
 import { TreatyTower } from "../components/treaty/TreatyTower";
@@ -33,6 +33,9 @@ import {
   type TreatyView as View, type TreatyViewLocked, type TreatyViewOpen,
 } from "../api/treaty";
 import { fmtDate } from "../utils/date";
+import {
+  approveLinkRule, getLinkRules, requestLinkRuleChanges, type ReinsurerRule,
+} from "../api/programmeRules";
 import {
   answerLinkStatement, downloadLinkStatement, type LinkStatement,
 } from "../api/ceded";
@@ -364,6 +367,8 @@ function Treaty({ token, v, onLock, onView }: {
         )}
 
         <ApprovalCard token={token} v={v} onView={onView} onLock={onLock} />
+
+        <ProgrammeRulesCard token={token} v={v} onLock={onLock} />
 
         {!!v.basis_changes?.length && (
           <BasisChangesCard token={token} v={v} onView={onView} onLock={onLock} />
@@ -1232,6 +1237,133 @@ function StatementsCard({ token, v, onLock, onStatements }: {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+// ── Programme Rules sent to this reinsurer (programme_rule_routes) ───────────
+/** Rules the carrier set for every treaty on a programme, waiting for this
+ *  reinsurer's approval. Each checks its statements only once it approves.
+ *  Loaded on its own call, so the treaty shows even if this one fails. */
+function ProgrammeRulesCard({ token, v, onLock }: {
+  token: string; v: TreatyViewOpen; onLock: () => void;
+}) {
+  const [rules, setRules] = useState<ReinsurerRule[]>([]);
+  const [open, setOpen] = useState<{ id: number; mode: "approve" | "change" } | null>(null);
+  const [name, setName] = useState(v.viewer.name ?? "");
+  const [confirm, setConfirm] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const org = v.viewer.organisation ?? "your organisation";
+
+  // Once per link: the page may hand down a new onLock on every render.
+  const lock = useRef(onLock);
+  lock.current = onLock;
+  useEffect(() => {
+    getLinkRules(token).then(d => setRules(d.rules)).catch(x => {
+      if ((x as { response?: { status?: number } })?.response?.status === 401) lock.current();
+    });
+  }, [token]);
+
+  async function answer(r: ReinsurerRule) {
+    if (!open) return;
+    setBusy(true);
+    try {
+      const d = open.mode === "approve"
+        ? await approveLinkRule(token, r.id, name.trim())
+        : await requestLinkRuleChanges(token, r.id, note.trim());
+      setRules(d.rules);
+      showDone(open.mode === "approve"
+        ? `Approved. ${v.carrier} has been told, and the rule now checks your statements.`
+        : `Sent to ${v.carrier}. You will be asked again once the rule is changed.`);
+      setOpen(null); setNote(""); setConfirm(false);
+    } catch (x) {
+      if ((x as { response?: { status?: number } })?.response?.status === 401) { onLock(); return; }
+      popError(x, "That did not go through. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (rules.length === 0) return null;
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-h">
+        <ListChecks size={16} className="ci" />
+        <h3>Programme rules</h3>
+      </div>
+      <div style={{ padding: "14px 20px 16px", display: "grid", gap: 14 }}>
+        {rules.map(r => {
+          const badge = r.status === "approved" ? ["b-ok", "You approved"]
+            : r.status === "changes_requested" ? ["b-warn", "Changes asked for"] : ["b-mut", "Waiting for you"];
+          return (
+            <div key={r.id} style={{ borderTop: "1px solid var(--p-border)", paddingTop: 12 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <b>{r.name}</b>
+                <span className={`badge ${badge[0]}`}><span className="d" />{badge[1]}</span>
+              </div>
+              <p style={{ margin: "6px 0 2px", fontSize: 14 }}>{r.sentence}</p>
+              <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+                {r.programme ?? "Programme"} · {r.treaties.join(", ")}{r.description ? ` · ${r.description}` : ""}
+              </p>
+              {r.status === "approved" && (
+                <p className="muted" style={{ margin: "8px 0 0", fontSize: 13.5 }}>
+                  Approved for {org} by <b>{r.by}</b> on {fmtDate(r.at)}.
+                </p>
+              )}
+              {r.status === "changes_requested" && (
+                <p className="muted" style={{ margin: "8px 0 0", fontSize: 13.5 }}>
+                  You asked for a change on {fmtDate(r.at)}: <i>&ldquo;{r.note}&rdquo;</i>.
+                </p>
+              )}
+              {r.status === "pending" && open?.id !== r.id && (
+                <div className="rowacts" style={{ marginTop: 10 }}>
+                  <button className="btn pri" type="button" onClick={() => setOpen({ id: r.id, mode: "approve" })}>
+                    <CheckCircle2 size={14} /> Approve
+                  </button>
+                  <button className="btn" type="button" onClick={() => setOpen({ id: r.id, mode: "change" })}>
+                    <MessageSquare size={14} /> Ask for a change
+                  </button>
+                </div>
+              )}
+              {open?.id === r.id && open.mode === "approve" && (
+                <div className="note" style={{ marginTop: 10 }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>Your name</label>
+                    <input value={name} onChange={x => setName(x.target.value)} />
+                  </div>
+                  <label style={{ display: "flex", gap: 8, alignItems: "flex-start",
+                                  marginTop: 12, fontSize: 13, color: "var(--p-ink)" }}>
+                    <input type="checkbox" checked={confirm} style={{ marginTop: 3 }}
+                           onChange={x => setConfirm(x.target.checked)} />
+                    <span>On behalf of <b>{org}</b>, I approve this rule.</span>
+                  </label>
+                  <div className="rowacts">
+                    <button className="btn pri" type="button" disabled={busy || !name.trim() || !confirm}
+                            onClick={() => answer(r)}>{busy ? "Approving…" : "Approve"}</button>
+                    <button className="btn" type="button" onClick={() => setOpen(null)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+              {open?.id === r.id && open.mode === "change" && (
+                <div className="note" style={{ marginTop: 10 }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>What should change?</label>
+                    <textarea rows={3} value={note} onChange={x => setNote(x.target.value)}
+                              placeholder="e.g. The cap should be 6,000,000, not 5,000,000." />
+                  </div>
+                  <div className="rowacts">
+                    <button className="btn pri" type="button" disabled={busy || !note.trim()}
+                            onClick={() => answer(r)}>{busy ? "Sending…" : "Send"}</button>
+                    <button className="btn" type="button" onClick={() => setOpen(null)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

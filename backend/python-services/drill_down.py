@@ -21,7 +21,10 @@ re-written copy of its rules.
   monthly     a Monthly Report number for one month — files and rows handled,
               new / renewed / cancelled policies, errors and critical errors,
               files clean first time. Counted from the files first checked in
-              that month, as they first arrived.
+              that month, as they first arrived. The Executive Report asks the
+              same for any dates (`dates` 'YYYY-MM-DD..YYYY-MM-DD', both days
+              included) — a day, a week, a chart's bar — and for the errors of
+              one check (`check`, its check_key).
 
 What it cannot show it says: a row with no policy number is a row, not a
 policy, so it is counted in `rows` but appears in no policy.
@@ -46,6 +49,36 @@ MONTHLY_TXN = {"new": "new", "renewed": "renewed", "cancelled": "cancelled"}
 
 _MONTH = re.compile(r"\d{4}-\d{2}")
 _SPAN = re.compile(r"\d{4}-\d{2}-\d{2}\.\.\d{4}-\d{2}-\d{2}")
+_DATES = re.compile(r"(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})")
+
+
+def dates_name(a: dt.date, b: dt.date) -> str:
+    """'12 Nov 2026', '2 – 8 Nov 2026', '28 Oct – 3 Nov 2026'."""
+    if a == b:
+        return f"{a.day} {a:%b %Y}"
+    if (a.year, a.month) == (b.year, b.month):
+        return f"{a.day} – {b.day} {b:%b %Y}"
+    if a.year == b.year:
+        return f"{a.day} {a:%b} – {b.day} {b:%b %Y}"
+    return f"{a.day} {a:%b %Y} – {b.day} {b:%b %Y}"
+
+
+def _span(month: Optional[str], dates: Optional[str]) -> tuple[dt.datetime, dt.datetime, str, str]:
+    """(start, end, period, period name) of a month or of any dates."""
+    import check_record as cr
+    if dates:
+        m = _DATES.fullmatch(dates.strip())
+        if not m:
+            raise HTTPException(400, "dates must be YYYY-MM-DD..YYYY-MM-DD")
+        a, b = (dt.date.fromisoformat(x) for x in m.groups())
+        if b < a:
+            raise HTTPException(400, "dates must run from the earlier day to the later one")
+        start = dt.datetime.combine(a, dt.time())
+        return start, dt.datetime.combine(b + dt.timedelta(days=1), dt.time()), dates.strip(), dates_name(a, b)
+    if not month or not _MONTH.fullmatch(month):
+        raise HTTPException(400, "month must be YYYY-MM")
+    start, end = cr.month_bounds(month)
+    return start, end, month, period_name(month)
 
 
 def period_name(label: Optional[str]) -> str:
@@ -99,14 +132,18 @@ def _financial(s, p, *, basis: str, period: Optional[str], window: str,
 
 
 def _monthly(s, p, *, month: Optional[str], measure: Optional[str],
-             program_id: Optional[int], broker_party_id: Optional[int]) -> dict:
+             program_id: Optional[int], broker_party_id: Optional[int],
+             dates: Optional[str] = None, check: Optional[str] = None) -> dict:
     import check_record as cr
     from db import CheckError
     if p.role != "carrier_admin" or p.tenant_id is None:
         raise HTTPException(403, "The Operational Report is for carriers.")
     if measure not in MONTHLY:
         raise HTTPException(400, f"measure must be one of {', '.join(MONTHLY)}")
-    if month and _SPAN.fullmatch(month):
+    if dates:
+        # Any dates picked on the Executive Report ('from..to', both days included).
+        start, end, period, name = _span(None, dates)
+    elif month and _SPAN.fullmatch(month):
         # A day, a week or dates picked on the Monthly Report: 'from..to',
         # both days included — the files first checked on those days.
         try:
@@ -119,9 +156,9 @@ def _monthly(s, p, *, month: Optional[str], measure: Optional[str],
         end = dt.datetime(b.year, b.month, b.day) + dt.timedelta(days=1)
         import monthly_report as mr
         name = mr.period_title("custom", month)
+        period = month
     elif month and _MONTH.fullmatch(month):
-        start, end = cr.month_bounds(month)
-        name = period_name(month)
+        start, end, period, name = _span(month, None)
     else:
         raise HTTPException(400, "month must be YYYY-MM")
     files = cr.first_runs(cr.runs_in(s, int(p.tenant_id), start, end, program_id=program_id,
@@ -135,6 +172,8 @@ def _monthly(s, p, *, month: Optional[str], measure: Optional[str],
         by_run = {f.id: f.export_id for f in files if f.export_id}
         q = s.query(CheckError.run_id, CheckError.policy_number, CheckError.severity).filter(
             CheckError.run_id.in_(by_run or {0}))
+        if check:
+            q = q.filter(CheckError.check_key == check)
         for run_id, number, sev in q:
             if measure == "critical" and cr._sev(sev) != "critical":
                 continue
@@ -151,7 +190,7 @@ def _monthly(s, p, *, month: Optional[str], measure: Optional[str],
             for ln in ps._lines_of(s, o, structures.get(o.template_id)):
                 if cr._GROUP_OF.get(cr.txn_type(ln["transaction"])) == want:
                     _add(within, o.id, ps.policy_key(ln["policy"]))
-    return {"source": "monthly", "period": month, "period_name": name,
+    return {"source": "monthly", "period": period, "period_name": name,
             "files": len(within), "rows": None, "within": within}
 
 
@@ -161,7 +200,8 @@ def resolve(s, p, *, source: Optional[str], label: Optional[str] = None,
             currency: Optional[str] = None, open_problems: str = "include",
             month: Optional[str] = None, measure: Optional[str] = None,
             program_id: Optional[int] = None, broker_party_id: Optional[int] = None,
-            carrier_id: Optional[int] = None) -> Optional[dict]:
+            carrier_id: Optional[int] = None, dates: Optional[str] = None,
+            check: Optional[str] = None) -> Optional[dict]:
     """The rows behind one number, for policy_search.search(drill=…); None
     when no number was clicked. `label` is what the screen called the number,
     shown back above the list."""
@@ -176,6 +216,6 @@ def resolve(s, p, *, source: Optional[str], label: Optional[str] = None,
                          open_problems=open_problems)
     else:
         out = _monthly(s, p, month=month, measure=measure, program_id=program_id,
-                       broker_party_id=broker_party_id)
+                       broker_party_id=broker_party_id, dates=dates, check=check)
     out["label"] = " ".join((label or "").split())[:80] or None
     return out

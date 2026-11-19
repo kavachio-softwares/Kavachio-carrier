@@ -17,6 +17,7 @@ import TeamActivity from "./pages/TeamActivity";
 import PersonActivity from "./pages/PersonActivity";
 import FilesByCarrier from "./pages/FilesByCarrier";
 import BrokerContracts from "./pages/BrokerContracts";
+import BrokerProgrammeRules from "./pages/BrokerProgrammeRules";
 import BrokerInvitations from "./pages/BrokerInvitations";
 import BrokerBordereau from "./pages/BrokerBordereau";
 import TenantDetail from "./pages/TenantDetail";
@@ -69,6 +70,7 @@ import BordereauCalendar from "./pages/BordereauCalendar";
 import MonthlyReport from "./pages/MonthlyReport";
 import ExecutiveReport from "./pages/ExecutiveReport";
 import PartnerPerformance from "./pages/PartnerPerformance";
+import ProgrammeManagement from "./pages/ProgrammeManagement";
 import MonthlySendSchedule from "./pages/MonthlySendSchedule";
 import PolicySearch from "./pages/PolicySearch";
 import FinancialSummary from "./pages/FinancialSummary";
@@ -180,6 +182,7 @@ export default function App() {
         {/* Broker seats. Everything here is READ of what a carrier gave them. */}
         <Route path="/broker" element={<BrokerDashboard />} />
         <Route path="/broker/contracts" element={<BrokerContracts />} />
+        <Route path="/broker/programme-rules" element={<BrokerProgrammeRules />} />
         {/* The broker's monthly run — the broker admin's. */}
         <Route path="/broker/bordereau" element={<BrokerBordereau />} />
         <Route path="/broker/runs" element={<BrokerRuns />} />
@@ -294,6 +297,8 @@ export default function App() {
         <Route path="/executive-report" element={<ExecutiveReport />} />
         {/* 36 — how often each broker sends a clean file on time, best and worst. */}
         <Route path="/partner-performance" element={<PartnerPerformance />} />
+        {/* The Programme Management Report — a sub-screen of the Executive Report. */}
+        <Route path="/executive-report/programmes" element={<ProgrammeManagement />} />
         {/* How a broker's file reaches you, and everything that has landed —
             one screen with two tabs. The old paths are kept as redirects: they
             are in emails to brokers and in bookmarks, and a link that 404s is a

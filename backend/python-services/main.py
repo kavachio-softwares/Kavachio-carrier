@@ -59,6 +59,7 @@ from audit_routes import router as audit_router
 # protects (carrier side), and the reinsurer's private read-only link, unlocked
 # by an emailed one-time code (/treaty-view/…, no login).
 from treaty_routes import router as treaty_router, public_router as treaty_public_router
+from programme_rule_routes import router as programme_rule_router, public_router as programme_rule_public_router
 # Reinsurance (ceded) bordereaux: prepared from the inward ones, per treaty and
 # period, sent to each reinsurer, answered on the reinsurer's private link.
 from ceded_routes import router as ceded_router, public_router as ceded_public_router
@@ -96,7 +97,7 @@ app = FastAPI(title="BDX Mapper", version="0.3.0")
 import os as _os
 _cors_origins = [o.strip() for o in _os.getenv(
     "CORS_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173,http://192.168.2.92:5173",
+    "http://localhost:5174,http://127.0.0.1:5174,http://192.168.2.92:5174",
 ).split(",") if o.strip()]
 
 # Password-reset & invite emails link to APP_BASE_URL, so that origin must be
@@ -160,6 +161,7 @@ app.include_router(segment_router)
 app.include_router(esign_public_router)
 app.include_router(esign_router)
 app.include_router(treaty_public_router)
+app.include_router(programme_rule_public_router)
 app.include_router(treaty_router)
 app.include_router(ceded_public_router)
 app.include_router(ceded_router)
@@ -177,6 +179,7 @@ app.include_router(policy_router)
 app.include_router(financial_router)
 app.include_router(executive_router)
 app.include_router(partner_performance_router)
+app.include_router(programme_rule_router)
 
 
 def _mark_deprecated_aliases() -> None:
@@ -4631,4 +4634,4 @@ def export_download_data_stream(export_id: int,
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)

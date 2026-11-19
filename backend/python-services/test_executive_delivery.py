@@ -89,6 +89,27 @@ def test_the_headline_says_each_number_and_its_change():
     assert h["Open problems"] == "7 (3 overdue)" and h["Escalations"] == "1"
 
 
+def test_earned_premium_is_compared_with_last_month_and_last_year():
+    money = {**_pack()["money"],
+             "gross_premium": {"current": 125000.0, "previous": 100000.0, "change": 25.0,
+                               "last_year": 100000.0, "change_last_year": 25.0},
+             "earned_premium": {"current": 95000.0, "previous": 89622.0, "change": 6.0,
+                                "last_year": 87156.0, "change_last_year": 9.0}}
+    labels = [k for k, _ in ed.headline({**_pack(), "money": money})]
+    h = dict(ed.headline({**_pack(), "money": money}))
+    assert labels[:3] == ["Gross premium", "Commission", "Earned premium"]
+    assert h["Earned premium"] == "USD 95,000 (+6% vs last month · +9% vs last year)"
+    assert h["Gross premium"] == "USD 125,000 (+25% vs last month · +25% vs last year)"
+    none = {**money, "earned_premium": {"current": None, "previous": 1.0, "change": None}}
+    assert dict(ed.headline({**_pack(), "money": none}))["Earned premium"] == "Not reported"
+    # A report sent before earned premium was added is re-made without it.
+    assert "Earned premium" not in dict(ed.headline(_pack()))
+    week = ed.headline({**_pack("week", "2026-11-02"), "money": money})
+    assert "Earned premium so far" in dict(week)
+    day = {**_pack(), "cadence": "day", "period": "2026-11-12", "money": money}
+    assert dict(ed.headline(day))["Earned premium"].endswith("(+6% vs the day before · +9% vs last year)")
+
+
 def test_a_weekly_headline_says_premium_is_the_month_so_far():
     h = dict(ed.headline(_pack("week", "2026-11-02")))
     assert "Gross premium so far" in h and "vs last week" in h["Files processed"]
@@ -428,3 +449,26 @@ def test_the_scorecards_replace_data_quality_in_the_files():
     assert [c.value for c in sh[2]] == ["CRC", "USD 125,000", "12", "75%", "60% (down from 75%)", "1"]
     assert wb["Programme scorecard"]["A2"].value == "No programme had files, premium or files due"
     assert "Broker scorecard — 1 of 12" in ed.sections_html(p)
+
+
+def test_errors_by_programme_and_the_error_history_reach_the_files():
+    pack = {**_pack(),
+            "errors_by_programme": {"total": 7, "rows": [{"id": 1, "name": "Fleet", "errors": 9,
+                                                           "critical": 4, "warning": 5, "info": 0}]},
+            "history": [{"unit": "month", "label": "Oct 2026", "files": 12, "errors": 9,
+                         "clean_first_time_pct": 75.0}]}
+    got = dict(ed.sections(pack))
+    assert got["Errors by programme — 1 of 7"][1] == ["Fleet", "9", "4", "5", "0"]
+    assert got["Error history — last 12 months"][1] == ["Oct 2026", "12", "9", "75%"]
+    assert ed.render_pdf(pack, "Acme")[:4] == b"%PDF" and ed.render_xlsx(pack, "Acme")[:2] == b"PK"
+    # A report sent before these existed reads as it was sent.
+    assert not any(k.startswith(("Errors by programme", "Error history")) for k, _ in ed.sections(_pack()))
+
+
+def test_the_files_list_the_first_escalations_the_screen_pages_through_all():
+    esc = [{"type": "late", "type_label": "Late file", "title": f"File {i}", "status": "Open", "owner": "Broker",
+            "age_days": i, "due_on": "2026-10-01", "overdue": True, "link": None} for i in range(30)]
+    base = _pack()
+    pack = {**base, "problems": {**base["problems"], "escalations": 30, "escalation_list": esc}}
+    rows = next(r for k, r in ed.sections(pack) if k.startswith("Needs attention"))
+    assert len(rows) == 1 + er.ESCALATIONS_SHOWN and rows[1][0] == "Late file: File 0"

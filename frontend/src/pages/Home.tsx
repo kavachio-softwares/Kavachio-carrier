@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ComposedChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
-import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock, ShieldCheck, UserCheck } from "lucide-react";
+import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock, ShieldCheck, UserCheck,
+  BarChart3, Presentation, Zap } from "lucide-react";
 import { api } from "../api/client";
 import { currentMga, getTenantBrand, getUser, isKavachioAdmin, userRole, ROLE_LABEL, type Role } from "../auth";
 import { canAccessPath } from "../access";
@@ -12,6 +13,7 @@ import { listContractsPaged } from "../api/contractRecord";
 import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 import { isHeld, listArrivals, type Arrival } from "../api/intake";
 import { InfoTip } from "../components/InfoTip";
+import { RulesWaitingCard } from "../components/RulesWaitingCard";
 import { StatCard } from "../components/StatCard";
 import { ArrivalsCard } from "../components/ArrivalsCard";
 import { getReinsuranceDashboard, type ReinsuranceDashboard } from "../api/treaty";
@@ -246,6 +248,14 @@ export default function Home() {
   // Process Bordereau follows the route rules (access.ts), so its button and
   // links show exactly to the seats that may open it.
   const canProcess = canAccessPath("/direct");
+  const quickActions = [
+    { to: "/monthly-report", label: "Monthly Report", icon: BarChart3,
+      hint: "Last month's files, problems and fixes",
+      soft: "var(--p-info-soft)", ink: "var(--p-info-ink)" },
+    { to: "/executive-report", label: "Executive Report", icon: Presentation,
+      hint: "The whole book for leadership, to download or email",
+      soft: "var(--p-ok-soft)", ink: "var(--p-ok-ink)" },
+  ].filter(q => canAccessPath(q.to));
 
   useEffect(() => {
     if (!carrierSeat) return;
@@ -659,6 +669,30 @@ export default function Home() {
     </div>
   );
 
+  // Quick actions — the reports, one click from the dashboard, under Overdue
+  // Bordereaux. Each shows only to a seat that may open it (canAccessPath).
+  // HIDDEN for now: not placed on the page.
+  const quickCard = quickActions.length > 0 && (
+    <div className="card">
+      <div className="card-h">
+        <Zap size={18} style={{ color: "var(--p-primary)" }} /><h3>Quick actions</h3>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+                    gap: 14, padding: "20px 22px" }}>
+        {quickActions.map(q => (
+          <Link key={q.to} to={q.to}
+            style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
+                     padding: "18px 14px", borderRadius: 10, textAlign: "center",
+                     background: q.soft, border: "1px solid var(--p-border)", textDecoration: "none" }}>
+            <q.icon size={24} style={{ color: q.ink }} />
+            <b style={{ fontSize: 14, color: q.ink }}>{q.label}</b>
+            <span style={{ fontSize: 12, color: "var(--p-muted)", lineHeight: 1.4 }}>{q.hint}</span>
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+
   return (
     <div className="proto">
       <div className="view full">
@@ -680,6 +714,9 @@ export default function Home() {
             </div>
           )}
         </div>
+
+        {/* Programme rules sent and not yet approved by everyone (carrier only). */}
+        {role === "carrier_admin" && <RulesWaitingCard side="carrier" />}
 
         {/* KPI tiles — wired to /dashboard/stats (see API notes for the new fields).
 
@@ -979,25 +1016,60 @@ export default function Home() {
             )}
           </div>
 
+         
+         
           {/* How each broker company is working and putting its issues right —
-              the five that most recently sent this carrier a file. The carrier
-              admin has it in the row above. */}
-          {carrierSeat && !carrierAdmin && (
-            <div style={{ marginBottom: 24 }}>
-              <BrokerPerformance mga={mga} period={period} periodLabel={periodLabel} />
-            </div>
-          )}
+            the five that most recently sent this carrier a file. The carrier
+            admin has it in the row above. */}
+        {carrierSeat && !carrierAdmin && (
+          <div style={{ marginBottom: 24 }}>
+            <BrokerPerformance mga={mga} period={period} periodLabel={periodLabel}/>
+          </div>
+        )}
+
+        {/* ONE month for the cards below — Overdue Bordereaux (carrier admin),
+            and Bordereaux Processed. They used to count the current
+            month only; this lets a carrier look back a month at a time, or at
+            every month together. The cards still open their full lists. */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                      gap: 12, marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center" }}>
+            <h3 style={{ margin: 0, fontSize: 16 }}>Monthly Activity</h3>
+            <InfoTip text={(carrierAdmin ? "Overdue Bordereaux and Bordereaux Processed"
+              : "The cards below") + " count the month and year picked here. All Months "
+              + "counts the whole year; All Years counts everything."} />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* With All Years there is no one year to take a month of. */}
+            <select className="fbar-select" aria-label="Month"
+              value={year === ALL ? ALL : month} disabled={year === ALL}
+              onChange={e => setMonth(e.target.value)}>
+              <option value={ALL}>All Months</option>
+              {MONTH_NAMES.map((name, i) => (
+                <option key={name} value={pad2(i + 1)}>{name}</option>
+              ))}
+            </select>
+            <select className="fbar-select" aria-label="Year"
+              value={year} onChange={e => setYear(e.target.value)}>
+              <option value={ALL}>All Years</option>
+              {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </div>
+        </div> 
 
           {carrierAdmin ? (
             /* Overdue Bordereaux on the left, Bordereaux Processed and
-               Reinsurance Bordereaux on the right at the same height. */
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-              <div style={{ display: "grid" }}>
+               Reinsurance Bordereaux (and Reinsurance) on the right. Each card keeps
+             its own height. */
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24,
+                        alignItems: "start" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                 <ArrivalsCard onTime={due?.on_time} late={due?.late}
                   overdue={due?.overdue} never={due?.never}
                   subtitle={due ? (everyMonth ? "Due in any year" : `Due in ${periodLabel}`) : undefined}
                   info={`Bordereaux your brokers owed${infoWhen}, by how they arrived.`} />
-              </div>
+                {/* Quick actions (quickCard) goes here — hidden for now. */}
+            </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                 {recentCard}
                 {rei && reinsuranceCard(rei)}
@@ -1010,7 +1082,6 @@ export default function Home() {
           )}
           </div>
         </section>
-
       </div >
 
       <DayFilesDrawer day={statusDay} from="home"

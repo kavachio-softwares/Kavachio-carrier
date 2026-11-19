@@ -92,30 +92,44 @@ def _vs(cadence: str) -> str:
 
 
 def headline(pack: dict) -> list[tuple[str, str]]:
-    """The seven headline numbers, each with its change — the email's facts
-    and the top of both files."""
-    m, o, t, p = pack["money"], pack["operations"], pack["timeliness"], pack["problems"]
+    """The headline numbers, each with its change — the email's facts and the
+    top of both files. Earned premium only on packs that carry it (a report
+    sent before it was added is re-made exactly as it went out)."""
+    m, o, t, p = pack["money"], pack["operations"], pack["timeliness"], pack.get("problems")
     vs = _vs(pack["cadence"])
 
     def ch(now, then, kind, better):
         text, _tone = rd._delta(now, then, kind, better)
         return "" if text == "—" else f" ({text} {vs})"
 
+    daily = pack["cadence"] == "day"
+    # Premium shorter than a month is the month so far, against the month before.
+    money_vs = "vs the day before" if daily else "vs last month"
+
     def money_line(fig):
         if not fig or fig["current"] is None:
             return "Not reported"
-        text, _tone = rd._delta(fig["current"], fig["previous"], "share", "none")
-        return _money(fig["current"], m["currency"]) + ("" if text == "—" else f" ({text} vs last month)")
-    daily = pack["cadence"] == "day"
+        changes = []
+        for then, against in ((fig["previous"], money_vs), (fig.get("last_year"), "vs last year")):
+            text, _tone = rd._delta(fig["current"], then, "share", "none")
+            if text != "—":
+                changes.append(f"{text} {against}")
+        return _money(fig["current"], m["currency"]) + (f" ({' · '.join(changes)})" if changes else "")
     so_far = " so far" if pack["cadence"] not in ("month", "day") else ""
-    return [
+    earned = [(f"Earned premium{so_far}", money_line(m["earned_premium"]))] if "earned_premium" in m else []
+    out = [
         (f"Gross premium{so_far}", money_line(m.get("gross_premium"))),
         (f"Commission{so_far}", money_line(m.get("commission"))),
+        *earned,
         ("Files processed", rd._num(o["files"]) + ch(o["files"], o["previous"]["files"], "share", "none")),
         ("On time", rd._pct(t["on_time_pct"])
          + ch(t["on_time_pct"], t["previous_on_time_pct"], "points", "up")),
         ("Clean first time", rd._pct(o["clean_first_time_pct"])
          + ch(o["clean_first_time_pct"], o["previous"]["clean_first_time_pct"], "points", "up")),
+    ]
+    if p is None:          # one programme's report (programme_report) has no problems section
+        return out
+    return out + [
         ("New problems", f"{rd._num(p['open'])} ({rd._num(p.get('fixed', 0))} fixed)") if daily
         else ("Open problems", f"{rd._num(p['open'])} ({rd._num(p['overdue'])} overdue)"),
         ("New escalations" if daily else "Escalations", rd._num(p["escalations"])),
@@ -339,6 +353,31 @@ def trend_section(trend: list[dict]) -> tuple[str, list[list]]:
                 rd._pct(t["clean_first_time_pct"])] for t in trend])
 
 
+HISTORY_TITLES = {"day": ("Error history — last 14 days", "Day"),
+                  "week": ("Error history — last 12 weeks", "Week of"),
+                  "month": ("Error history — last 12 months", "Month")}
+
+
+def health_sections(pack: dict) -> list[tuple[str, list[list]]]:
+    """37 — errors by programme (split by severity) and 37.2's error history.
+    Absent from reports sent before they existed."""
+    out = []
+    ebp = pack.get("errors_by_programme")
+    if ebp is not None:
+        more = f" — {len(ebp['rows'])} of {ebp['total']}" if ebp["total"] > len(ebp["rows"]) else ""
+        out.append((f"Errors by programme{more}", [["Programme", "Errors", "Critical", "Warning", "Info"]]
+                    + ([[x["name"], rd._num(x["errors"]), rd._num(x["critical"]),
+                         rd._num(x["warning"]), rd._num(x["info"])] for x in ebp["rows"]]
+                       or [["No errors found", "", "", "", ""]])))
+    hist = pack.get("history")
+    if hist:
+        title, col = HISTORY_TITLES[hist[0]["unit"]]
+        out.append((title, [[col, "Files", "Errors", "Clean first time"]]
+                    + [[t["label"], rd._num(t["files"]), rd._num(t["errors"]),
+                        rd._pct(t["clean_first_time_pct"])] for t in hist]))
+    return out
+
+
 def _month_of(key: Optional[str]) -> str:
     """'2026-10' as 'October 2026'; a quarter or week key as it is."""
     return rd.fmt_month(key) if key and re.fullmatch(r"\d{4}-\d{2}", key) else (key or "—")
@@ -451,25 +490,27 @@ def sections(pack: dict) -> list[tuple[str, list[list]]]:
                                    ["Went into run-off", pf["into_runoff"]],
                                    ["Programmes in all", pf["total"]]]))
         out.append(trend_section(pack["trend"]))
+        out.extend(health_sections(pack))
         out.extend(more_sections(pack))
         out.append((f"Needs attention — {p['escalations']} new escalation{'' if p['escalations'] == 1 else 's'}",
                     [["Problem", "Who must act", "Escalated because", "Now"]]
                     + ([[f"{x['type_label']}: {x['title']}", x["owner"] or "—",
                          "Disputed" if x["type"] == "dispute"
                          else "Delinquent" if x["status"] in ("Delinquent",) else f"Past its due date ({x['due_on']})",
-                         "Still open" if x["still_open"] else x["status"]] for x in p["escalation_list"]]
+                         "Still open" if x["still_open"] else x["status"]] for x in p["escalation_list"][:er.ESCALATIONS_SHOWN]]
                        or [["Nothing became an escalation that day", "", "", ""]])))
     else:
         out.append(("Programmes", [["Programmes", "Count"], ["Active", pf["active"]],
                                    ["Run-off", pf["runoff"]], ["Not live yet", pf["not_live"]],
                                    ["Total", pf["total"]]]))
         out.append(trend_section(pack["trend"]))
+        out.extend(health_sections(pack))
         out.extend(more_sections(pack))
         out.append((f"Needs attention — {p['escalations']} escalation{'' if p['escalations'] == 1 else 's'}",
                     [["Problem", "Who must act", "Open for", "Due"]]
                     + ([[f"{x['type_label']}: {x['title']}", x["owner"] or "—",
                          rd._num(x["age_days"]) + " days" if x["age_days"] is not None else "—",
-                         x["due_on"] or "—"] for x in p["escalation_list"]]
+                         x["due_on"] or "—"] for x in p["escalation_list"][:er.ESCALATIONS_SHOWN]]
                        or [["Nothing needs escalating", "", "", ""]])))
     out.append((f"Reinsurance statements due — {reinsurance_line(re_)}",
                 [["Treaty", "Period", "Due", "Status"]]

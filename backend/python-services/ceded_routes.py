@@ -144,8 +144,16 @@ def rules_for(s, c: Contract, st: Optional[dict] = None) -> list[dict]:
     # the signed treaty when it was uploaded (treaty_wording).
     saved = su.rules if su is not None and su.rules is not None else (
         (c.extracted or {}).get("wording_rules") if isinstance(c.extracted, dict) else None)
-    return trr.merge(saved,
-                     trr.derive(st, c.inception_dt, c.expiry_dt, c.commercial_terms) + endorsed)
+    rules = trr.merge(saved,
+                      trr.derive(st, c.inception_dt, c.expiry_dt, c.commercial_terms) + endorsed)
+    # Programme Rules the carrier set for the programmes this treaty protects,
+    # once its reinsurers approved them (programme_rules.py).
+    try:
+        import programme_rules
+        rules += programme_rules.for_treaty(s, c)
+    except Exception as e:  # noqa: BLE001 — the treaty's own rules still run
+        log.info("treaty %s: programme rules skipped (%s)", c.id, e)
+    return rules
 
 
 def own_layout(su: Optional[CededSetup]) -> Optional[dict]:

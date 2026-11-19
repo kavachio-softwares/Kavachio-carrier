@@ -475,6 +475,13 @@ ACTION_WORDS = {
     # 43.2 / 43.3 — the policy list taken out of Kavachio (policy_export.py)
     "policies_exported":          "Downloaded the policy list",
     "policies_sent":              "Emailed the policy list",
+    "programme_rule_created":     "Added a programme rule",
+    "programme_rule_updated":     "Changed a programme rule",
+    "programme_rule_sent":        "Sent a programme rule for approval",
+    "programme_rule_retired":     "Retired a programme rule",
+    "programme_rule_deleted":     "Deleted a draft programme rule",
+    "programme_rule_approved":    "Approved a programme rule",
+    "programme_rule_changes_requested": "Asked for changes to a programme rule",
     # The status messages about a file — to the broker, or the carrier when a
     # deadline needs a decision. Which message, and to whom, is the detail.
     "bdx_notice_sent":            "Emailed a file status update",
@@ -1297,6 +1304,11 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "monthly_report_settings_updated", "monthly_report_sent",
       "executive_report_settings_updated", "executive_report_sent",
       "executive_report_sends_cleared"), CARRIER_SEATS),
+    # Programme Rules: the carrier sets them, brokers and reinsurers answer.
+    ("programme_rules", "Programme rules",
+     ("programme_rule_created", "programme_rule_updated", "programme_rule_sent",
+      "programme_rule_retired", "programme_rule_deleted", "programme_rule_approved",
+      "programme_rule_changes_requested"), ALL_SEATS),
     # How files reach the CARRIER — mailboxes, routes and keys. The broker
     # sends; it is the carrier that sets up the ways in.
     ("intake", "Ingestion channels",

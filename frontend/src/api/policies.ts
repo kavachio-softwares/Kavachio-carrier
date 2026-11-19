@@ -60,6 +60,10 @@ export interface PolicyDrillParams {
   // Operational Report
   month?: string;
   measure?: string;
+  /** Executive Report: any dates instead of a month, "YYYY-MM-DD..YYYY-MM-DD", both days included. */
+  dates?: string;
+  /** Executive Report: one check's errors (its check key). */
+  check?: string;
 }
 
 export interface PolicyDrill {
@@ -82,7 +86,7 @@ export function drillLink(d: PolicyDrillParams, scope: { program?: number | null
 
 /** Read the clicked number back out of the Policies page's own URL. */
 export const DRILL_KEYS = ["from", "label", "basis", "period", "window", "metric", "currency",
-  "open_problems", "month", "measure"] as const;
+  "open_problems", "month", "measure", "dates", "check"] as const;
 export function drillFrom(params: URLSearchParams): PolicyDrillParams | null {
   const from = params.get("from");
   if (from !== "financial" && from !== "monthly") return null;

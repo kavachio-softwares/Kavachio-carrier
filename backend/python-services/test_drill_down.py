@@ -236,3 +236,50 @@ def test_a_week_or_dates_picked_list_the_files_checked_on_those_days(files):
     with pytest.raises(HTTPException) as e:
         dd.resolve(None, CARRIER, source="monthly", month="2027-03-14..2027-03-08", measure="files")
     assert e.value.status_code == 400
+
+
+# ── the Executive Report: any dates, and one check's errors ─────────────────
+def test_any_dates_list_the_files_first_checked_in_them(files):
+    files.exports = [export(1, "2027-03", [full_row("P1")]),
+                     export(2, "2027-03", [full_row("P2")])]
+    files.runs = [_run(10, 1, "2027-03-02"), _run(11, 2, "2027-03-09")]
+    out = _search(source="monthly", dates="2027-03-01..2027-03-07", measure="files")
+    assert _policies(out) == {"P1"}
+    assert (out["drill"]["period"], out["drill"]["period_name"]) == ("2027-03-01..2027-03-07", "1 – 7 Mar 2027")
+    # Both days are included: a single day is "from it to itself".
+    assert _policies(_search(source="monthly", dates="2027-03-09..2027-03-09", measure="files")) == {"P2"}
+
+
+@pytest.mark.parametrize("dates", ["2027-03-01", "2027-03-07..2027-03-01", "March..April"])
+def test_dates_must_be_real(files, dates):
+    with pytest.raises(HTTPException) as e:
+        dd.resolve(None, CARRIER, source="monthly", dates=dates, measure="files")
+    assert e.value.status_code == 400
+
+
+def test_one_checks_errors_narrow_to_that_check(files):
+    files.exports = [export(1, "2027-03", [full_row("P1"), full_row("P2")])]
+    files.runs = [_run(10, 1, status="has_exceptions")]
+
+    class _Checked(_Errors):
+        filters = 0
+
+        def filter(self, *a):
+            _Checked.filters += 1
+            return self
+    s = _Checked([(10, "P1", "critical")])
+    _search(s=s, source="monthly", month="2027-03", measure="errors")
+    plain = _Checked.filters
+    _Checked.filters = 0
+    assert _policies(_search(s=s, source="monthly", month="2027-03", measure="errors",
+                             check="rule:7")) == {"P1"}
+    assert _Checked.filters == plain + 1                        # the check's own filter
+
+
+def test_dates_read_as_words():
+    import datetime as _dt
+    d = _dt.date
+    assert dd.dates_name(d(2026, 11, 12), d(2026, 11, 12)) == "12 Nov 2026"
+    assert dd.dates_name(d(2026, 11, 2), d(2026, 11, 8)) == "2 – 8 Nov 2026"
+    assert dd.dates_name(d(2026, 10, 28), d(2026, 11, 3)) == "28 Oct – 3 Nov 2026"
+    assert dd.dates_name(d(2025, 12, 29), d(2026, 1, 4)) == "29 Dec 2025 – 4 Jan 2026"

@@ -86,6 +86,8 @@ def policies_search(
     f: dict = Depends(_filters),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
+    dates: Optional[str] = None,
+    check: Optional[str] = None,
     principal: Principal = Depends(current_principal),
 ):
     """Search and filter the policies themselves — by policy number or insured
@@ -96,11 +98,22 @@ def policies_search(
 
     `from` names a number clicked on a report — `financial` (Financial
     Summary: basis, period, window, metric, currency, open_problems) or
-    `monthly` (Monthly Report: month, measure) — and keeps only the policies
+    `monthly` (Monthly Report: month, measure; the Executive Report's any
+    `dates` instead of a month, and `check` for one check's errors) — and keeps only the policies
     behind it; programme and broker narrow it exactly as they narrowed the
     number."""
     with SessionLocal() as s:
-        return _select(s, principal, f, page, page_size)
+        drill = drill_down.resolve(
+            s, principal, source=from_, label=label, basis=basis, period=period,
+            window=window, metric=metric, currency=currency,
+            open_problems=open_problems, month=month, measure=measure,
+            program_id=program_id, broker_party_id=broker_party_id,
+            carrier_id=carrier_id, dates=dates, check=check)
+        return policy_search.search(
+            s, principal, q=q, program_id=program_id,
+            broker_party_id=broker_party_id, carrier_id=carrier_id, state=state,
+            date_field=date_field, date_from=date_from, date_to=date_to,
+            page=page, page_size=page_size, drill=drill)
 
 
 @router.get("/detail")

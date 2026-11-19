@@ -34,6 +34,11 @@ ONE PACK, NOTHING RE-COUNTED
                    submission_calendar,       premium, files, on time, clean
                    the money section          first time, late or missing, with
                                               the period before
+    history        check_record.summary       37.2: errors and clean files over
+                                              the 14 days / 12 weeks / 12 months
+                                              up to the period's end
+    errors_by_     check_record.summary       37: programmes with the most
+    programme                                 errors, split by severity
     contracts      contract, Financial        contracts bound in the period that
                    Summary's reader           sent files and that sent none;
                                               premium written over each term
@@ -89,7 +94,8 @@ from typing import Optional
 
 CADENCES = ("day", "week", "month", "custom")
 TOP = 5
-ESCALATIONS_SHOWN = 25
+ESCALATIONS_SHOWN = 25     # in the files
+ESCALATIONS_KEPT = 500     # in the pack: the screen pages through them all
 
 _MONTH = re.compile(r"\d{4}-\d{2}")
 _DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -172,6 +178,13 @@ def window(cadence: str, period: Optional[str], today: dt.date) -> dict:
             "as_at": min(end - dt.timedelta(days=1), today)}
 
 
+def _scope(program_id: Optional[int], broker_party_id: Optional[int] = None) -> dict:
+    """The Programme Management Report (programme_report) narrows each reader
+    to one programme, or one broker on it; the whole book passes nothing."""
+    return {**({"program_id": program_id} if program_id else {}),
+            **({"broker_party_id": broker_party_id} if broker_party_id else {})}
+
+
 def _at(d: dt.date) -> dt.datetime:
     return dt.datetime(d.year, d.month, d.day)
 
@@ -187,24 +200,28 @@ def _change(now: Optional[float], then: Optional[float], points: bool = False) -
 
 
 # ── the sections ────────────────────────────────────────────────────────────
-def _money(s, tenant_id: int, month: str) -> dict:
+def _money(s, tenant_id: int, month: str, program_id: Optional[int] = None,
+           broker_party_id: Optional[int] = None) -> dict:
     """Gross premium and commission for the month, and its top programmes and
     brokers — the Financial Summary's own totals, in its biggest currency."""
     import financial_summary as fs
     from auth_deps import Principal
     me = Principal(user_id=0, tenant_id=tenant_id, role="carrier_admin")
-    out = fs.summary(s, me, basis="month", period=month)
+    out = fs.summary(s, me, basis="month", period=month, program_id=program_id,
+                     broker_party_id=broker_party_id)
     groups = [g for g in out["groups"] if g["currency"] not in (fs.NOT_STATED, fs.IN_REVIEW)] \
         or out["groups"]
     if not groups:
         return {"month": month, "currency": None, "files": 0, "other_currencies": 0,
-                "gross_premium": None, "commission": None,
-                "top_programmes": [], "top_brokers": [], "premium_by": {"programme": {}, "broker": {}}}
+                "gross_premium": None, "commission": None, "earned_premium": None,
+                "top_programmes": [], "top_brokers": [], "premium_by": {"programme": {}, "broker": {}},
+                "premium_before_by": {"programme": {}, "broker": {}}}
     g = groups[0]
 
     def _fig(t: dict) -> dict:
         return {"current": t["current"]["value"], "previous": t["previous"]["value"],
-                "change": t["change"]["previous"]}
+                "change": t["change"]["previous"],
+                "last_year": t["last_year"]["value"], "change_last_year": t["change"]["last_year"]}
 
     def _top(parts: list) -> list[dict]:
         return [{"id": p["id"], "name": p["name"],
@@ -215,27 +232,36 @@ def _money(s, tenant_id: int, month: str) -> dict:
             "other_currencies": len(out["groups"]) - 1,
             "gross_premium": _fig(g["totals"]["gross_premium"]),
             "commission": _fig(g["totals"]["commission_amount"]),
+            "earned_premium": _fig(g["totals"]["earned_premium"]),
             "top_programmes": _top(g["by_programme"]),
             "top_brokers": _top(g["by_broker"]),
             # Every programme's and broker's premium, for the scorecard.
             "premium_by": {k: {p["id"]: p["totals"]["gross_premium"]["current"]["value"]
                                for p in g[f"by_{k}"] if p["id"] is not None}
-                           for k in ("programme", "broker")}}
+                           for k in ("programme", "broker")},
+            # And the month before, so a programme's report shows its change.
+            "premium_before_by": {k: {p["id"]: p["totals"]["gross_premium"]["previous"]["value"]
+                                      for p in g[f"by_{k}"] if p["id"] is not None}
+                                  for k in ("programme", "broker")}}
 
 
-def _operations(s, tenant_id: int, start: dt.date, end: dt.date) -> dict:
+def _operations(s, tenant_id: int, start: dt.date, end: dt.date,
+                program_id: Optional[int] = None,
+                broker_party_id: Optional[int] = None) -> dict:
     import check_record as cr
-    out = cr.summary(s, tenant_id, _at(start), _at(end))
+    out = cr.summary(s, tenant_id, _at(start), _at(end), **_scope(program_id, broker_party_id))
     v, q, h = out["volumes"], out["quality"], out["no_human_help"]
     return {"files": v["files"], "rows": v["rows"], "errors": q["errors"],
             "critical": q["critical"], "clean_first_time": h["files"],
             "clean_first_time_pct": h["files_pct"]}
 
 
-def _timeliness(s, tenant_id: int, month: str, today: dt.date) -> dict:
+def _timeliness(s, tenant_id: int, month: str, today: dt.date,
+                program_id: Optional[int] = None,
+                broker_party_id: Optional[int] = None) -> dict:
     import monthly_report as mr
-    per, _groups = mr._timeliness(s, tenant_id, {month}, program_id=None,
-                                  broker_party_id=None, today=today)
+    per, _groups = mr._timeliness(s, tenant_id, {month}, program_id=program_id,
+                                  broker_party_id=broker_party_id, today=today)
     t = per[month]
     return {"month": month, "due": t["due"], "due_so_far": t["due_so_far"],
             "on_time": t["on_time"], "on_time_pct": t["on_time_pct"],
@@ -357,12 +383,28 @@ def _problems(s, tenant_id: int, today: dt.date, as_at: Optional[dt.date] = None
             "by_type": [{"type": t["type"], "label": t["label"], "open": t["open"],
                          "overdue": t["overdue"]} for t in report["by_type"] if t["open"]],
             "escalations": len(esc),
-            "escalation_list": [_row(p) for p in esc[:ESCALATIONS_SHOWN]]}
+            "escalation_list": [_row(p) for p in esc[:ESCALATIONS_KEPT]]}
 
 
 def _portfolio(s, tenant_id: int, today: dt.date) -> dict:
     """Programmes by stage as at `today` (the period's last day): the ones
     that existed by then, each term judged against that day."""
+    import program_stage as ps_
+    stages: dict[str, int] = {}
+    programs = stage_of(s, tenant_id, today)
+    for _p, st, _c in programs:
+        stages[st] = stages.get(st, 0) + 1
+    return {"total": len(programs),
+            "active": sum(stages.get(k, 0) for k in ps_.WRITING_STAGES),
+            "runoff": stages.get("Runoff", 0),
+            "not_live": stages.get("Onboarding", 0) + stages.get("In Setup", 0),
+            "by_stage": [{"stage": k, "programmes": v}
+                         for k, v in sorted(stages.items(), key=lambda kv: -kv[1])]}
+
+
+def stage_of(s, tenant_id: int, today: dt.date) -> list[tuple]:
+    """(programme, stage, its contracts) for every programme that existed by
+    the end of `today`, each term judged against that day."""
     import program_stage as ps_
     from db import Contract, Program
     end = _at(today + dt.timedelta(days=1))
@@ -374,16 +416,8 @@ def _portfolio(s, tenant_id: int, today: dt.date) -> dict:
         for c in s.query(Contract).filter(Contract.tenant_id == tenant_id,
                                           Contract.program_id.in_([p.id for p in programs])):
             by_program.setdefault(c.program_id, []).append(c)
-    stages: dict[str, int] = {}
-    for p in programs:
-        st = ps_.program_stage(p, ps_.current_contract(by_program.get(p.id, [])), today)
-        stages[st] = stages.get(st, 0) + 1
-    return {"total": len(programs),
-            "active": sum(stages.get(k, 0) for k in ps_.WRITING_STAGES),
-            "runoff": stages.get("Runoff", 0),
-            "not_live": stages.get("Onboarding", 0) + stages.get("In Setup", 0),
-            "by_stage": [{"stage": k, "programmes": v}
-                         for k, v in sorted(stages.items(), key=lambda kv: -kv[1])]}
+    return [(p, ps_.program_stage(p, ps_.current_contract(by_program.get(p.id, [])), today),
+             by_program.get(p.id, [])) for p in programs]
 
 
 TREND_BY_DAY_UP_TO = 31          # days
@@ -420,19 +454,93 @@ def trend_buckets(start: dt.date, end: dt.date) -> tuple[str, list[tuple]]:
     return "month", out
 
 
-def _trend(s, tenant_id: int, start: dt.date, end: dt.date) -> list[dict]:
+def _trend(s, tenant_id: int, start: dt.date, end: dt.date,
+           program_id: Optional[int] = None,
+           broker_party_id: Optional[int] = None) -> list[dict]:
     """Errors and clean files across the report's own period, piece by piece
     (trend_buckets)."""
     import check_record as cr
     unit, pieces = trend_buckets(start, end)
     out = []
     for a, b, label in pieces:
-        q = cr.summary(s, tenant_id, a, b)
+        q = cr.summary(s, tenant_id, a, b, **_scope(program_id, broker_party_id))
         out.append({"unit": unit, "label": label,
                     "from": a.isoformat(), "to": b.isoformat(),
                     "files": q["volumes"]["files"], "errors": q["quality"]["errors"],
                     "clean_first_time_pct": q["no_human_help"]["files_pct"]})
     return out
+
+
+# 37.2 — how far back the error history looks, by the report's cadence.
+HISTORY = {"day": ("day", 14), "week": ("week", 12), "month": ("month", 12), "custom": ("month", 12)}
+HEALTH_SHOWN = 5
+
+
+def history_buckets(cadence: str, end: dt.date) -> tuple[str, list[tuple]]:
+    """The periods up to the report's last day, oldest first, as (from, to,
+    label), `to` not included: the last 14 days for a daily report, the last 12
+    weeks (Monday to Sunday) for a weekly one, else the last 12 months. The
+    last piece is the report's own day, week or month."""
+    unit, n = HISTORY.get(cadence, HISTORY["month"])
+    last = end - dt.timedelta(days=1)
+    if unit == "day":
+        return unit, [(_at(d), _at(d + dt.timedelta(days=1)), f"{d.day} {d:%b}")
+                      for d in (last - dt.timedelta(days=i) for i in range(n - 1, -1, -1))]
+    if unit == "week":
+        monday = last - dt.timedelta(days=last.weekday())
+        out = []
+        for i in range(n - 1, -1, -1):
+            a = monday - dt.timedelta(weeks=i)
+            out.append((_at(a), _at(a + dt.timedelta(days=7)), f"{a.day} {a:%b}"))
+        return unit, out
+    key = _month_key(last)
+    out = []
+    for i in range(n - 1, -1, -1):
+        m = _shift_month(key, -i)
+        a = _month_start(m)
+        out.append((_at(a), _at(_month_start(_shift_month(m, 1))), f"{a:%b %Y}"))
+    return unit, out
+
+
+def _history(s, tenant_id: int, cadence: str, end: dt.date,
+             program_id: Optional[int] = None,
+             broker_party_id: Optional[int] = None) -> list[dict]:
+    """37.2 — errors and clean files over the periods before the report's own
+    (history_buckets), counted the way the in-period chart counts them."""
+    import check_record as cr
+    unit, pieces = history_buckets(cadence, end)
+    out = []
+    for a, b, label in pieces:
+        q = cr.summary(s, tenant_id, a, b, **_scope(program_id, broker_party_id))
+        out.append({"unit": unit, "label": label,
+                    "from": a.isoformat(), "to": b.isoformat(),
+                    "files": q["volumes"]["files"], "errors": q["quality"]["errors"],
+                    "clean_first_time_pct": q["no_human_help"]["files_pct"]})
+    return out
+
+
+def _portfolio_of(s, tenant_id: int, w: dict, daily: bool) -> dict:
+    """Programmes by stage as at the period's last day; a daily report adds
+    that day's changes (new, went live, into run-off)."""
+    stages = _portfolio(s, tenant_id, w["as_at"])
+    if not daily:
+        return stages
+    return {**_programme_changes(s, tenant_id, w["start"], w["end"]),
+            **{k: stages[k] for k in ("active", "runoff", "not_live", "by_stage") if k in stages}}
+
+
+def _errors_by_programme(s, tenant_id: int, start: dt.date, end: dt.date) -> dict:
+    """37 — the programmes with the most errors in the period, each split by
+    severity (check_record.summary's own counts), most errors first."""
+    import check_record as cr
+    rows = [r for r in cr.summary(s, tenant_id, _at(start), _at(end))["by_programme"]
+            if r["id"] is not None and r["errors"]]
+    names = _names(s, [r["id"] for r in rows], [])["programme"]
+    return {"total": len(rows),
+            "rows": [{"id": r["id"], "name": names.get(r["id"]) or f"#{r['id']}",
+                      "errors": r["errors"], "critical": r["critical"],
+                      "warning": r["warning"], "info": r["info"]}
+                     for r in rows[:HEALTH_SHOWN]]}
 
 
 SENT_ON_TIME, SENT_LATE, NOT_SENT = "Sent on time", "Sent late", "Not sent"
@@ -485,7 +593,9 @@ def _reinsurance(s, tenant_id: int, today: dt.date, window_: dict) -> dict:
 # ── daily: only what happened in the day ────────────────────────────────────
 
 
-def _processed_money(s, tenant_id: int, start: dt.date, end: dt.date) -> dict:
+def _processed_money(s, tenant_id: int, start: dt.date, end: dt.date,
+                     program_id: Optional[int] = None,
+                     broker_party_id: Optional[int] = None) -> dict:
     """Premium and commission in the bordereaux first processed in [start,
     end), per currency, read the way the Financial Summary reads a file (its
     reader, the latest version of the file's template, its conventions) — by
@@ -494,7 +604,8 @@ def _processed_money(s, tenant_id: int, start: dt.date, end: dt.date) -> dict:
     import financial_figures as ff
     import financial_summary as fs
     import policy_search as ps
-    files = cr.first_runs(cr.runs_in(s, tenant_id, _at(start), _at(end)))
+    files = cr.first_runs(cr.runs_in(s, tenant_id, _at(start), _at(end),
+                                       **_scope(program_id, broker_party_id)))
     ids = {f.export_id for f in files if f.export_id}
     out: dict = {"files": len(ids), "groups": {}, "names": {"programme": {}, "broker": {}}}
     if not ids:
@@ -513,40 +624,61 @@ def _processed_money(s, tenant_id: int, start: dt.date, end: dt.date) -> dict:
         for cells in reads[o.id].rows:
             fig = ff.figures(cells, conv.get(reading(o), {}))
             g = out["groups"].setdefault(fs._currency_key(fig), {
-                "rows": 0, "gross": None, "commission": None, "programme": {}, "broker": {}})
+                "rows": 0, "gross": None, "commission": None, "earned": None,
+                "programme": {}, "broker": {}, "pair": {}})
             g["rows"] += 1
             gross = fig["gross_premium"]["value"]
             comm = fig["commission_amount"]["value"]
+            earned = fig["earned_premium"]["value"]
+            if earned is not None:
+                g["earned"] = (g["earned"] or 0) + earned
             if gross is not None:
                 g["gross"] = (g["gross"] or 0) + gross
                 for part, key in (("programme", o.program_id), ("broker", o.broker_party_id)):
                     if key is not None:
                         g[part][key] = g[part].get(key, 0) + gross
+                # Programme and broker together — the Programme Management Report's rows.
+                pair = (o.program_id, o.broker_party_id)
+                g["pair"][pair] = g["pair"].get(pair, 0) + gross
             if comm is not None:
                 g["commission"] = (g["commission"] or 0) + comm
     out["names"] = ps._names(s, exports)
     return out
 
 
-def _money_processed(s, tenant_id: int, w: dict) -> dict:
+def _year_before(d: dt.date) -> dt.date:
+    """The same day a year earlier (29 February → 28 February)."""
+    try:
+        return d.replace(year=d.year - 1)
+    except ValueError:
+        return d.replace(year=d.year - 1, day=28)
+
+
+def _money_processed(s, tenant_id: int, w: dict, program_id: Optional[int] = None,
+                     broker_party_id: Optional[int] = None) -> dict:
     """The money section for a day: the bordereaux processed in it, in the
-    biggest currency, against the day before."""
+    biggest currency, against the day before and the same day a year earlier."""
     import financial_summary as fs
-    now = _processed_money(s, tenant_id, w["start"], w["end"])
-    before = _processed_money(s, tenant_id, w["previous"]["start"], w["previous"]["end"])
+    pid = _scope(program_id, broker_party_id)
+    now = _processed_money(s, tenant_id, w["start"], w["end"], **pid)
+    before = _processed_money(s, tenant_id, w["previous"]["start"], w["previous"]["end"], **pid)
+    year_ago = _processed_money(s, tenant_id, _year_before(w["start"]), _year_before(w["end"]), **pid)
     real = {k: g for k, g in now["groups"].items() if k not in (fs.NOT_STATED, fs.IN_REVIEW)}
     pick = real or now["groups"]
     blank = {"month": None, "basis": "processed", "currency": None, "files": now["files"],
-             "other_currencies": 0, "gross_premium": None, "commission": None,
-             "top_programmes": [], "top_brokers": [], "premium_by": {"programme": {}, "broker": {}}}
+             "other_currencies": 0, "gross_premium": None, "commission": None, "earned_premium": None,
+             "top_programmes": [], "top_brokers": [], "premium_by": {"programme": {}, "broker": {}},
+             "premium_before_by": {"programme": {}, "broker": {}}}
     if not pick:
         return blank
     cur = max(pick, key=lambda k: (pick[k]["gross"] or 0, pick[k]["rows"]))
     g, p = pick[cur], before["groups"].get(cur) or {}
+    ly = year_ago["groups"].get(cur) or {}
 
     def fig(k: str) -> dict:
-        c, b = g.get(k), p.get(k)
-        return {"current": c, "previous": b, "change": _change(c, b)}
+        c, b, y = g.get(k), p.get(k), ly.get(k)
+        return {"current": c, "previous": b, "change": _change(c, b),
+                "last_year": y, "change_last_year": _change(c, y)}
 
     def top(part: str) -> list[dict]:
         names = now["names"].get(part, {})
@@ -554,20 +686,35 @@ def _money_processed(s, tenant_id: int, w: dict) -> dict:
                 for i, v in sorted(g[part].items(), key=lambda kv: -kv[1]) if v][:TOP]
     return {**blank, "currency": cur, "other_currencies": len(now["groups"]) - 1,
             "gross_premium": fig("gross"), "commission": fig("commission"),
+            "earned_premium": fig("earned"),
             "top_programmes": top("programme"), "top_brokers": top("broker"),
-            "premium_by": {k: dict(g[k]) for k in ("programme", "broker")}}
+            "premium_by": {k: dict(g[k]) for k in ("programme", "broker")},
+            "premium_before_by": {k: dict(p.get(k) or {}) for k in ("programme", "broker")}}
 
 
-def _due_in(s, tenant_id: int, start: dt.date, end: dt.date, today: dt.date) -> dict:
+def _expected(s, tenant_id: int, start: dt.date, end: dt.date, program_id: Optional[int],
+              broker_party_id: Optional[int] = None):
+    """The files owed (a broker named) with their due date in [start, end)."""
+    from db import ExpectedSubmission
+    q = s.query(ExpectedSubmission).filter(
+        ExpectedSubmission.tenant_id == tenant_id,
+        ExpectedSubmission.broker_party_id.isnot(None),
+        ExpectedSubmission.due_date >= start, ExpectedSubmission.due_date < end)
+    if program_id:
+        q = q.filter(ExpectedSubmission.program_id == program_id)
+    if broker_party_id:
+        q = q.filter(ExpectedSubmission.broker_party_id == broker_party_id)
+    return q.all()
+
+
+def _due_in(s, tenant_id: int, start: dt.date, end: dt.date, today: dt.date,
+            program_id: Optional[int] = None,
+            broker_party_id: Optional[int] = None) -> dict:
     """Files whose due date falls in [start, end): how many, and how many came
     on time — the Monthly Report's own rule (submission_calendar.derive_status)."""
-    from db import ExpectedSubmission
     from submission_calendar import derive_status
     due = so_far = on_time = late = overdue = 0
-    for e in (s.query(ExpectedSubmission)
-              .filter(ExpectedSubmission.tenant_id == tenant_id,
-                      ExpectedSubmission.broker_party_id.isnot(None),
-                      ExpectedSubmission.due_date >= start, ExpectedSubmission.due_date < end)):
+    for e in _expected(s, tenant_id, start, end, program_id, broker_party_id):
         due += 1
         st = derive_status(e.due_date, today, 0, e.received_at, e.closes_on)
         if st in ("scheduled", "due_soon", "due_today") and not (st == "due_today" and e.received_at):
@@ -672,7 +819,7 @@ def _new_problems(s, tenant_id: int, start: dt.date, end: dt.date, today: dt.dat
     esc.sort(key=lambda x: (x["became_on"], x["title"]))
     return {"open": started, "overdue": sum(1 for x in esc if x["still_open"]),
             "fixed": fixed, "new": True, "by_type": [], "escalations": len(esc),
-            "escalation_list": esc[:ESCALATIONS_SHOWN]}
+            "escalation_list": esc[:ESCALATIONS_KEPT]}
 
 
 def _programme_changes(s, tenant_id: int, start: dt.date, end: dt.date) -> dict:
@@ -727,30 +874,30 @@ def _names(s, programme_ids, broker_ids) -> dict:
                            .filter(Party.id.in_(brokers)).all()) if brokers else {}}
 
 
-def _quality(s, tenant_id: int, start: dt.date, end: dt.date) -> dict:
+def _quality(s, tenant_id: int, start: dt.date, end: dt.date,
+             program_id: Optional[int] = None,
+             broker_party_id: Optional[int] = None) -> dict:
     """The files of the period by how they first arrived (clean, with errors,
     not checked) and the checks that failed most — check_record.summary, the
     Monthly Report's own source. Quality by broker and by programme is the
     scorecard's (_scorecard)."""
     import check_record as cr
-    q = cr.summary(s, tenant_id, _at(start), _at(end))["quality"]
+    q = cr.summary(s, tenant_id, _at(start), _at(end), **_scope(program_id, broker_party_id))["quality"]
     return {"clean": q["files_clean"], "with_errors": q["files_with_errors"],
             "not_checked": q["files_not_validated"],
-            "top_errors": [{"check": t["check"], "files": t["files"], "errors": t["errors"],
+            "top_errors": [{"check": t["check"], "key": t.get("key"), "files": t["files"], "errors": t["errors"],
                             "severity": t["severity"]} for t in q["top_failing_checks"][:QUALITY_SHOWN]]}
 
 
-def _late(s, tenant_id: int, start: dt.date, end: dt.date, as_at: dt.date) -> dict:
+def _late(s, tenant_id: int, start: dt.date, end: dt.date, as_at: dt.date,
+          program_id: Optional[int] = None,
+          broker_party_id: Optional[int] = None) -> dict:
     """Files due in [start, end) that came after their due date or had not come
     by the end of `as_at` — submission_calendar.derive_status, the Monthly
     Report's rule. Latest due first."""
-    from db import ExpectedSubmission
     from submission_calendar import derive_status
     rows = []
-    for e in (s.query(ExpectedSubmission)
-              .filter(ExpectedSubmission.tenant_id == tenant_id,
-                      ExpectedSubmission.broker_party_id.isnot(None),
-                      ExpectedSubmission.due_date >= start, ExpectedSubmission.due_date < end)):
+    for e in _expected(s, tenant_id, start, end, program_id, broker_party_id):
         got = e.received_at if e.received_at and e.received_at <= as_at else None
         st = derive_status(e.due_date, as_at, 0, got, e.closes_on)
         if st not in ("received_late", "overdue", "never_arrived"):
@@ -771,17 +918,15 @@ def _late(s, tenant_id: int, start: dt.date, end: dt.date, as_at: dt.date) -> di
             "never": count("Never arrived"), "total": len(rows), "list": rows[:LATE_KEPT]}
 
 
-def _due_tally(s, tenant_id: int, start: dt.date, end: dt.date, as_at: dt.date) -> dict:
+def _due_tally(s, tenant_id: int, start: dt.date, end: dt.date, as_at: dt.date,
+               program_id: Optional[int] = None,
+               broker_party_id: Optional[int] = None) -> dict:
     """Files due in [start, end), per broker and per programme, as at the end
     of `as_at`: how many were due by then, how many came on time, and how many
     came late or have not come — submission_calendar.derive_status."""
-    from db import ExpectedSubmission
     from submission_calendar import derive_status
     out: dict = {"broker": {}, "programme": {}}
-    for e in (s.query(ExpectedSubmission)
-              .filter(ExpectedSubmission.tenant_id == tenant_id,
-                      ExpectedSubmission.broker_party_id.isnot(None),
-                      ExpectedSubmission.due_date >= start, ExpectedSubmission.due_date < end)):
+    for e in _expected(s, tenant_id, start, end, program_id, broker_party_id):
         got = e.received_at if e.received_at and e.received_at <= as_at else None
         st = derive_status(e.due_date, as_at, 0, got, e.closes_on)
         if st in ("scheduled", "due_soon") or (st == "due_today" and not got):
@@ -794,7 +939,9 @@ def _due_tally(s, tenant_id: int, start: dt.date, end: dt.date, as_at: dt.date) 
     return out
 
 
-def _scorecard(s, tenant_id: int, w: dict, premium_by: dict) -> dict:
+def _scorecard(s, tenant_id: int, w: dict, premium_by: dict,
+               program_id: Optional[int] = None,
+               broker_party_id: Optional[int] = None, shown: Optional[int] = SCORECARD_SHOWN) -> dict:
     """One row per broker and per programme for the period: premium, files,
     errors, on time, clean first time and files late or missing — with on
     time and clean first time for the period before, so a figure that got
@@ -802,11 +949,12 @@ def _scorecard(s, tenant_id: int, w: dict, premium_by: dict) -> dict:
     first time. check_record.summary and the calendar, as the cards they
     replace."""
     import check_record as cr
-    now = cr.summary(s, tenant_id, _at(w["start"]), _at(w["end"]))
-    before = cr.summary(s, tenant_id, _at(w["previous"]["start"]), _at(w["previous"]["end"]))
-    due = _due_tally(s, tenant_id, w["start"], w["end"], w["as_at"])
+    pid = _scope(program_id, broker_party_id)
+    now = cr.summary(s, tenant_id, _at(w["start"]), _at(w["end"]), **pid)
+    before = cr.summary(s, tenant_id, _at(w["previous"]["start"]), _at(w["previous"]["end"]), **pid)
+    due = _due_tally(s, tenant_id, w["start"], w["end"], w["as_at"], **pid)
     due_before = _due_tally(s, tenant_id, w["previous"]["start"], w["previous"]["end"],
-                            w["previous"]["end"] - dt.timedelta(days=1))
+                            w["previous"]["end"] - dt.timedelta(days=1), **pid)
     pct = lambda n, d: round(100.0 * n / d, 1) if d else None  # noqa: E731
     out = {}
     for kind in ("broker", "programme"):
@@ -821,6 +969,8 @@ def _scorecard(s, tenant_id: int, w: dict, premium_by: dict) -> dict:
             d, db_ = due[kind].get(i) or {}, due_before[kind].get(i) or {}
             rows.append({"id": i, "name": names.get(i) or f"#{i}", "premium": money.get(i),
                          "files": f.get("files", 0), "errors": f.get("errors", 0),
+                         "critical": f.get("critical", 0), "warning": f.get("warning", 0),
+                         "info": f.get("info", 0),
                          "clean_first_time_pct": f.get("straight_through_pct"),
                          "prev_clean_first_time_pct": fb.get("straight_through_pct"),
                          "due": d.get("due", 0), "on_time_pct": pct(d.get("on_time", 0), d.get("due", 0)),
@@ -829,11 +979,13 @@ def _scorecard(s, tenant_id: int, w: dict, premium_by: dict) -> dict:
         rows.sort(key=lambda r: (-r["late_or_missing"],
                                  r["clean_first_time_pct"] if r["clean_first_time_pct"] is not None else 101,
                                  r["name"].lower()))
-        out[kind] = {"total": len(rows), "rows": rows[:SCORECARD_SHOWN]}
+        out[kind] = {"total": len(rows), "rows": rows[:shown]}
     return out
 
 
-def _bound(s, tenant_id: int, start: dt.date, as_at: dt.date) -> list:
+def _bound(s, tenant_id: int, start: dt.date, as_at: dt.date,
+           program_id: Optional[int] = None,
+           broker_party_id: Optional[int] = None) -> list:
     """The contracts bound (status active) by the end of `as_at` whose term
     reaches into [start, as_at]."""
     from db import Contract
@@ -841,6 +993,8 @@ def _bound(s, tenant_id: int, start: dt.date, as_at: dt.date) -> list:
     return [c for c in s.query(Contract).filter(Contract.tenant_id == tenant_id,
                                                 Contract.is_app_managed.is_(True))
             if (c.status or "").strip().lower() == "active"
+            and (not program_id or c.program_id == program_id)
+            and (not broker_party_id or c.broker_party_id == broker_party_id)
             and (c.created_at is None or c.created_at.replace(tzinfo=None) < hi)
             and (c.inception_dt is None or c.inception_dt <= as_at)
             and (c.expiry_dt is None or c.expiry_dt >= start)]
@@ -852,12 +1006,15 @@ def _contract_label(c, names: dict) -> dict:
             "broker": names["broker"].get(c.broker_party_id) or "—"}
 
 
-def _files_by_contract(s, tenant_id: int, start: dt.date, end: dt.date) -> dict[int, int]:
+def _files_by_contract(s, tenant_id: int, start: dt.date, end: dt.date,
+                       program_id: Optional[int] = None,
+                       broker_party_id: Optional[int] = None) -> dict[int, int]:
     """Files first processed in [start, end), per contract — a run that names
     no contract takes its file's."""
     import check_record as cr
     from db import OutputExport
-    files = cr.first_runs(cr.runs_in(s, tenant_id, _at(start), _at(end)))
+    files = cr.first_runs(cr.runs_in(s, tenant_id, _at(start), _at(end),
+                                       **_scope(program_id, broker_party_id)))
     of_export = {}
     missing = {f.export_id for f in files if not f.contract_id and f.export_id}
     if missing:
@@ -930,7 +1087,8 @@ def _written(s, tenant_id: int, contracts: list, as_at: dt.date) -> dict[int, di
 
 
 def _contracts(s, tenant_id: int, start: dt.date, end: dt.date, as_at: dt.date,
-               daily: bool) -> dict:
+               daily: bool, program_id: Optional[int] = None,
+               broker_party_id: Optional[int] = None) -> dict:
     """Contract utilization, both ways:
       use   — of the contracts bound in the period, which sent files in it and
               which sent none;
@@ -938,8 +1096,8 @@ def _contracts(s, tenant_id: int, start: dt.date, end: dt.date, as_at: dt.date,
               its premium cap, fullest first; Near cap from NEAR_CAP_PCT, Over
               cap past 100%. A daily report lists only the contracts that sent
               files that day."""
-    bound = _bound(s, tenant_id, start, as_at)
-    sent = _files_by_contract(s, tenant_id, start, end)
+    bound = _bound(s, tenant_id, start, as_at, **_scope(program_id, broker_party_id))
+    sent = _files_by_contract(s, tenant_id, start, end, **_scope(program_id, broker_party_id))
     names = _names(s, [c.program_id for c in bound], [c.broker_party_id for c in bound])
     used = [c for c in bound if sent.get(c.id)]
     idle = sorted((c for c in bound if not sent.get(c.id)), key=lambda c: (c.name or "").lower())
@@ -971,25 +1129,63 @@ def pack(s, tenant_id: int, *, cadence: str = "month", period: Optional[str] = N
     screen shows, the files are drawn from, and a sent report keeps."""
     today = today or dt.datetime.utcnow().date()
     w = window(cadence, period, today)
-    now = _operations(s, tenant_id, w["start"], w["end"])
-    before = _operations(s, tenant_id, w["previous"]["start"], w["previous"]["end"])
-    ops = {**now, "previous": before,
-           "change": {"files": _change(now["files"], before["files"]),
-                      "errors": _change(now["errors"], before["errors"]),
-                      "clean_first_time_pct": _change(now["clean_first_time_pct"],
-                                                      before["clean_first_time_pct"], True)}}
     daily = cadence == "day"
-    if daily:
-        t_now = _due_in(s, tenant_id, w["start"], w["end"], today)
-        t_before = _due_in(s, tenant_id, w["previous"]["start"], w["previous"]["end"], today)
-    else:
-        t_now = _timeliness(s, tenant_id, w["money_month"], today)
-        t_before = _timeliness(s, tenant_id, _shift_month(w["money_month"], -1), today)
-    t_now["previous_on_time_pct"] = t_before["on_time_pct"]
-    t_now["change"] = _change(t_now["on_time_pct"], t_before["on_time_pct"], True)
-    money = _money_processed(s, tenant_id, w) if daily else _money(s, tenant_id, w["money_month"])
+    money, ops, t_now = core(s, tenant_id, w, today)
     return {
-        "cadence": cadence, "period": w["period"],
+        **head(w, today),
+        "money": money,
+        "operations": ops,
+        "timeliness": t_now,
+        "problems": (_new_problems(s, tenant_id, w["start"], w["end"], today) if daily
+                     else _problems(s, tenant_id, today, w["as_at"])),
+        "portfolio": _portfolio_of(s, tenant_id, w, daily),
+        "trend": _trend(s, tenant_id, w["start"], w["end"]),
+        "history": _history(s, tenant_id, cadence, w["end"]),
+        "errors_by_programme": _errors_by_programme(s, tenant_id, w["start"], w["end"]),
+        "reinsurance": _reinsurance(s, tenant_id, today, w),
+        "quality": _quality(s, tenant_id, w["start"], w["end"]),
+        "scorecard": _scorecard(s, tenant_id, w, money.get("premium_by") or {}),
+        "late": _late(s, tenant_id, w["start"], w["end"], w["as_at"]),
+        "contracts": _contracts(s, tenant_id, w["start"], w["end"], w["as_at"], daily),
+    }
+
+
+TREND_MONTHS = 6
+
+
+def money_trend(s, tenant_id: int, cadence: str, period: Optional[str],
+                today: Optional[dt.date] = None) -> dict:
+    """Gross premium, commission and earned premium for the TREND_MONTHS
+    bordereau months up to the report's own — the small trend lines in the
+    money tiles. The money section's own reader (_money), so each point is the
+    tile's number for that month; each call gives a month and the one before,
+    so half as many reads. A month in another currency is left out. A daily
+    report's money is by the day's files, not by month: no trend."""
+    today = today or dt.datetime.utcnow().date()
+    w = window(cadence, period, today)
+    if cadence == "day":
+        return {"currency": None, "months": []}
+    key = w["money_month"]
+    got: dict[str, dict] = {}
+    currency = None
+    for back in range(0, TREND_MONTHS, 2):
+        m = _money(s, tenant_id, _shift_month(key, -back))
+        if currency is None:
+            currency = m.get("currency")
+        if m.get("currency") != currency:
+            continue
+        for month, which in ((_shift_month(key, -back), "current"), (_shift_month(key, -back - 1), "previous")):
+            figs = {k: (m.get(f) or {}).get(which) for k, f in
+                    (("gross", "gross_premium"), ("commission", "commission"), ("earned", "earned_premium"))}
+            got.setdefault(month, {"month": month, **figs})
+    months = [got[k] for k in sorted(got)][-TREND_MONTHS:]
+    return {"currency": currency, "months": months}
+
+
+def head(w: dict, today: dt.date) -> dict:
+    """The period a report covers, as every report writes it."""
+    return {
+        "cadence": w["cadence"], "period": w["period"],
         "from": w["start"].isoformat(), "to": (w["end"] - dt.timedelta(days=1)).isoformat(),
         "previous": {"period": w["previous"]["period"],
                      "from": w["previous"]["start"].isoformat(),
@@ -997,17 +1193,30 @@ def pack(s, tenant_id: int, *, cadence: str = "month", period: Optional[str] = N
         "complete": w["complete"], "as_of": today.isoformat(),
         "as_at": w["as_at"].isoformat(),
         "updated_at": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-        "money": money,
-        "operations": ops,
-        "timeliness": t_now,
-        "problems": (_new_problems(s, tenant_id, w["start"], w["end"], today) if daily
-                     else _problems(s, tenant_id, today, w["as_at"])),
-        "portfolio": (_programme_changes(s, tenant_id, w["start"], w["end"]) if daily
-                      else _portfolio(s, tenant_id, w["as_at"])),
-        "trend": _trend(s, tenant_id, w["start"], w["end"]),
-        "reinsurance": _reinsurance(s, tenant_id, today, w),
-        "quality": _quality(s, tenant_id, w["start"], w["end"]),
-        "scorecard": _scorecard(s, tenant_id, w, money.get("premium_by") or {}),
-        "late": _late(s, tenant_id, w["start"], w["end"], w["as_at"]),
-        "contracts": _contracts(s, tenant_id, w["start"], w["end"], w["as_at"], daily),
     }
+
+
+def core(s, tenant_id: int, w: dict, today: dt.date,
+         program_id: Optional[int] = None,
+         broker_party_id: Optional[int] = None) -> tuple[dict, dict, dict]:
+    """Money, files and timeliness for the period against the one before —
+    the whole book's, or one programme's (programme_report)."""
+    pid = _scope(program_id, broker_party_id)
+    now = _operations(s, tenant_id, w["start"], w["end"], **pid)
+    before = _operations(s, tenant_id, w["previous"]["start"], w["previous"]["end"], **pid)
+    ops = {**now, "previous": before,
+           "change": {"files": _change(now["files"], before["files"]),
+                      "errors": _change(now["errors"], before["errors"]),
+                      "clean_first_time_pct": _change(now["clean_first_time_pct"],
+                                                      before["clean_first_time_pct"], True)}}
+    if w["cadence"] == "day":
+        t_now = _due_in(s, tenant_id, w["start"], w["end"], today, **pid)
+        t_before = _due_in(s, tenant_id, w["previous"]["start"], w["previous"]["end"], today, **pid)
+    else:
+        t_now = _timeliness(s, tenant_id, w["money_month"], today, **pid)
+        t_before = _timeliness(s, tenant_id, _shift_month(w["money_month"], -1), today, **pid)
+    t_now["previous_on_time_pct"] = t_before["on_time_pct"]
+    t_now["change"] = _change(t_now["on_time_pct"], t_before["on_time_pct"], True)
+    money = (_money_processed(s, tenant_id, w, **pid) if w["cadence"] == "day"
+             else _money(s, tenant_id, w["money_month"], **pid))
+    return money, ops, t_now

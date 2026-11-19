@@ -23,6 +23,7 @@ import { RunTrend } from "../components/BrokerCharts";
 import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
 import { api } from "../api/client";
 import { InfoTip } from "../components/InfoTip";
+import { RulesWaitingCard } from "../components/RulesWaitingCard";
 import { ChartCard, StatCard } from "../components/StatCard";
 import { NotCountedBadge, SupersededTag } from "../components/ContractTag";
 
@@ -175,6 +176,9 @@ export default function BrokerDashboard() {
             </div>
           </div>
         )}
+
+        {/* Programme rules the carrier sent, waiting for this broker's answer. */}
+        <RulesWaitingCard side="broker" />
 
         <div style={grid(5)}>
           <StatCard title="Carriers" value={c.carriers} icon={Building2}

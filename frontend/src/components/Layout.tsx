@@ -64,6 +64,8 @@ const GROUPS: {
       { to: "/broker/bordereau", label: "Process Bordereau", icon: Zap },
       // What is owed and when — the list Process Bordereau works down.
       { to: "/broker/calendar", label: "Bordereau Calendar", icon: CalendarDays },
+      // Rules a carrier set for a programme, waiting for this broker's approval.
+      { to: "/broker/programme-rules", label: "Programme Rules", icon: ListChecks },
       // My Contracts has no entry here: the broker admin opens it from the
       // dashboard's Active Contracts tile.
       // No Users & Roles: broker users were retired on 29 Sep 2026, so the
@@ -325,6 +327,8 @@ function subScreenOwner(pathname: string, search: string): string | null {
 
   // The Operational Report's Data Quality and Exception Resolution tabs.
   if (under("/monthly-report")) return "/monthly-report";
+  // The Programme Management Report is the Executive Report's sub-screen.
+  if (under("/executive-report")) return "/executive-report";
 
   if (under("/parties")) return "/parties";
   if (under("/tenants")) return "/tenants";

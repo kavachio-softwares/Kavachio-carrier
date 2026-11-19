@@ -9,6 +9,13 @@
   POST /reports/executive/sends/clear        hide every sent report from the
                                              list (nothing is deleted)
   GET  /reports/executive/sends/{id}/file    a sent report, exactly as sent
+  GET  /reports/executive/money-trend        six months of premium, for the tiles
+  GET  /reports/executive/programmes         Programme Management Report: every
+                                             programme and broker for the period
+                                             (programme_report)
+  GET  /reports/executive/programmes/file    it as a PDF or Excel file
+  GET  /reports/executive/programmes/{p}/brokers/{b}
+                                             one programme's broker, in detail
 
 The carrier's own report: any carrier login reads and downloads it; sending
 it and changing the schedule are the carrier's (require_carrier_admin), as on
@@ -26,6 +33,7 @@ from pydantic import BaseModel
 
 import executive_delivery as ed
 import executive_report as er
+import programme_report as pr
 import report_delivery as rd
 from app_routes import _actor, resolve_tenant_id
 from auth_deps import Principal, require_role
@@ -82,6 +90,53 @@ def executive_report_file(cadence: str = "month", period: Optional[str] = None,
         tid = resolve_tenant_id(s, principal, mga)
         pack = er.pack(s, tid, cadence=cadence, period=_period(cadence, period, date_from, date_to))
         return _file(*ed.files(pack, _fmt(format), rd.carrier_name(s, tid))[0])
+
+
+@router.get("/money-trend")
+def executive_money_trend(cadence: str = "month", period: Optional[str] = None,
+                          date_from: Optional[str] = None, date_to: Optional[str] = None,
+                          mga: Optional[str] = None, principal: Principal = Depends(_reader)):
+    """The last six months of premium for the money tiles' trend lines —
+    asked for after the report, so the report never waits on it."""
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        return er.money_trend(s, tid, cadence, _period(cadence, period, date_from, date_to))
+
+
+@router.get("/programmes")
+def programme_management(cadence: str = "month", period: Optional[str] = None,
+                         date_from: Optional[str] = None, date_to: Optional[str] = None,
+                         mga: Optional[str] = None, principal: Principal = Depends(_reader)):
+    """Every programme and broker for the period the Executive Report covers."""
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        out = pr.management(s, tid, cadence=cadence, period=_period(cadence, period, date_from, date_to))
+        out["title"] = ed.period_title(out["cadence"], out["period"])
+        return out
+
+
+@router.get("/programmes/file")
+def programme_management_file(cadence: str = "month", period: Optional[str] = None,
+                              date_from: Optional[str] = None, date_to: Optional[str] = None,
+                              format: str = "excel", mga: Optional[str] = None,
+                              principal: Principal = Depends(_reader)):
+    """The Programme Management Report as a PDF or Excel file."""
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        out = pr.management(s, tid, cadence=cadence, period=_period(cadence, period, date_from, date_to))
+        return _file(*pr.render(out, _fmt(format), rd.carrier_name(s, tid)))
+
+
+@router.get("/programmes/{program_id}/brokers/{broker_party_id}")
+def programme_broker_detail(program_id: int, broker_party_id: int, cadence: str = "month",
+                            period: Optional[str] = None, date_from: Optional[str] = None,
+                            date_to: Optional[str] = None, mga: Optional[str] = None,
+                            principal: Principal = Depends(_reader)):
+    """One programme's broker for the period: what opens under its row."""
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        return pr.detail(s, tid, program_id, broker_party_id, cadence=cadence,
+                         period=_period(cadence, period, date_from, date_to))
 
 
 class SendBody(BaseModel):

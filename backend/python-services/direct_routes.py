@@ -2388,6 +2388,14 @@ async def _render_landing(
                     cs, [dict(r) for r in rule_rows],
                     setup_template_id=eff_output_template_id,
                     scope=run_rule_scope)
+            # Programme Rules the carrier set for the whole programme, once
+            # this file's broker approved them (programme_rules.py).
+            try:
+                import programme_rules
+                with SessionLocal() as _ps:
+                    rules += programme_rules.for_broker_run(_ps, rec.tenant_id, _gov_rows, structure)
+            except Exception as _px:  # noqa: BLE001 — never block validation
+                log.info(f"[programme rules] skipped ({_px})")
 
         # A rule is "schedule-scoped" when its clause explicitly names the
         # schedules it applies to (IR params scope_sheets/sheets, e.g.

@@ -64,6 +64,7 @@ import AddContractModal from "../components/AddContractModal";
 import { fetchContractOriginal, fetchDocument, getContract } from "../api/contractRecord";
 import { getProgrammeTreaties } from "../api/treaty";
 import ProgrammeTreatiesStep from "../components/treaty/ProgrammeTreatiesStep";
+import ProgrammeRulesPanel from "../components/ProgrammeRulesPanel";
 import { SetupTabs, useSetupTab, type SetupTab } from "../components/SetupTabs";
 import { Pagination } from "../components/Pagination";
 import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
@@ -554,6 +555,10 @@ export default function AddProgram() {
     { key: "reinsurance", label: "Reinsurance",
       ...(treatyCount ? { count: treatyCount, warn: treatiesInUse < treatyCount } : {}),
       info: "The treaties protecting this programme and each one's reinsurance bordereau — irrespective of the brokers.",
+      disabled: !locked, disabledReason: "Configure the programme first" },
+    // Rules for the whole programme, across both sides (programme_rules.py).
+    { key: "rules", label: "Programme Rules",
+      info: "Rules you set once for this programme. The brokers or reinsurers you choose approve each one, and it checks their files once they do.",
       disabled: !locked, disabledReason: "Configure the programme first" },
   ];
   const [wantSide, setSide] = useSetupTab(sides);
@@ -1083,6 +1088,12 @@ export default function AddProgram() {
         {/* The carrier's own reinsurance: its treaties and each one's
             reinsurance bordereau setup. Irrespective of the brokers — open as
             soon as the programme is saved, and nothing here waits on them. */}
+        {side === "rules" && programId != null && (
+          <Card title="Programme Rules">
+            <ProgrammeRulesPanel programId={programId} />
+          </Card>
+        )}
+
         {side === "reinsurance" && programId != null && (
           <Card title={<>Reinsurance <span className="ml-1 text-xs font-normal text-ink-muted">optional</span></>}>
             <ProgrammeTreatiesStep programId={programId}
