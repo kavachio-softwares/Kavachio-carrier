@@ -2761,23 +2761,22 @@ async def program_contract_upload(
 
 
         # -------------------------------------------------
-        # Persist the raw contract file to blob storage (Azure/Azurite) when
-        # enabled. Historically the uploaded file was discarded after
-        # extraction; with blob storage on we now retain it and record the
-        # pointer on the contract row (blob_ref) below. Non-fatal on failure.
+        # Keep the contract file as it arrived, so the carrier AND the broker
+        # can open it from the contract page (GET /contracts/{id}/original).
+        # It used to be kept only when Azure blob storage was on, so on a
+        # server storing files in the database (STORAGE_BACKEND=db) it was
+        # thrown away after its clauses were read. store_or_keep is the same
+        # choice every other upload makes: Azure → blob_ref, otherwise the
+        # bytes on the row. Non-fatal on failure.
         # -------------------------------------------------
-        contract_blob_ref = None
-        if storage.is_azure():
-            try:
-                contract_blob_ref = storage.build_key(
-                    "contracts", tenant_id, contract_filename)
-                await run_in_threadpool(
-                    storage.put_bytes, contract_blob_ref, contents,
-                    contract_content_type or "application/octet-stream",
-                )
-            except Exception as blob_exc:                # noqa: BLE001 — best-effort
-                contract_blob_ref = None
-                print(f"[Contract] blob persist failed (non-fatal): {blob_exc}")
+        contract_blob_ref, contract_blob = None, None
+        try:
+            contract_blob_ref, contract_blob = await run_in_threadpool(
+                storage.store_or_keep, "contracts", tenant_id, contract_filename,
+                contents, contract_content_type or "application/octet-stream")
+        except Exception as blob_exc:                    # noqa: BLE001 — best-effort
+            contract_blob_ref, contract_blob = None, None
+            print(f"[Contract] file persist failed (non-fatal): {blob_exc}")
 
         # -------------------------------------------------
         # Auto-activate within Program scope.
@@ -2830,6 +2829,8 @@ async def program_contract_upload(
                     new_c.status = "active"
                     if contract_blob_ref:
                         new_c.blob_ref = contract_blob_ref
+                    elif contract_blob is not None:
+                        new_c.blob = contract_blob
                     if schedule_key is not None:
                         new_c.schedule_key = schedule_key
                     else:
@@ -3587,7 +3588,12 @@ def program_contract_detail(program_id: int, contract_id: int,
         contract = s.get(Contract, contract_id)
         if not contract or contract.program_id != program_id:
             raise HTTPException(404, "contract not found for this program")
-        assert_tenant_owns(principal, contract.tenant_id)
+        # The contract page's own door: the carrier, and the broker who holds
+        # THIS contract (never another broker on the programme). The tenant
+        # check alone refused every broker, so the broker never saw the
+        # clauses read from their own contract.
+        from contract_routes import _contract_access
+        _contract_access(s, principal, contract_id)
 
         template = None
         template_fields: list[dict] = []

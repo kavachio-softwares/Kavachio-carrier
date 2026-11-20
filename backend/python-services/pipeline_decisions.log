@@ -3736,3 +3736,19 @@ TIMING run=aa15   total 0.4s (0.0 min)
 16:26:32 | run=a88a | CACHE    | MISS      | var_reconcile aaf467942c4b | no stored answer for this exact input — model call required
 16:26:34 | run=a88a | CACHE    | MISS      | var_reconcile e29cc42130e8 | no stored answer for this exact input — model call required
 16:26:35 | run=a88a | CACHE    | MISS      | var_reconcile 6de9eb4b28e9 | no stored answer for this exact input — model call required
+
+============================================================================================================
+RUN ac49  started 2026-11-19 18:11:10  |  contract=tmph85s6rcg.pdf template_fields=0
+============================================================================================================
+18:11:10 | run=ac49 | CACHE    | MISS      | clause_extraction aa334b755e7b | no stored answer for this exact input — model call required
+18:12:35 | run=ac49 | CACHE    | MISS      | rule_intents bebc86c4c0de | no stored answer for this exact input — model call required
+18:12:35 | run=ac49 | CALL2    | ATTEMPT   | 25 clause(s) in ONE call | est answer ~7,550 of 45,875 tok budget (16%)
+18:13:05 | run=ac49 | CALL2    | SPOTCHECK | re-asked 6 of 6 rejected clause(s) | longest first — length is what dilutes attention
+18:13:05 | run=ac49 | CALL2    | OK        | single call accepted for all 25 clause(s) | spot-check found no false negatives
+------------------------------------------------------------------------------------------------------------
+TIMING run=ac49   total 115.4s (1.9 min)
+   Call 1 extraction             84.6s  73.3%  #############################
+   Call 2 intents                29.9s  25.9%  ##########
+   PDF parse (no AI)              0.2s   0.2%  
+   (other / overlap)              0.7s
+------------------------------------------------------------------------------------------------------------

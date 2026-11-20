@@ -53,6 +53,8 @@ def _filters(
     open_problems: str = "include",
     month: Optional[str] = None,
     measure: Optional[str] = None,
+    dates: Optional[str] = None,
+    check: Optional[str] = None,
 ) -> dict:
     """The screen's filters and the number clicked — ONE set, read the same
     way by the list, the file and the email, so what goes out is what was on
@@ -62,7 +64,7 @@ def _filters(
             "date_from": date_from, "date_to": date_to, "from": from_, "label": label,
             "basis": basis, "period": period, "window": window, "metric": metric,
             "currency": currency, "open_problems": open_problems, "month": month,
-            "measure": measure}
+            "measure": measure, "dates": dates, "check": check}
 
 
 def _select(s, principal: Principal, f: dict, page: int = 1,
@@ -73,7 +75,8 @@ def _select(s, principal: Principal, f: dict, page: int = 1,
         period=f["period"], window=f["window"], metric=f["metric"],
         currency=f["currency"], open_problems=f["open_problems"], month=f["month"],
         measure=f["measure"], program_id=f["program_id"],
-        broker_party_id=f["broker_party_id"], carrier_id=f["carrier_id"])
+        broker_party_id=f["broker_party_id"], carrier_id=f["carrier_id"],
+        dates=f["dates"], check=f["check"])
     return policy_search.search(
         s, principal, q=f["q"], program_id=f["program_id"],
         broker_party_id=f["broker_party_id"], carrier_id=f["carrier_id"], state=f["state"],
@@ -86,8 +89,6 @@ def policies_search(
     f: dict = Depends(_filters),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
-    dates: Optional[str] = None,
-    check: Optional[str] = None,
     principal: Principal = Depends(current_principal),
 ):
     """Search and filter the policies themselves — by policy number or insured
@@ -103,17 +104,7 @@ def policies_search(
     behind it; programme and broker narrow it exactly as they narrowed the
     number."""
     with SessionLocal() as s:
-        drill = drill_down.resolve(
-            s, principal, source=from_, label=label, basis=basis, period=period,
-            window=window, metric=metric, currency=currency,
-            open_problems=open_problems, month=month, measure=measure,
-            program_id=program_id, broker_party_id=broker_party_id,
-            carrier_id=carrier_id, dates=dates, check=check)
-        return policy_search.search(
-            s, principal, q=q, program_id=program_id,
-            broker_party_id=broker_party_id, carrier_id=carrier_id, state=state,
-            date_field=date_field, date_from=date_from, date_to=date_to,
-            page=page, page_size=page_size, drill=drill)
+        return _select(s, principal, f, page, page_size)
 
 
 @router.get("/detail")

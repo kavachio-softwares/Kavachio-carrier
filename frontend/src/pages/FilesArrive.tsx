@@ -34,6 +34,11 @@ import { InfoTip } from "../components/InfoTip";
 const API_BASE: string = import.meta.env.VITE_API_URL ??
   `${window.location.protocol}//${window.location.hostname}:8080`;
 
+/** SFTP is not offered yet: the Configure Ingestion Channel dialog still lists
+ *  it, marked "coming soon", but says it is not available and creates nothing.
+ *  Channels set up before stay as they are. Set to true to offer it again. */
+const SFTP_AVAILABLE = false;
+
 const CHANNEL_COPY: Record<Channel, { title: string; sub: string; hint: string }> = {
   upload: {
     // "someone" was accurate while a carrier seat could upload too. It cannot
@@ -376,6 +381,8 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
           const open = expanded.has(ch);
           const files = routes.reduce((n, r) => n + r.files_this_month, 0);
           const brokers = new Set(routes.map(r => r.broker_party_id)).size;
+          // SFTP "coming soon": the group stays listed but shows no channels.
+          const soon = ch === "sftp" && !SFTP_AVAILABLE;
           return (
             <div className="chan-grp" key={ch}>
               <button type="button" className="chan-hd" aria-expanded={open}
@@ -393,6 +400,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
                 <span className="meta">
                   {ch === "upload"
                     ? "always on · anyone with a login · nothing to set up"
+                    : soon ? "coming soon"
                     : routes.length === 0 ? "no brokers on this channel yet"
                     : `${brokers} broker${brokers === 1 ? "" : "s"} · ${files} file${files === 1 ? "" : "s"} this month${
                       /* The watcher's mode describes our own folder; a pull
@@ -409,6 +417,11 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
                       <b>Process Bordereau</b> screen. It is the fallback for
                       everything else, so it cannot be switched off and there is
                       nothing to configure.
+                    </div>
+                  ) : soon ? (
+                    <div className="note">
+                      SFTP is an upcoming feature and is not available yet.
+                      Use Email or API for now.
                     </div>
                   ) : routes.length === 0 ? (
                     <div className="note">
@@ -1536,6 +1549,7 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
   // files are on the broker's own server (Kavachio collects).
   const [sftpWhere, setSftpWhere] = useState<SftpWhere>("kavachio");
   const pullSftp = channel === "sftp" && sftpWhere === "broker";
+  const sftpSoon = channel === "sftp" && !SFTP_AVAILABLE;
   const [senderEmail, setSenderEmail] = useState("");
   const [brokerId, setBrokerId] = useState<number | "">("");
   // "any": every programme this broker is on, the file naming which one. A
@@ -1563,7 +1577,8 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
   useEffect(() => {
     if (open) {
       // Email first: it is the way most brokers already send.
-      setChannel(creatable.includes("email") ? "email" : creatable[0] ?? "sftp");
+      setChannel(creatable.includes("email") ? "email"
+        : creatable.find(c => SFTP_AVAILABLE || c !== "sftp") ?? creatable[0] ?? "sftp");
       setSftpWhere("kavachio");
       setBrokerId(""); setProgramId("");
       setSenderEmail("");
@@ -1718,7 +1733,7 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
               <button className="btn pri" onClick={create}
                 title={pullSftp && !sftpReady
                   ? "Test the connection first" : undefined}
-                disabled={saving || brokerId === "" ||
+                disabled={saving || sftpSoon || brokerId === "" ||
                   programId === "" || sftpFull ||
                   (channel === "email" && !senderEmail.includes("@")) ||
                   (pullSftp && !sftpReady)}>
@@ -1885,8 +1900,15 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
               <label>Select Channel</label>
               <select value={channel} onChange={e => setChannel(e.target.value as Channel)}>
                 {creatable.map(c => (
-                  <option key={c} value={c}>{CHANNEL_COPY[c].title}</option>))}
+                  <option key={c} value={c}>{CHANNEL_COPY[c].title}
+                    {c === "sftp" && !SFTP_AVAILABLE ? " (coming soon)" : ""}</option>))}
               </select>
+              {sftpSoon ? (
+                <div className="note warn" style={{ marginTop: 10 }}>
+                  SFTP is an upcoming feature and is not available yet.
+                  Choose Email or API for now.
+                </div>
+              ) : (<>
               {/* One short line each: how the file travels. */}
               <div className="hint">
                 {channel === "api"
@@ -1901,7 +1923,11 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 <div className="hint" style={{ color: "var(--p-warn)" }}>
                   No intake mailbox is set up yet, so nothing will be collected until it is.
                 </div>)}
+              </>)}
             </div>
+
+            {/* SFTP "coming soon": nothing more to fill in. */}
+            {!sftpSoon && (<>
 
             {channel === "email" && (
               <div className="field">
@@ -2006,6 +2032,7 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 folder={pullSftp ? sf.remoteDir.trim() || "/" : "/incoming"}
                 shared={programId === "any"}
                 programmes={programId === "any" ? progs : progs.filter(p => p.program_id === programId)} />)}
+            </>)}
 
           </>
         )}

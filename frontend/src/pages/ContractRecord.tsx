@@ -65,7 +65,7 @@ import {
 } from "../api/esign";
 import {
   acceptTerms, activateContract, deactivateDocument, downloadDocument,
-  openDocument,
+  openDocument, fetchContractOriginal,
   bindChecks,
   generateRules, getContract, getContractTypes, renewContract, requestChanges,
   acceptContract, sendBackContract, sendForReview, skipReview, submitForApproval,
@@ -296,7 +296,9 @@ function ContractRecordView() {
   const [viewing, setViewing] = useState<
     { id: number; name: string; url: string; type: string;
       /** What it is — only the contract's own unsigned wording is The wording. */
-      kind?: string; signed?: boolean } | null>(null);
+      kind?: string; signed?: boolean;
+      /** The uploaded contract's own file, not a row of Documents. */
+      original?: boolean } | null>(null);
 
   // Where the electronic signing round has got to. Read from the server so the
   // button and the endpoint behind it cannot disagree about whether pressing it
@@ -504,6 +506,32 @@ function ContractRecordView() {
   useEffect(() => {
     if (err) errRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [err]);
+
+  // The file an UPLOADED contract was read from — shown to the carrier and to
+  // the contract's broker alike, so both read the same document. Not a row of
+  // Documents: it lives on the contract itself (GET /contracts/{id}/original).
+  async function getOriginal() {
+    const o = await fetchContractOriginal(id);
+    if (!o) throw new Error("The contract file is not stored on this server.");
+    return { blob: o.blob, name: o.filename || rec?.filename || "Contract" };
+  }
+  async function viewOriginal() {
+    if (viewing) URL.revokeObjectURL(viewing.url);
+    const { blob, name } = await getOriginal();
+    setViewing({ id: 0, name, url: URL.createObjectURL(blob),
+                 type: blob.type || "", original: true });
+  }
+  async function saveOriginal() {
+    const { blob, name } = await getOriginal();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  /** Download whatever is open in the viewer. */
+  function downloadViewed(v: { id: number; name: string; original?: boolean }) {
+    return v.original ? saveOriginal() : downloadDocument(id, v.id, v.name);
+  }
 
   async function run(label: string, fn: () => Promise<unknown>) {
     setBusy(label);
@@ -1293,6 +1321,14 @@ function ContractRecordView() {
               >
                 <Download size={14} />{" "}
                 {busy === "pdf" ? "Composing…" : "Download contract"}
+              </button>
+            )}
+            {/* An uploaded contract: the file it was uploaded as, for whoever
+                can open the contract — the carrier, and its broker. */}
+            {rec.has_original && (
+              <button className="btn" type="button" disabled={busy === "view"}
+                      onClick={() => run("view", viewOriginal)}>
+                <Eye size={14} />{" "}{busy === "view" ? "Opening…" : "View contract"}
               </button>
             )}
             <Link to="/contracts" className="btn">
@@ -3567,6 +3603,12 @@ function ContractRecordView() {
                 : <ChevronRight size={16} className="ci" />}
               <FileText size={16} className="ci" />
               <h3>Clauses</h3>
+              {/* Where the clause text comes from — exact for a contract
+                  written here, read by AI from an uploaded file. Clicking
+                  the icon must not fold the card. */}
+              <span onClick={e => e.stopPropagation()} style={{ display: "inline-flex" }}>
+                <InfoTip text="Contracts written in Kavachio show their clauses word for word. For uploaded contracts, AI reads the clauses from the file, so the wording may differ slightly." />
+              </span>
               <span className="sub">
                 {clauses.length} clause{clauses.length === 1 ? "" : "s"}
               </span>
@@ -3940,7 +3982,7 @@ function ContractRecordView() {
               <span className="right">
                 <button
                   className="btn sm" type="button"
-                  onClick={() => downloadDocument(id, viewing.id, viewing.name)}
+                  onClick={() => downloadViewed(viewing)}
                 >
                   <Download size={12} /> Download
                 </button>
@@ -3958,7 +4000,7 @@ function ContractRecordView() {
                 <div className="empty">
                   Your browser will not display this PDF in the page.{" "}
                   <span className="linkish" role="button"
-                        onClick={() => downloadDocument(id, viewing.id, viewing.name)}>
+                        onClick={() => downloadViewed(viewing)}>
                     Download it instead
                   </span>.
                 </div>
@@ -3969,7 +4011,7 @@ function ContractRecordView() {
                   <b>This file cannot be shown in the page.</b> It could not be
                   turned into a PDF to read here —{" "}
                   <span className="linkish" role="button"
-                        onClick={() => downloadDocument(id, viewing.id, viewing.name)}>
+                        onClick={() => downloadViewed(viewing)}>
                     download it</span> to open it.
                   {/* Only the contract's OWN wording, written here, is the
                       same text as The wording — never an uploaded endorsement
@@ -4032,6 +4074,29 @@ function ContractRecordView() {
                   )}
                 </div>
               ))}
+              {rec.has_original && (
+                <div className="doc-list" style={{ marginBottom: 10 }}>
+                  <div className="doc-row">
+                    <FileText size={15} className="doc-ic" />
+                    <div className="doc-main">
+                      <div className="fn" title={rec.filename ?? undefined}>{rec.filename ?? "Contract"}</div>
+                      <div className="meta">The contract, as uploaded</div>
+                    </div>
+                    <div className="doc-acts">
+                      <button className="btn sm ghost ic" type="button" disabled={!!busy}
+                              title="View" aria-label={`View ${rec.filename ?? "the contract"}`}
+                              onClick={() => run("view", viewOriginal)}>
+                        <Eye size={13} />
+                      </button>
+                      <button className="btn sm ghost ic" type="button" disabled={!!busy}
+                              title="Download" aria-label={`Download ${rec.filename ?? "the contract"}`}
+                              onClick={() => run("download", saveOriginal)}>
+                        <Download size={13} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
               {active.length === 0 ? (
                 <div className="empty" style={{ padding: "12px 10px", textAlign: "left" }}>
                   <b>{documentsEmptyMessage({ authored, filename: rec.filename }).title}</b>

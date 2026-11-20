@@ -809,6 +809,10 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         "contract_type_label": (ct.CONTRACT_TYPES[ctype]["label"]
                                 if known_type else (ctype or None)),
         "filename": c.filename,
+        # The file an uploaded contract was read from is still held, so
+        # GET /contracts/{id}/original can hand it over — to the carrier and
+        # to the contract's own broker alike (_contract_access).
+        "has_original": bool(c.blob_ref or c.blob),
         # The short codes a broker writes in an email subject or file name
         # instead of the names (intake_service.programme_code).
         "code": _codes().contract_code(c),
