@@ -409,3 +409,125 @@ def export_versions(s, export_ids) -> dict[int, dict]:
             else:
                 _put(eid, None, None, per)
     return out
+
+
+# The decision kinds that settle an exception (broker_tally counts all four).
+SETTLING = ("fix", "approve", "dismiss", "reject")
+
+
+def resolved_by_day(s, *, tenant_id: int | None = None,
+                    broker_party_id: int | None = None,
+                    program_id: int | None = None,
+                    start=None, end=None) -> dict:
+    """{date: exceptions resolved that day} for the "Resolved Exceptions In
+    Files" line — counted the way the Broker Performance card counts them.
+
+    The line used to count decision rows only, so the exceptions a broker
+    resolved by sending a corrected version (upload, email, SFTP, API, Fix &
+    Validate) never showed: Harborline Oct went 75 → 16 by re-sending, the
+    card said 59 resolved and the chart 3 (20 Nov 2026).
+
+    Each submission (or a file in none) has, at the end of any day, a
+    "resolved so far" — with_earlier_fixes' rule on the version that stood
+    then: exceptions found − still open, where still open adds back the
+    decisions on that version made later. A day's figure is how much that
+    rose (or fell) that day, summed over the submissions, so the days add up
+    to the card's number. A day where a worse version came in can come out
+    below 0; callers draw it as 0. `start` / `end` (dates, inclusive) keep only
+    the days inside; None leaves that side open."""
+    import datetime as _dt
+    from db import ExceptionDecisionLog, OutputExport
+    from submission_service import load
+
+    def _scope(q):
+        if tenant_id is not None:
+            q = q.filter(OutputExport.tenant_id == tenant_id)
+        if broker_party_id is not None:
+            q = q.filter(OutputExport.broker_party_id == broker_party_id)
+        if program_id is not None:
+            q = q.filter(OutputExport.program_id == program_id)
+        return q
+
+    def _inside(col):
+        out = []
+        if start is not None:
+            out.append(func.date(col) >= start)
+        if end is not None:
+            out.append(func.date(col) <= end)
+        return out
+
+    # The files with something happening in the window: a version made, or a
+    # decision taken on one.
+    active = {i for (i,) in _scope(s.query(OutputExport.id))
+              .filter(*_inside(OutputExport.created_at)).all()}
+    active |= {i for (i,) in _scope(s.query(OutputExport.id)
+               .join(ExceptionDecisionLog, ExceptionDecisionLog.export_id == OutputExport.id))
+               .filter(ExceptionDecisionLog.kind.in_(SETTLING),
+                       *_inside(ExceptionDecisionLog.decided_at)).all()}
+    if not active:
+        return {}
+
+    # Each one's whole submission, oldest version first.
+    chains: dict = {}
+    vers = export_versions(s, active)
+    threads: dict = {}
+    for eid in active:
+        ref = (vers.get(eid) or {}).get("submission_ref")
+        chain = None
+        if ref:
+            if ref not in threads:
+                try:
+                    th = load(s, ref)
+                except Exception:  # noqa: BLE001 — a chart never fails on one submission
+                    th = None
+                threads[ref] = [x.export_id for x in th.versions if x.export_id] if th else []
+            if eid in threads[ref]:
+                chain = tuple(threads[ref])
+        chains[chain or (eid,)] = True
+
+    ids = {e for c in chains for e in c}
+    made = {i: c for i, c in s.query(OutputExport.id, OutputExport.created_at)
+            .filter(OutputExport.id.in_(ids)).all()}
+    later: dict = {}                 # {export: [(date, n)]} settling decisions
+    for eid, d, n in (s.query(ExceptionDecisionLog.export_id,
+                              func.date(ExceptionDecisionLog.decided_at),
+                              func.count(ExceptionDecisionLog.id))
+                      .filter(ExceptionDecisionLog.export_id.in_(ids),
+                              ExceptionDecisionLog.kind.in_(SETTLING))
+                      .group_by(ExceptionDecisionLog.export_id,
+                                func.date(ExceptionDecisionLog.decided_at)).all()):
+        later.setdefault(eid, []).append((_dt.date.fromisoformat(str(d)), n))
+    tallies: dict = {}
+    for eid in ids:
+        r = s.get(OutputExport, eid)
+        if r is None:
+            continue
+        tallies[eid] = export_tally(r)
+        s.expunge(r)                 # the exceptions column runs to megabytes
+
+    out: dict = {}
+    for chain in chains:
+        chain = [e for e in chain if e in tallies and made.get(e) is not None]
+        if not chain:
+            continue
+        base = tallies[chain[0]]
+
+        def resolved_at(day):
+            standing = [e for e in chain if made[e].date() <= day]
+            if not standing:
+                return 0
+            v = standing[-1]
+            t = tallies[v]
+            undone = sum(n for d, n in later.get(v, ()) if d > day)
+            still_open = min(t["exceptions"], t["open"] + undone)
+            return max(0, max(base["exceptions"], t["exceptions"]) - still_open)
+
+        days = sorted({made[e].date() for e in chain}
+                      | {d for e in chain for d, _ in later.get(e, ())})
+        before = 0
+        for day in days:
+            now = resolved_at(day)
+            if now != before and (start is None or day >= start) and (end is None or day <= end):
+                out[day] = out.get(day, 0) + now - before
+            before = now
+    return out

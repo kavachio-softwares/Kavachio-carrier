@@ -1070,20 +1070,13 @@ def broker_insights(days: int = Query(30, ge=7, le=90),
             # Which carrier the work was for — computed by _carrier_ranking below.
             by_carrier, carriers_total = _carrier_ranking(s, bid, prog_ids, links, since, limit=5)
 
-        # Resolved-over-time is NOT gated on prog_ids: a decision is logged
-        # against the broker who made it, and it stays true even after the
-        # carrier takes that broker off the programme.
-        for d, n in (
-            s.query(func.date(ExceptionDecisionLog.decided_at),
-                    func.count(ExceptionDecisionLog.id))
-             .filter(ExceptionDecisionLog.decided_by_broker_party_id == bid,
-                     ExceptionDecisionLog.decided_at >= since,
-                     # "reject" settles an exception too — see _team_ranking.
-                     ExceptionDecisionLog.kind.in_(
-                         ("fix", "approve", "dismiss", "reject")))
-             .group_by(func.date(ExceptionDecisionLog.decided_at)).all()
-        ):
-            resolved[str(d)] = resolved.get(str(d), 0) + n
+        # Resolved-over-time is NOT gated on prog_ids: the work stays true
+        # even after the carrier takes that broker off the programme. Counted
+        # by hand AND by sending a corrected version, as the carrier's Broker
+        # Performance card counts it (exception_tally.resolved_by_day).
+        from exception_tally import resolved_by_day
+        for d, n in resolved_by_day(s, broker_party_id=bid, start=day_list[0]).items():
+            resolved[str(d)] = max(0, resolved.get(str(d), 0) + n)
 
         people_total = None
         if p.role == "broker_admin":

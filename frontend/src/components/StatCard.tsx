@@ -3,7 +3,7 @@ import { ChevronRight, type LucideIcon } from "lucide-react";
 import { InfoTip } from "./InfoTip";
 
 /** The dashboard KPI tile — one look across the carrier and broker dashboards. */
-export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onClick, footer, info, valueInfo, split }: {
+export function StatCard({ title, value, icon: Icon, trend, trendUpIsBad, subtitle, tone, onClick, footer, info, valueInfo, split }: {
   title: string;
   value: string | number;
   /** Why the value is what it is — e.g. why a figure shows "—" — behind an
@@ -11,6 +11,9 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
   valueInfo?: string;
   icon: LucideIcon;
   trend?: string;
+  /** For a figure where a rise is bad (late files): a leading "+" shows red
+   *  and a leading "-" green. */
+  trendUpIsBad?: boolean;
   /** Plain text, or a node when part of it has to stand out (a warning). */
   subtitle?: ReactNode;
   tone?: "alert";
@@ -121,8 +124,8 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
           {trend && (
             <div style={{
               fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
-              color: trend.startsWith("-") || alert ? "#ef4444" : "#10b981",
-              background: trend.startsWith("-") || alert ? "#fef2f2" : "#ecfdf5",
+              color: trend.startsWith(trendUpIsBad ? "+" : "-") || alert ? "#ef4444" : "#10b981",
+              background: trend.startsWith(trendUpIsBad ? "+" : "-") || alert ? "#fef2f2" : "#ecfdf5",
               padding: "4px 8px", borderRadius: 6,
             }}>
               {trend}

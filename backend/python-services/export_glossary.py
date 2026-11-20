@@ -45,7 +45,7 @@ TERMS: list[tuple[tuple[str, ...], str]] = [
     (("Who must act", "Owner"), "The person who has to fix it: the broker who sent the file, or the carrier if no "
                                 "broker sent it."),
     (("Rank",), "The broker's position among all brokers in the period, 1 being the best. Ranked first by "
-                "“On time and passed checks %”, then by “On time %”, then by number of files. “Not ranked” means "
+                "“On time and clean now %”, then by “On time %”, then by number of files. “Not ranked” means "
                 "none of its files could be judged yet."),
     (("#",), "Position in the list. Number 1 is the highest."),
     # when
@@ -66,6 +66,7 @@ TERMS: list[tuple[tuple[str, ...], str]] = [
     (("On time", "Arrived on time", "Files on time", "Files received on time"), "Files that arrived on or before their due date."),
     (("On time %",), "Files that arrived on or before their due date, as a percentage of the files due."),
     (("Late", "Arrived late", "Files received late"), "Files that arrived, but after their due date."),
+    (("Late %",), "Files that arrived after their due date, as a percentage of the files due."),
     (("Missing",), "Files that were due but have not arrived."),
     (("Late or missing",), "Files that arrived late or have not arrived at all."),
     (("Overdue",), "The due date has passed, no file has come yet, and the broker can still send it."),
@@ -90,12 +91,20 @@ TERMS: list[tuple[tuple[str, ...], str]] = [
      "Files with no problems at all when they first arrived, so nobody had to fix or resend anything."),
     (("Clean first time %", "Passed checks first time %"),
      "Of the files checked, the percentage that had no problems when they first arrived."),
+    (("Received and passed checks first time",), "Of the files due that arrived, how many had no problems when "
+                                                 "they first arrived."),
+    (("Received and passed checks first time %",), "“Received and passed checks first time” as a percentage of "
+                                                   "“Files received”."),
     (("On time and passed checks",), "Files that were both on time and had no problems. The best result a broker "
                                      "can get."),
     (("Of files with a result",), "How many files could be judged. Files that arrived on time but have not been "
                                   "checked yet are left out, so they do not count against the broker."),
-    (("On time and passed checks %",), "“On time and passed checks” as a percentage of “Of files with a result”. "
-                                       "This is the main score used for the rank."),
+    (("On time and passed checks %",), "“On time and passed checks” as a percentage of “Files due”. Late, missing "
+                                       "and not-checked files count as not passed."),
+    (("On time and clean now",), "Files that came on time and are clean today: no exceptions when they first "
+                                 "arrived, or every exception resolved since."),
+    (("On time and clean now %",), "“On time and clean now” as a percentage of the files that could be judged. "
+                                   "This is the score used for the rank and the Best and Worst performers."),
     (("Not checked",), "Files that could not be checked yet, usually because the checks for that contract were not "
                        "set up. They are not counted as good or bad."),
     (("Clean",), "Files that passed every check when they arrived."),

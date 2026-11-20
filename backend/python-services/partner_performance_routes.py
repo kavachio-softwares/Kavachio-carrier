@@ -53,7 +53,7 @@ def partner_performance_file(cadence: str = "month", period: Optional[str] = Non
                              broker_id: Optional[int] = None, mga: Optional[str] = None, principal: Principal = Depends(_reader)):
     """The ranked table, as on screen with the same filters, as an Excel file."""
     data = _page(principal, mga, cadence, period, program_id, file_type, broker_id)
-    name = f"Partner Performance {data['period']}.xlsx"
+    name = f"Broker Performance {data['period']}.xlsx"
     return Response(
         content=pp.workbook(data),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

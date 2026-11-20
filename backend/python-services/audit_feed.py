@@ -696,7 +696,7 @@ _ACCESS_WORDS = [
     (re.compile(r"^/reports/executive/programmes/file"), "Downloaded the Programme Management Report"),
     (re.compile(r"^/reports/executive/(sends/\d+/)?file"), "Downloaded the Executive Report"),
     (re.compile(r"^/reports/monthly/(sends/\d+/)?file"), "Downloaded the Operational Report"),
-    (re.compile(r"^/reports/partner-performance/file"), "Downloaded the Partner Performance report"),
+    (re.compile(r"^/reports/partner-performance/file"), "Downloaded the Broker Performance report"),
     (re.compile(r"^/reinsurance/bordereaux/\d+/statements/\d+/file"), "Downloaded a reinsurer statement"),
     (re.compile(r"^/dwh"),                       "Opened the data model"),
 ]
@@ -887,7 +887,7 @@ _RESOURCE_WORDS = [
     (re.compile(r"^/reports/executive/programmes/file$"),  "Programme Management Report"),
     (re.compile(r"^/reports/executive/(?:sends/\d+/)?file$"), "Executive Report"),
     (re.compile(r"^/reports/monthly/(?:sends/\d+/)?file$"), "Operational Report"),
-    (re.compile(r"^/reports/partner-performance/file$"),   "Partner Performance report"),
+    (re.compile(r"^/reports/partner-performance/file$"),   "Broker Performance report"),
     (re.compile(r"^/policies/detail\?policy=(.+)$"),       "Policy {id}"),
 ]
 

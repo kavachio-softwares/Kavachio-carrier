@@ -139,7 +139,7 @@ export default function BrokerPerformance({ mga, programme, period, periodLabel 
               {/* 36 — the carrier seat only, as the page itself. */}
               {canAccessPath("/partner-performance") && <>
                 {activeTotal > sent.length && <span style={{ color: "var(--p-faint)" }}> · </span>}
-                <Link className="linkish" to="/partner-performance">View partner performance →</Link>
+                <Link className="linkish" to="/partner-performance">View broker performance →</Link>
               </>}
             </div>
           )}

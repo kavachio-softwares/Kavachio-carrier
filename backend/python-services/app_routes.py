@@ -5213,16 +5213,14 @@ def dashboard_bordereau_status(mga: str, period: Optional[str] = None,
                           func.count(OutputExport.id))
                   .filter(OutputExport.tenant_id == tid,
                           *_in_window(OutputExport.created_at, start, end)))
-        dec_q = (s.query(func.date(ExceptionDecisionLog.decided_at),
-                         func.count(ExceptionDecisionLog.id))
-                 .filter(ExceptionDecisionLog.tenant_id == tid,
-                         ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss", "reject")),
-                         *_in_window(ExceptionDecisionLog.decided_at, start, end)))
         if program_id is not None:
             runs_q = runs_q.filter(OutputExport.program_id == program_id)
-            dec_q = dec_q.filter(ExceptionDecisionLog.program_id == program_id)
         runs = runs_q.group_by(func.date(OutputExport.created_at), OutputExport.status).all()
-        decided = dec_q.group_by(func.date(ExceptionDecisionLog.decided_at)).all()
+        # Resolved by hand AND by sending a corrected version — the Broker
+        # Performance card's count, day by day (exception_tally.resolved_by_day).
+        from exception_tally import resolved_by_day
+        decided = list(resolved_by_day(s, tenant_id=tid, program_id=program_id,
+                                       start=start, end=end).items())
 
     # The bucket a day falls in: the day itself, its month, or its year.
     unit = "day" if period and len(period) == 7 else "month" if period and len(period) == 4 else "year"
@@ -5247,6 +5245,8 @@ def dashboard_bordereau_status(mga: str, period: Optional[str] = None,
         b = by.get(key(as_date(d)))
         if b is not None:
             b["resolved"] += c
+    for b in by.values():
+        b["resolved"] = max(0, b["resolved"])     # a worse version is not "−3 resolved"
     return {"period": period or "all", "unit": unit, "items": [by[k] for k in keys]}
 
 
@@ -5307,21 +5307,15 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
             else:
                 by_date[d_str]["flagged"] += c
                 
-        resolved_rows = s.query(
-            func.date(ExceptionDecisionLog.decided_at), func.count(ExceptionDecisionLog.id)
-        ).filter(
-            ExceptionDecisionLog.tenant_id == tid,
-            ExceptionDecisionLog.decided_at >= week_ago,
-            # "reject" settles an exception too, and broker_tally counts a
-            # rejected one as resolved — the trend has to agree with the tiles.
-            ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss", "reject"))
-        ).group_by(func.date(ExceptionDecisionLog.decided_at)).all()
-        
-        for d, c in resolved_rows:
+        # Resolved by hand AND by sending a corrected version — the Broker
+        # Performance card's count, day by day (exception_tally.resolved_by_day).
+        from exception_tally import resolved_by_day
+        for d, c in resolved_by_day(s, tenant_id=tid,
+                                    start=today - timedelta(days=6)).items():
             d_str = str(d)
             if d_str not in by_date:
                 by_date[d_str] = {"clean": 0, "flagged": 0, "resolved": 0}
-            by_date[d_str]["resolved"] += c
+            by_date[d_str]["resolved"] = max(0, by_date[d_str]["resolved"] + c)
 
         runs_by_day_status = []
         for i in range(6, -1, -1):

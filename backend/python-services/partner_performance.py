@@ -5,25 +5,34 @@ Task 36 — Partner Performance: how often each broker sends a clean file on
 time — one row per broker, programme and contract — and the best and worst
 brokers across the carrier's book.
 
-NOTHING RE-COUNTED
+ONE BASE: THE FILES DUE (20 Nov 2026). Every card and every share counts the
+  same files — the expected files due in the period — so the numbers add up:
+  on time + late + not received = files due; passed checks first time is out
+  of the files due that came; on time and passed checks is out of the files
+  due. (Until 20 Nov "passed checks first time" counted every check run in the
+  period, re-uploads included, and "on time and passed checks" left out the
+  files with no check on record — three different totals on one screen.)
+
   on time            The Executive Report scorecard's rule
                      (executive_report._due_tally), file by file: the expected
                      files due in the period (expected_submission, by due
                      date), each judged by submission_calendar.derive_status as
                      at the period's last day. Same files, same denominator.
-  clean first time   check_record: each processed file's first run in the
-                     period (runs_in → first_runs), clean when
-                     check_record.straight_through says so — the number the
-                     Monthly Report and the Executive Report scorecard show.
+  late               came in, but after its due date — out of the files due.
+  clean first time   of the files due that came: the file as it came (the
+                     calendar's received_export_id) passed its first check
+                     straight through (check_record.straight_through). A file
+                     with no check on record but with exceptions found on it as
+                     it came did NOT pass (the check history only starts 20 Oct
+                     2026, so older arrivals have exceptions but no check row).
   clean and on time  The ONE new rule. An expected file counts when it came by
                      its due date AND the file that came — the calendar's first
                      arrival (received_export_id; a later correction never
                      repaints it) — passed its first check straight through.
                      A file that came late or not at all fails it, whatever its
-                     checks said. A file that came on time but has no check
-                     recorded is NOT CHECKED: it is left out of the share,
-                     never counted as a fail, and counted on its own so the
-                     screen can say so.
+                     checks said. Out of the files due. A file that came on
+                     time with no check and no exceptions on record is NOT
+                     CHECKED: counted on its own so the screen can say so.
 
 CONTRACT = the contract the arrived file was run against (the check run's own,
   else output_exports.contract_id) — also for a file that came only after the
@@ -47,8 +56,15 @@ FILE TYPE = how the file came in — submission_calendar_service._ways_in, the
   its way in → "Not recorded"; a file that never came → "Not received". With a
   file type picked, a file that never came has no way in, so it is left out.
 
+CLEAN NOW (what Best / Worst and the rank use, 20 Nov 2026) — a file that
+  came ON TIME and is clean today: it passed its first check, OR every
+  exception found on it has since been resolved (open = 0 on its live
+  version). Late or missing fails it; a file still with unresolved exceptions
+  fails it. A file with no check recorded and no exceptions known is not
+  checked, as above.
+
 RANKING
-  Brokers, by clean and on time, then on time, then most files — among ALL the
+  Brokers, by clean now and on time, then on time, then most files — among ALL the
   brokers in the period (with the programme and file type picked): picking one
   broker narrows what is shown, never the field it is ranked in. Every broker
   with at least MIN_FILES (one) file whose result is known is ranked; a broker
@@ -342,10 +358,6 @@ def files_of(s, tenant_id: int, start: dt.date, end: dt.date, as_at: dt.date,
     for e in expected:
         run = first.get(e["export_id"]) if e["export_id"] else None
         e["clean"] = cr.straight_through(run) if run is not None else None
-        if not e["on_time"]:
-            e["clean_on_time"] = False
-        else:
-            e["clean_on_time"] = e["clean"]          # None = came on time, not checked
         e["contract"] = ((run.contract_id if run is not None else None)
                          or ex_contract.get(e["file_export_id"])
                          or _covering(own.get((e["broker"], e["programme"]), []),
@@ -354,6 +366,12 @@ def files_of(s, tenant_id: int, start: dt.date, end: dt.date, as_at: dt.date,
                           else way.get(e["export_id"]) or NOT_RECORDED)
     if problems:
         _problems(s, tenant_id, expected)
+    for e in expected:
+        # No check on record, but exceptions were found on the file as it
+        # came: it did not pass first time.
+        if e["clean"] is None and e["received"] and e.get("found"):
+            e["clean"] = False
+        e["clean_on_time"] = e["clean"] if e["on_time"] else False   # None = on time, not checked
     processed = [{"broker": r.broker_party_id, "programme": r.program_id,
                   "contract": r.contract_id or ex_contract.get(r.export_id),
                   "file_type": (way.get(r.export_id) if r.export_id else None) or NOT_RECORDED,
@@ -363,8 +381,20 @@ def files_of(s, tenant_id: int, start: dt.date, end: dt.date, as_at: dt.date,
 
 # ── counting ────────────────────────────────────────────────────────────────
 _COUNTS = ("due", "received", "on_time", "late_or_missing", "late", "missing", "scored", "clean_on_time",
-           "not_checked", "files", "clean_first_time", "problems_found", "problems_open",
-           "problems_fixed", "files_with_problems")
+           "not_checked", "checked", "not_checked_came", "files", "clean_first_time", "problems_found", "problems_open",
+           "problems_fixed", "files_with_problems", "scored_now", "clean_now")
+
+
+def clean_now(e: dict) -> Optional[bool]:
+    """CLEAN NOW for one expected file (see the module notes): True / False,
+    or None when nothing is known about its checks."""
+    if not e["on_time"]:
+        return False                      # late, or not come at all
+    if e["clean"] is True:
+        return True                       # passed its first check
+    if e.get("found"):
+        return e["open"] == 0             # every exception since resolved
+    return e["clean"]                     # False, or None = not checked
 
 
 def _blank() -> dict:
@@ -383,8 +413,18 @@ def _add_expected(t: dict, e: dict) -> None:
     else:
         t["scored"] += 1
         t["clean_on_time"] += e["clean_on_time"]
+    now = clean_now(e)
+    if now is not None:
+        t["scored_now"] += 1
+        t["clean_now"] += now
     if e["received"]:
         t["ways"].add(e["file_type"])
+        # Passed checks first time: out of the files due that came.
+        if e["clean"] is None:
+            t["not_checked_came"] += 1
+        else:
+            t["checked"] += 1
+            t["clean_first_time"] += e["clean"]
     if e.get("found") is not None:
         t["problems_found"] += e["found"]
         t["problems_open"] += e["open"]
@@ -393,14 +433,17 @@ def _add_expected(t: dict, e: dict) -> None:
 
 
 def _add_processed(t: dict, f: dict) -> None:
+    """Check runs in the period — kept as a count only; no card or share uses
+    them (see ONE BASE)."""
     t["files"] += 1
-    t["clean_first_time"] += f["clean"]
 
 
 def _rates(t: dict) -> dict:
     return {**t, "on_time_pct": _pct(t["on_time"], t["due"]),
-            "clean_first_time_pct": _pct(t["clean_first_time"], t["files"]),
-            "clean_on_time_pct": _pct(t["clean_on_time"], t["scored"]),
+            "late_pct": _pct(t["late"], t["due"]),
+            "clean_first_time_pct": _pct(t["clean_first_time"], t["received"]),
+            "clean_on_time_pct": _pct(t["clean_on_time"], t["due"]),
+            "clean_now_pct": _pct(t["clean_now"], t["scored_now"]),
             "fixed_pct": _pct(t["problems_fixed"], t["problems_found"])}
 
 
@@ -427,14 +470,14 @@ def _keep(x: dict, programme: Optional[int], file_type: Optional[str],
 
 
 def rank(rows: list[dict]) -> list[dict]:
-    """Ranked rows first — most clean and on time, then most on time, then
-    most files — then the rows with no known result to rank on, most files
-    due first. `rank` is 1.. or None."""
-    ok = [r for r in rows if r["scored"] >= MIN_FILES]
-    rest = [r for r in rows if r["scored"] < MIN_FILES]
-    ok.sort(key=lambda r: (-r["clean_on_time_pct"], -(r["on_time_pct"] or 0),
-                           -r["scored"], r["name"].lower()))
-    rest.sort(key=lambda r: (-r["due"], -r["files"], r["name"].lower()))
+    """Ranked rows first — most on time and clean now (CLEAN NOW), then most
+    on time, then most files — then the rows with no known result to rank on,
+    most files due first. `rank` is 1.. or None."""
+    ok = [r for r in rows if r["scored_now"] >= MIN_FILES]
+    rest = [r for r in rows if r["scored_now"] < MIN_FILES]
+    ok.sort(key=lambda r: (-r["clean_now_pct"], -(r["on_time_pct"] or 0),
+                           -r["scored_now"], r["name"].lower()))
+    rest.sort(key=lambda r: (-r["due"], -r["received"], r["name"].lower()))
     for i, r in enumerate(ok, 1):
         r["rank"] = i
     for r in rest:
@@ -449,15 +492,15 @@ def best_and_worst(ranked: list[dict]) -> tuple[list, list]:
     when every broker is at 0%, there is no best. Worst lists the very worst
     first."""
     ok = [r for r in ranked if r["rank"] is not None]
-    best = [r for r in ok[:min(TOP, math.ceil(len(ok) / 2))] if r["clean_on_time_pct"] > 0]
+    best = [r for r in ok[:min(TOP, math.ceil(len(ok) / 2))] if r["clean_now_pct"] > 0]
     named = {id(r) for r in best}
     worst = [r for r in reversed(ok)
-             if id(r) not in named and r["clean_on_time_pct"] < 100][:TOP]
+             if id(r) not in named and r["clean_now_pct"] < 100][:TOP]
     return best, worst
 
 
 # ── the page ────────────────────────────────────────────────────────────────
-_SHARES = ("on_time_pct", "clean_first_time_pct", "clean_on_time_pct")
+_SHARES = ("on_time_pct", "late_pct", "clean_first_time_pct", "clean_on_time_pct")
 
 
 def _figures(now: dict, then: Optional[dict]) -> dict:
@@ -465,6 +508,7 @@ def _figures(now: dict, then: Optional[dict]) -> dict:
     then = then or {}
     return {
         **{k: now[k] for k in _COUNTS}, **{k: now[k] for k in _SHARES}, "fixed_pct": now["fixed_pct"],
+        "clean_now_pct": now["clean_now_pct"],
         "file_types": [CHANNEL_LABEL.get(w, w) for w in sorted(now["ways"], key=_way_order)],
         **{f"prev_{k}": then.get(k) for k in _SHARES},
         "prev_received": then.get("received"),
@@ -533,8 +577,10 @@ def page(s, tenant_id: int, *, cadence: str = "month", period: Optional[str] = N
     w = window(cadence, period, today)
     p = w["previous"]
     exp_now, proc_now = files_of(s, tenant_id, w["start"], w["end"], w["as_at"], problems=True)
+    # The period before is judged the same way (exceptions included), so the
+    # change compares like with like.
     exp_then, proc_then = files_of(s, tenant_id, p["start"], p["end"],
-                                   p["end"] - dt.timedelta(days=1))
+                                   p["end"] - dt.timedelta(days=1), problems=True)
     # The field every broker is ranked in: the programme and file type picked…
     field = lambda x: _keep(x, programme, file_type)  # noqa: E731
     a_now, a_f_now = [x for x in exp_now if field(x)], [x for x in proc_now if field(x)]
@@ -551,8 +597,10 @@ def page(s, tenant_id: int, *, cadence: str = "month", period: Optional[str] = N
     names = er._names(s, progs, brokers)
     contracts = contract_names(s, {x["contract"] for x in e_now + f_now})
 
-    total_now = tally(e_now, f_now).get(None) or _rates(_blank())
-    total_then = tally(e_then, f_then).get(None) or _rates(_blank())
+    # ONE BASE: every number counts the files due; check runs only feed the
+    # filter options.
+    total_now = tally(e_now, []).get(None) or _rates(_blank())
+    total_then = tally(e_then, []).get(None) or _rates(_blank())
     summary = {
         **{k: total_now[k] for k in _COUNTS}, **{k: total_now[k] for k in _SHARES},
         "fixed_pct": total_now["fixed_pct"],
@@ -561,8 +609,8 @@ def page(s, tenant_id: int, *, cadence: str = "month", period: Optional[str] = N
     }
 
     by_broker = lambda x: x["broker"]  # noqa: E731
-    then_b = tally(a_then, a_f_then, by_broker)
-    now_b = tally(a_now, a_f_now, by_broker)
+    then_b = tally(a_then, [], by_broker)
+    now_b = tally(a_now, [], by_broker)
     now_b.pop(None, None)                       # a processed file with no broker
     ranked = rank([_broker_row(b, v, then_b.get(b), names) for b, v in now_b.items()])
     ranked_count = sum(1 for r in ranked if r["rank"] is not None)
@@ -573,14 +621,15 @@ def page(s, tenant_id: int, *, cadence: str = "month", period: Optional[str] = N
         mine = next((r for r in ranked if r["broker_id"] == broker), None)
         picked = {"broker_id": broker, "name": names["broker"].get(broker) or f"#{broker}",
                   "rank": mine["rank"] if mine else None, "of": ranked_count,
-                  "clean_on_time_pct": mine["clean_on_time_pct"] if mine else None}
+                  "clean_on_time_pct": mine["clean_on_time_pct"] if mine else None,
+                  "clean_now_pct": mine["clean_now_pct"] if mine else None}
     place = {r["broker_id"]: r["rank"] for r in ranked}
     order = {r["broker_id"]: i for i, r in enumerate(ranked)}
 
     by_contract = lambda x: (x["broker"], x["programme"], x["contract"])  # noqa: E731
-    then_c = tally(e_then, f_then, by_contract)
+    then_c = tally(e_then, [], by_contract)
     rows = []
-    for key, v in tally(e_now, f_now, by_contract).items():
+    for key, v in tally(e_now, [], by_contract).items():
         bid, pid, cid = key
         if bid is None:
             continue
@@ -628,12 +677,15 @@ def workbook(data: dict) -> bytes:
         ("On time", 10, lambda r: r["on_time"]),
         ("On time %", 11, lambda r: _cell_pct(r["on_time_pct"])),
         ("Late", 9, lambda r: r["late"]),
+        ("Late %", 9, lambda r: _cell_pct(r["late_pct"])),
         ("Missing", 10, lambda r: r["missing"]),
-        ("Passed checks first time %", 16, lambda r: _cell_pct(r["clean_first_time_pct"])),
+        ("Received and passed checks first time", 18, lambda r: r["clean_first_time"]),
+        ("Received and passed checks first time %", 18, lambda r: _cell_pct(r["clean_first_time_pct"])),
         ("On time and passed checks", 16, lambda r: r["clean_on_time"]),
-        ("Of files with a result", 14, lambda r: r["scored"]),
         ("On time and passed checks %", 16, lambda r: _cell_pct(r["clean_on_time_pct"])),
         ("Not checked", 12, lambda r: r["not_checked"]),
+        ("On time and clean now", 14, lambda r: r["clean_now"]),
+        ("On time and clean now %", 14, lambda r: _cell_pct(r["clean_now_pct"])),
         ("Files with unresolved exceptions", 15, lambda r: r["files_with_problems"]),
         ("Unresolved exceptions", 14, lambda r: r["problems_open"]),
         ("Exceptions found", 14, lambda r: r["problems_found"]),
@@ -643,7 +695,7 @@ def workbook(data: dict) -> bytes:
     ]
     wb = Workbook()
     ws = wb.active
-    ws.title = "Partner Performance"
+    ws.title = "Broker Performance"
     ws.append([c[0] for c in cols])
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")

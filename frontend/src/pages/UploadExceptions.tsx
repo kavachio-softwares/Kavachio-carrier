@@ -98,7 +98,7 @@ export default function UploadExceptions() {
     if (fromParam === "files") return { to: "/files", label: "Files Received" };
     if (fromParam === "calendar") return { to: "/bordereau-calendar", label: "Bordereau Calendar" };
     if (fromParam === "policies") return { to: "/policies", label: "Policy Explorer" };
-    if (fromParam === "partner") return { to: "/partner-performance", label: "Partner Performance" };
+    if (fromParam === "partner") return { to: "/partner-performance", label: "Broker Performance" };
     if (isBrokerSeat()) return { to: "/broker/bordereau", label: "Process Bordereau" };
     // A carrier seat no longer has a Process Bordereau screen to go back to,
     // and sending them to one access.ts now refuses would bounce them to their

@@ -19,12 +19,17 @@ export interface PerfFigures {
   late: number;
   /** Due, and not come in yet. */
   missing: number;
-  /** Files processed in the period (the clean-first-time denominator). */
+  /** Check runs in the period — a count only, no share uses it. */
   files: number;
+  /** Files due that came and passed their first check (out of `received`). */
   clean_first_time: number;
+  /** Files due that came with a known first-check result. */
+  checked: number;
+  /** Files due that came with no check and no exceptions on record. */
+  not_checked_came: number;
   /** Files due whose clean-and-on-time result is known. */
   scored: number;
-  /** Came on time but no check is recorded — left out of the share. */
+  /** Came on time but no check is recorded. */
   not_checked: number;
   clean_on_time: number;
   /** Exceptions on the files as they first came. */
@@ -36,15 +41,26 @@ export interface PerfFigures {
   /** Files whose current version still has open exceptions. */
   files_with_problems: number;
   on_time_pct: number | null;
+  /** Late out of files due. */
+  late_pct: number | null;
+  /** Passed first time out of files received. */
   clean_first_time_pct: number | null;
+  /** On time and passed out of files due. */
   clean_on_time_pct: number | null;
   fixed_pct: number | null;
+  /** Files due whose clean-now result is known (exceptions known count too). */
+  scored_now: number;
+  /** Came on time AND clean today: passed first time, or every exception
+   *  resolved since. What the rank and Best / Worst use. */
+  clean_now: number;
+  clean_now_pct: number | null;
 }
 
 interface PerfScore extends PerfFigures {
   /** How the files came in: "Portal", "Email", … */
   file_types: string[];
   prev_on_time_pct: number | null;
+  prev_late_pct: number | null;
   prev_clean_first_time_pct: number | null;
   prev_clean_on_time_pct: number | null;
   /** Files received in the period before (null = none were due then). */
@@ -93,15 +109,15 @@ export interface PartnerPerformance {
   options: { brokers: PerfOption[]; programmes: PerfOption[]; file_types: PerfOption[] };
   min_files: number;
   summary: PerfFigures & {
-    previous: { on_time_pct: number | null; clean_first_time_pct: number | null; clean_on_time_pct: number | null };
-    change_pts: { on_time_pct: number | null; clean_first_time_pct: number | null; clean_on_time_pct: number | null };
+    previous: { on_time_pct: number | null; late_pct: number | null; clean_first_time_pct: number | null; clean_on_time_pct: number | null };
+    change_pts: { on_time_pct: number | null; late_pct: number | null; clean_first_time_pct: number | null; clean_on_time_pct: number | null };
   };
   best: PerfBroker[];
   worst: PerfBroker[];
   /** With one broker picked: where it stands among all the brokers (best and
    *  worst are then empty — they would only name it). */
   picked: { broker_id: number; name: string; rank: number | null; of: number;
-            clean_on_time_pct: number | null } | null;
+            clean_on_time_pct: number | null; clean_now_pct: number | null } | null;
   ranked_brokers: number;
   rows: PerfRow[];
 }
@@ -127,7 +143,7 @@ export async function downloadPartnerPerformance(p: Query): Promise<void> {
   const href = URL.createObjectURL(r.data);
   const a = document.createElement("a");
   a.href = href;
-  a.download = `Partner Performance ${p.period}.xlsx`;
+  a.download = `Broker Performance ${p.period}.xlsx`;
   document.body.appendChild(a);
   a.click();
   a.remove();

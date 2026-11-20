@@ -178,7 +178,7 @@ const GROUPS: {
       // 38.2: the whole book for leadership, downloadable and sent by email.
       { to: "/executive-report", label: "Executive Report", icon: Presentation },
       // 36: each broker's clean files on time, best and worst.
-      { to: "/partner-performance", label: "Partner Performance", icon: Award },
+      { to: "/partner-performance", label: "Broker Performance", icon: Award },
       // 35: premium, commission and net premium in the brokers' files. The
       // page is still /financial-summary; on screen it is "Financial Reporting".
       { to: "/financial-summary", label: "Financial Reporting", icon: Wallet },

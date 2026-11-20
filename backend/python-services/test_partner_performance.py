@@ -69,7 +69,7 @@ def test_a_wrong_or_future_period_is_refused(cadence, period):
 #        corrected version (export 105) is clean                → not clean (first file counts)
 #     a3 due 14 Oct, came 20 Oct (late), clean                  → fails: late
 #     a4 due 16 Oct, never came                                 → fails: missing
-#     a5 due 18 Oct, came on time, no check recorded            → NOT CHECKED (left out)
+#     a5 due 18 Oct, came on time, no check recorded            → NOT CHECKED (counts as not passed)
 #     a6 due 25 Nov — not due yet in October's window at all
 #   Beta (B), Cargo, contract 901 (no class of business), portal:
 #     b1..b3 on time and clean; b3's first run clean but a
@@ -200,21 +200,35 @@ def test_clean_and_on_time_file_by_file(book):
     assert by[11]["clean_on_time"] is False
 
 
-def test_alpha_scores_one_of_four_known_and_one_not_checked(book):
+def test_alpha_every_share_is_out_of_its_five_files_due(book):
     a = _row(_page(book), "Alpha Brokers")
     assert (a["due"], a["received"], a["on_time"], a["late_or_missing"]) == (5, 4, 3, 2)
     # late or missing, split: one came after its due date, one never came
     assert (a["late"], a["missing"]) == (1, 1)
+    assert a["on_time"] + a["late"] + a["missing"] == a["due"]
     assert (a["scored"], a["clean_on_time"], a["not_checked"]) == (4, 1, 1)
-    assert (a["on_time_pct"], a["clean_on_time_pct"]) == (60.0, 25.0)
+    # ONE BASE: on time, late and on-time-and-passed are out of the 5 due;
+    # passed first time is out of the 4 that came (a1 and a3 passed).
+    assert (a["on_time_pct"], a["late_pct"], a["clean_on_time_pct"]) == (60.0, 20.0, 20.0)
+    assert (a["clean_first_time"], a["checked"], a["not_checked_came"]) == (2, 3, 1)
+    assert a["clean_first_time_pct"] == 50.0
 
 
-def test_unavailable_checks_are_never_counted_as_zero(book):
+def test_not_checked_files_are_named_and_count_as_not_passed(book):
     out = _page(book)
     s = out["summary"]
-    # 11 October files due across the book; a5 is not checked, so 10 are scored.
+    # 11 October files due across the book; a5 came on time with no check.
     assert (s["due"], s["not_checked"], s["scored"]) == (11, 1, 10)
-    assert s["clean_on_time"] == 6 and s["clean_on_time_pct"] == 60.0
+    assert s["clean_on_time"] == 6 and s["clean_on_time_pct"] == 54.5
+
+
+def test_exceptions_on_the_file_as_it_came_mean_it_did_not_pass(book, monkeypatch):
+    # a5 (export 104) has no check run, but 3 exceptions were found on it.
+    monkeypatch.setattr(pp, "_tally_export", lambda r: {**TALLY, 104: {"exceptions": 3, "open": 3}}
+                        .get(r.id, {"exceptions": 0, "open": 0}))
+    a = _row(_page(book), "Alpha Brokers")
+    assert (a["not_checked"], a["scored"], a["clean_on_time"]) == (0, 5, 1)
+    assert (a["checked"], a["not_checked_came"], a["clean_first_time"]) == (4, 0, 2)
 
 
 def test_a_period_with_nothing_due_has_no_share_not_zero(book):
@@ -224,7 +238,7 @@ def test_a_period_with_nothing_due_has_no_share_not_zero(book):
 
 
 # ── nothing re-counted ──────────────────────────────────────────────────────
-def test_on_time_and_clean_first_time_are_the_executive_reports_own(book):
+def test_on_time_is_the_executive_reports_own(book):
     import check_record as cr
     import executive_report as er
     w = er.window("month", "2026-10", TODAY)
@@ -236,12 +250,14 @@ def test_on_time_and_clean_first_time_are_the_executive_reports_own(book):
         d = due[r["broker_id"]]
         assert (r["due"], r["late_or_missing"]) == (d["due"], d["late_or_missing"])
         assert r["on_time_pct"] == round(100.0 * d["on_time"] / d["due"], 1)
-        assert r["clean_first_time_pct"] == stp[r["broker_id"]]
+    # Passed first time is no longer the check-run share (ONE BASE): it is out
+    # of the files due that came, re-runs and corrections never counted.
+    assert stp  # the check-run figure still exists for the Executive Report
 
 
 def test_the_change_is_against_the_month_before(book):
     a = _row(_page(book), "Alpha Brokers")
-    assert a["prev_clean_on_time_pct"] == 100.0 and a["change_pts"] == -75.0
+    assert a["prev_clean_on_time_pct"] == 100.0 and a["change_pts"] == -80.0
     assert _row(_page(book), "Beta Brokers")["change_pts"] is None     # nothing in September
 
 
@@ -314,7 +330,7 @@ def test_no_change_is_not_claimed_when_nothing_came_either_time(book):
     row = next(r for r in _page(book)["rows"] if r["broker"] == "Gamma Brokers" and r["programme"] == "Cargo")
     assert (row["received"], row["prev_received"], row["change_pts"]) == (0, 0, None)
     # a row where a file did come still shows its change
-    assert _row(_page(book), "Alpha Brokers")["change_pts"] == -75.0
+    assert _row(_page(book), "Alpha Brokers")["change_pts"] == -80.0
 
 
 def test_rows_follow_the_broker_ranking(book):
@@ -373,9 +389,9 @@ def test_one_broker_keeps_its_rank_among_all_brokers(book):
     assert {r["broker"] for r in out["rows"]} == {"Alpha Brokers"}
     assert [r["rank"] for r in out["rows"]] == [3]                   # 3rd of all three
     assert out["picked"] == {"broker_id": A, "name": "Alpha Brokers", "rank": 3, "of": 3,
-                             "clean_on_time_pct": 25.0}
+                             "clean_on_time_pct": 20.0, "clean_now_pct": 25.0}
     assert out["best"] == [] and out["worst"] == []                  # the line replaces them
-    assert (out["summary"]["due"], out["summary"]["clean_on_time_pct"]) == (5, 25.0)
+    assert (out["summary"]["due"], out["summary"]["clean_on_time_pct"]) == (5, 20.0)
     assert out["filters"]["broker"] == A and out["ranked_brokers"] == 3
 
 
@@ -414,8 +430,8 @@ def test_best_and_worst_never_name_the_same_broker(book):
 
 
 def _r(name, pct, on=50.0, scored=5):
-    return {"name": name, "clean_on_time_pct": pct, "on_time_pct": on, "scored": scored,
-            "due": scored, "files": scored}
+    return {"name": name, "clean_now_pct": pct, "on_time_pct": on, "scored_now": scored,
+            "due": scored, "received": scored, "files": scored}
 
 
 def test_ties_go_to_on_time_then_most_files():
@@ -479,5 +495,30 @@ def test_only_the_carrier_seat_may_read_it(monkeypatch):
         f = client.get("/reports/partner-performance/file", params={"broker_id": 50})
         assert f.status_code == code, role
         if code == 200:
-            assert f.headers["content-disposition"] == 'attachment; filename="Partner Performance 2026-10.xlsx"'
+            assert f.headers["content-disposition"] == 'attachment; filename="Broker Performance 2026-10.xlsx"'
             assert seen["broker"] == 50
+
+
+# ── clean now: resolving every exception counts (20 Nov 2026) ───────────────
+@pytest.mark.parametrize("on_time, clean, found, open_, expect", [
+    (True, True, 0, 0, True),        # passed its first check
+    (True, False, 10, 0, True),      # every exception resolved since
+    (True, None, 24, 0, True),       # no check run recorded, but all resolved
+    (True, False, 10, 1, False),     # one still unresolved
+    (True, None, 24, 24, False),
+    (False, True, 0, 0, False),      # late (or missing) fails, however clean
+    (True, False, 0, 0, False),      # failed first check for another reason
+    (True, None, None, None, None),  # nothing known: not checked
+])
+def test_clean_now_file_by_file(on_time, clean, found, open_, expect):
+    e = {"on_time": on_time, "clean": clean, "found": found, "open": open_}
+    assert pp.clean_now(e) is expect
+
+
+def test_a_file_cleaned_after_it_came_lifts_the_rank_score(book, monkeypatch):
+    # a2 came on time with 10 exceptions; its live version now has none open.
+    monkeypatch.setattr(pp, "_tally_export", lambda r: {**TALLY, 105: {"exceptions": 1, "open": 0}}
+                        .get(r.id, {"exceptions": 0, "open": 0}))
+    a = next(r for r in _page(book)["rows"] if r["broker"] == "Alpha Brokers")
+    assert (a["clean_on_time"], a["scored"]) == (1, 4)       # first time: unchanged
+    assert (a["clean_now"], a["scored_now"], a["clean_now_pct"]) == (2, 4, 50.0)

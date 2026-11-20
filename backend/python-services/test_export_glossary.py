@@ -36,9 +36,11 @@ def _executive(full=True, cadence="month", period="2026-10"):
 
 def _partner_rows():
     return [dict(rank=1, broker="CRC", programme="Fleet", contract="Fleet 2026", due=3, received=3, on_time=2,
-                 on_time_pct=66.7, late=1, missing=0, clean_first_time_pct=50.0, clean_on_time=1, scored=3,
+                 on_time_pct=66.7, late=1, late_pct=33.3, missing=0, clean_first_time=1, clean_first_time_pct=50.0,
+                 clean_on_time=1, scored=3,
                  clean_on_time_pct=33.3, not_checked=0, files_with_problems=1, problems_open=2, problems_found=5,
-                 problems_fixed=3, fixed_pct=60.0, file_types=["Email"])]
+                 problems_fixed=3, fixed_pct=60.0, clean_now=2, clean_now_pct=66.7,
+                 file_types=["Email"])]
 
 
 def _policies(seat="carrier"):

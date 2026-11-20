@@ -9,7 +9,7 @@
 // time with no check recorded is left out of that share, never counted as 0.
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Award, Clock, Download, Eye, ShieldCheck } from "lucide-react";
+import { Award, Clock, Download, Eye, ShieldCheck, TimerOff } from "lucide-react";
 import {
   downloadPartnerPerformance, getPartnerPerformance,
   type PartnerPerformance as Data, type PerfBroker, type PerfCadence, type PerfRow,
@@ -44,18 +44,37 @@ function lastYears(n = 4): string[] {
   return Array.from({ length: n }, (_, i) => String(y - i));
 }
 
-/** "2026-Q3" → "Jul – Sep 2026". */
+const shortMonth = (y: number, i: number) => new Date(y, i, 1).toLocaleDateString("en-GB", { month: "short" });
+
+/** "2026-Q3" → "Q3 2026 (Jul – Sep)": the quarter and the months in it. */
 function quarterLabel(key: string): string {
   const [y, q] = key.split("-Q").map(Number);
   const m = (q - 1) * 3;
-  const name = (i: number) => new Date(y, i, 1).toLocaleDateString("en-GB", { month: "short" });
-  return `${name(m)} – ${name(m + 2)} ${y}`;
+  return `Q${q} ${y} (${shortMonth(y, m)} – ${shortMonth(y, m + 2)})`;
 }
 
 const periodLabel = (c: PerfCadence, p: string) => c === "month" ? fmtMonth(p) : c === "quarter" ? quarterLabel(p) : p;
 
+/** A short date range: "1 – 30 Nov 2026", "1 Oct – 31 Dec 2026",
+ *  "1 Dec 2025 – 28 Feb 2026". */
 function span(from: string, to: string): string {
-  return from === to ? fmtDay(from) : `${fmtDay(from)} – ${fmtDay(to)}`;
+  const [fy, fm, fd] = from.slice(0, 10).split("-").map(Number);
+  const [ty, tm, td] = to.slice(0, 10).split("-").map(Number);
+  if (!fy || !ty) return from === to ? fmtDay(from) : `${fmtDay(from)} – ${fmtDay(to)}`;
+  const end = `${td} ${shortMonth(ty, tm - 1)} ${ty}`;
+  if (from.slice(0, 10) === to.slice(0, 10)) return end;
+  if (fy !== ty) return `${fd} ${shortMonth(fy, fm - 1)} ${fy} – ${end}`;
+  if (fm !== tm) return `${fd} ${shortMonth(fy, fm - 1)} – ${end}`;
+  return `${fd} – ${end}`;
+}
+
+/** The period a range covers, named the way the picker names it, with its
+ *  dates: "Q4 2026 (Oct – Dec) · 1 Oct – 31 Dec 2026". */
+function rangeLabel(c: PerfCadence, from: string, to: string): string {
+  const d = span(from, to);
+  if (c !== "quarter") return d;
+  const [y, m] = from.slice(0, 7).split("-").map(Number);
+  return y && m ? `${quarterLabel(`${y}-Q${Math.floor((m - 1) / 3) + 1}`)} · ${d}` : d;
 }
 
 const fmtPct = (v: number | null | undefined) => (v == null ? "—" : `${v}%`);
@@ -101,7 +120,7 @@ export default function PartnerPerformance() {
     setFailed(null);
     getPartnerPerformance({ cadence, period, programId, fileType, brokerId })
       .then(r => { if (live) setData(r); })
-      .catch(e => { if (live) setFailed(e?.response?.data?.detail ?? "Could not load partner performance."); });
+      .catch(e => { if (live) setFailed(e?.response?.data?.detail ?? "Could not load broker performance."); });
     return () => { live = false; };
   }, [cadence, period, programId, fileType, brokerId]);
 
@@ -122,8 +141,8 @@ export default function PartnerPerformance() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Partner Performance
-              <InfoTip text={"How often each broker sends a clean file on time, with the best and worst brokers across your book."} />
+            <h2>Broker Performance
+              <InfoTip text={"How often each broker sends a file on time with no exceptions left, and which brokers are doing best and worst."} />
             </h2>
           </div>
         </div>
@@ -172,10 +191,11 @@ export default function PartnerPerformance() {
             {filtered && (
               <button type="button" className="btn" style={{ marginBottom: 1 }}
                 onClick={() => { setBrokerId(null); setProgramId(null); setFileType(""); }}>Clear filters</button>)}
-            {r && <span className="sub" style={{ paddingBottom: 8 }}>
-              Covers {span(r.from, r.to)}, compared with {span(r.previous.from, r.previous.to)}.
-              {!r.complete && " Still running, so the numbers count to today."}
-            </span>}
+            {r && <div className="sub" style={{ flexBasis: "100%", fontSize: 12, lineHeight: 1.5 }}>
+              <b style={{ fontWeight: 600 }}>{rangeLabel(r.cadence, r.from, r.to)}</b>
+              {" "}vs {rangeLabel(r.cadence, r.previous.from, r.previous.to)}
+              {!r.complete && <> · <i style={{ fontStyle: "normal" }}>In progress, counted up to today</i></>}
+            </div>}
           </div>
         </div>
 
@@ -206,31 +226,41 @@ function Body({ r, programId, fileType, brokerId }: {
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16, marginBottom: 18 }}>
       <StatCard title="On time" icon={Clock} value={fmtPct(s.on_time_pct)} trend={trend(s.change_pts.on_time_pct, word)}
         subtitle={s.due ? `${s.on_time} of ${s.due} files due came on time` : "No files were due"}
-        info="Files due in the period that came by their due date. The same count as the Executive Report." />
+        info="Files due in the period that came by their due date. On time + late + not received = files due." />
+      <StatCard title="Late" icon={TimerOff} value={fmtPct(s.late_pct)} trendUpIsBad
+        trend={trend(s.change_pts.late_pct, word)}
+        subtitle={s.due
+          ? `${s.late} of ${s.due} files due came late${s.missing ? ` · ${s.missing} not received` : ""}`
+          : "No files were due"}
+        info="Files due in the period that came after their due date. Files not received yet are shown on their own." />
       <StatCard title="Passed checks first time" icon={ShieldCheck} value={fmtPct(s.clean_first_time_pct)}
         trend={trend(s.change_pts.clean_first_time_pct, word)}
-        subtitle={s.files ? `Of ${s.files} file${s.files === 1 ? "" : "s"} checked` : "No check results recorded"}
-        info="Files checked in the period that passed every check the first time, with nobody stepping in." />
+        subtitle={s.received
+          ? `${s.clean_first_time} of ${s.received} files received${s.not_checked_came ? ` · ${s.not_checked_came} not checked` : ""}`
+          : s.due ? `None of the ${s.due} files due came in` : "No files were due"}
+        info="Of the files due that came in, how many passed every check the first time, with nobody stepping in." />
       <StatCard title="On time and passed checks" icon={Award} value={fmtPct(s.clean_on_time_pct)}
         trend={trend(s.change_pts.clean_on_time_pct, word)}
-        subtitle={s.scored
-          ? `${s.clean_on_time} of ${s.scored} files${s.not_checked ? ` · ${s.not_checked} not checked` : ""}`
-          : s.not_checked ? `${s.not_checked} not checked` : "No files were due"}
-        info={"Files that came on time AND passed every check the first time. Late or missing files count against it; files with no check recorded are left out."} />
+        subtitle={s.due
+          ? `${s.clean_on_time} of ${s.due} files due${s.not_checked ? ` · ${s.not_checked} not checked` : ""}`
+          : "No files were due"}
+        info={"Of the files due, how many came on time AND passed every check the first time. Late, missing and not-checked files count as not passed."} />
     </div>
 
     {r.picked ? <Standing r={r} /> : (
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginBottom: 18 }}>
         <Ranked title="Best performers" rows={r.best}
-          empty={r.ranked_brokers ? "No broker sent a file on time that passed every check." : undefined} />
+          info="Brokers with the most good files. A good file came on time and has no exceptions left: clean first time, or every exception fixed later."
+          empty={r.ranked_brokers ? "No broker has a file that came on time with no exceptions left." : undefined} />
         <Ranked title="Worst performers" rows={r.worst}
+          info="Brokers with the fewest good files. A file counts against them if it came late, never came, or still has exceptions not fixed."
           empty={r.ranked_brokers ? "Every ranked broker is already in the best list or at 100%." : undefined} />
       </div>)}
 
     <div className="card" style={{ marginBottom: 18 }}>
       <div className="card-h" style={{ flexWrap: "wrap", gap: 10 }}>
         <h3>Brokers ranked, by programme and contract</h3>
-        <InfoTip text="A broker with several contracts has one row per contract. All its rows share the broker's rank." />
+        <InfoTip text={"Rank 1 is the best broker, the highest number the worst.\nA broker with several contracts has one row per contract, all sharing its rank."} />
         <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
           {saveFailed && <span className="sub" style={{ color: RED }}>{saveFailed}</span>}
           <button type="button" className="btn" onClick={download} disabled={saving || r.rows.length === 0}>
@@ -242,7 +272,7 @@ function Body({ r, programId, fileType, brokerId }: {
       {r.rows.length === 0 ? <div className="empty">No files were due or checked in this period.</div> : (
         <div className="tbl-wrap"><table style={{ minWidth: 1460 }}>
           <thead><tr>
-            <th>Rank</th>
+            <th>Rank <InfoTip text={"1 = best. Ranked on On time and clean now, then On time, then most files.\n— = no file with a known result yet."} /></th>
             <th className="l">Broker</th>
             <th className="l">Programme</th>
             <th className="l">Contract</th>
@@ -251,8 +281,9 @@ function Body({ r, programId, fileType, brokerId }: {
             <th>On time</th>
             <th>Late <InfoTip text="Came in, but after the due date." /></th>
             <th>Missing <InfoTip text="Due, but not come in yet." /></th>
-            <th>Passed checks first time</th>
-            <th>On time and passed checks <InfoTip text="Files that came on time AND passed every check the first time. This is what brokers are ranked on." /></th>
+            <th>Passed checks first time <InfoTip text="Of the files received, how many passed every check the first time." /></th>
+            <th>On time and passed checks <InfoTip text="Of the files due, how many came on time AND passed every check the first time." /></th>
+            <th>On time and clean now <InfoTip text="Good files out of files due. Good = came on time with no exceptions left (clean first time, or all fixed later). Brokers are ranked on this." /></th>
             <th>Files with unresolved exceptions <InfoTip text="Files that came in whose latest version still has unresolved exceptions. Underneath: how many exceptions are unresolved." /></th>
             <th>Exceptions resolved while cleaning <InfoTip text="Of the exceptions found when the file first came, how many have been resolved since (fixed, accepted or resent)." /></th>
             <th className="l">How it came in</th>
@@ -282,14 +313,16 @@ function Body({ r, programId, fileType, brokerId }: {
               <td>{x.missing
                 ? <span style={{ fontWeight: 700, color: RED }}>{x.missing}</span>
                 : <span className="sub">0</span>}</td>
-              <td>{x.files ? <Pct v={x.clean_first_time_pct} of={`${x.clean_first_time} of ${x.files}`} />
-                : <span className="sub">{x.received ? "No check recorded" : "—"}</span>}</td>
-              <td>{x.scored ? <Pct v={x.clean_on_time_pct} of={`${x.clean_on_time} of ${x.scored}`} /> : <span className="sub">—</span>}
+              <td>{x.received ? <Pct v={x.clean_first_time_pct} of={`${x.clean_first_time} of ${x.received}`} />
+                : <span className="sub">—</span>}
+                {x.not_checked_came > 0 && <div className="sub">{x.not_checked_came} not checked</div>}</td>
+              <td>{x.due ? <Pct v={x.clean_on_time_pct} of={`${x.clean_on_time} of ${x.due}`} /> : <span className="sub">—</span>}
                 {x.not_checked > 0 && <div className="sub">{x.not_checked} not checked</div>}</td>
+              <td>{x.scored_now ? <Pct v={x.clean_now_pct} of={`${x.clean_now} of ${x.scored_now}`} /> : <span className="sub">—</span>}</td>
               <td>{!x.received ? <span className="sub">—</span>
                 : x.files_with_problems
                   ? <><span style={{ fontWeight: 700, color: RED }}>{x.files_with_problems} file{x.files_with_problems === 1 ? "" : "s"}</span>
-                      <div className="sub" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <div className="sub" style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 6 }}>
                         {x.problems_open} unresolved
                         {x.problems_link && <Link to={x.problems_link} className="linkish" style={{ display: "inline-flex" }}
                           title={x.files_with_problems > 1 ? "See the exceptions on the file with the most unresolved"
@@ -337,7 +370,7 @@ function Standing({ r }: { r: Data }) {
         <span style={{ fontSize: 15 }}>
           {p.rank != null
             ? <><BrokerName r={{ broker_id: p.broker_id, name: p.name } as PerfBroker} /> is ranked <b>{p.rank} of {p.of}</b> broker{p.of === 1 ? "" : "s"} in {when}
-                {p.clean_on_time_pct != null && <span className="sub"> · {p.clean_on_time_pct}% on time and passed checks</span>}</>
+                {p.clean_now_pct != null && <span className="sub"> · {p.clean_now_pct}% on time and clean now</span>}</>
             : <><BrokerName r={{ broker_id: p.broker_id, name: p.name } as PerfBroker} /> has no file with a known result in {when}, so it is not ranked.</>}
         </span>
       </div>
@@ -345,13 +378,13 @@ function Standing({ r }: { r: Data }) {
   );
 }
 
-/** Best or worst brokers as ranked horizontal bars: on time and passed checks, out of 100%. */
-function Ranked({ title, rows, empty }: { title: string; rows: PerfBroker[]; empty?: string }) {
+/** Best or worst brokers as ranked horizontal bars: on time and clean now, out of 100%. */
+function Ranked({ title, rows, info, empty }: { title: string; rows: PerfBroker[]; info: string; empty?: string }) {
   return (
     <div className="card">
       <div className="card-h">
         <h3>{title}</h3>
-        <InfoTip text="Brokers by the share of files that came on time and passed every check first time. One file is enough." />
+        <InfoTip text={info} />
       </div>
       {rows.length === 0 ? (
         <div className="empty">{empty ?? "No broker has a file with a known result yet."}</div>
@@ -364,12 +397,12 @@ function Ranked({ title, rows, empty }: { title: string; rows: PerfBroker[]; emp
                   <span className="sub" style={{ marginRight: 6 }}>#{x.rank}</span><BrokerName r={x} />
                 </span>
                 <span style={{ whiteSpace: "nowrap", fontWeight: 600 }}>
-                  {x.clean_on_time_pct}% <span className="sub" style={{ fontWeight: 400 }}>· {x.clean_on_time} of {x.scored}</span>
+                  {x.clean_now_pct}% <span className="sub" style={{ fontWeight: 400 }}>· {x.clean_now} of {x.scored_now}</span>
                 </span>
               </div>
               <div style={{ height: 8, borderRadius: 4, background: TRACK, overflow: "hidden" }}
-                role="img" aria-label={`${x.name}: ${x.clean_on_time_pct}% on time and passed checks`}>
-                <div style={{ width: `${Math.max(0, Math.min(100, x.clean_on_time_pct ?? 0))}%`, height: "100%", background: BAR }} />
+                role="img" aria-label={`${x.name}: ${x.clean_now_pct}% on time and clean now`}>
+                <div style={{ width: `${Math.max(0, Math.min(100, x.clean_now_pct ?? 0))}%`, height: "100%", background: BAR }} />
               </div>
             </div>))}
         </div>
