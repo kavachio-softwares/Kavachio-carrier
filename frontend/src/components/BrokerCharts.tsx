@@ -188,7 +188,7 @@ function RankedRow({ r, max, unit, linkTo }: {
     </div>
   );
   const tip = share
-    ? `${r.name}: ${r.value} of ${whole} ${unit} still open — ${r.settled} put right`
+    ? `${r.name}: ${r.value} of ${whole} ${unit} — ${r.settled} resolved`
     : `${r.name}: ${r.value} ${unit}`;
   return linkTo ? (
     <Link to={linkTo(r)} title={`${tip} — see which ones`}
@@ -207,7 +207,7 @@ function ShareLegend() {
   return (
     <div style={{ display: "flex", gap: 14, fontSize: 11.5, color: "var(--p-muted)",
                   marginBottom: 12 }}>
-      {[["Still open", FLAGGED], ["Resolved", CLEAN]].map(([label, c]) => (
+      {[["Unresolved", FLAGGED], ["Resolved", CLEAN]].map(([label, c]) => (
         <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           <span style={{ width: 9, height: 9, borderRadius: 3, background: c }} />{label}
         </span>
@@ -382,7 +382,7 @@ export function ResolvedTrend({ data }: {
   data: { date: string; resolved: number }[];
 }) {
   if (!data.some(d => d.resolved > 0)) {
-    return <div className="empty">Nothing has been put right in this period yet.</div>;
+    return <div className="empty">No exceptions have been resolved in this period yet.</div>;
   }
   return (
     <div style={{ width: "100%", height: 260 }}>
@@ -463,9 +463,9 @@ export function UploaderBars({ rows, cap = 5, total, onViewAll, personTo, empty 
     <div>
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12,
                     color: "var(--p-muted)", marginBottom: 14 }}>
-        <Key color={OPEN} label="Still open" />
+        <Key color={OPEN} label="Unresolved" />
         <Key color={PUT_RIGHT} label="Resolved" />
-        <Key color={NO_ISSUES} label="No issues" />
+        <Key color={NO_ISSUES} label="No exceptions" />
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -506,9 +506,9 @@ function UploaderRowView({ r, personTo }: {
     sent,
     u.exceptions
       ? `${plural(u.exceptions, "exception")} across ${plural(u.rows_flagged, "row")}`
-        + ` — ${u.open} still open, ${u.put_right} put right`
+        + ` — ${u.open} unresolved, ${u.put_right} resolved`
       : r.files ? "Nothing was flagged on them" : "",
-    `${plural(r.resolved, "exception")} put right by ${r.name} in this period`,
+    `${plural(r.resolved, "exception")} resolved by ${r.name} in this period`,
   ].filter(Boolean).join("\n");
 
   const seg = (n: number, color: string) => n > 0 && (
@@ -552,14 +552,14 @@ function UploaderRowView({ r, personTo }: {
                      color: "var(--p-muted)" }}>
         {!r.files ? "—" : !u.exceptions ? (
           <>
-            <b style={{ color: "var(--p-ink)" }}>No issues</b>
+            <b style={{ color: "var(--p-ink)" }}>No exceptions</b>
             <span style={{ display: "block", fontSize: 11.5, color: "var(--p-faint)" }}>
               nothing flagged
             </span>
           </>
         ) : u.open > 0 ? (
           <>
-            <b style={{ color: "var(--p-ink)" }}>{u.open}</b> of {u.exceptions} open
+            <b style={{ color: "var(--p-ink)" }}>{u.open}</b> of {u.exceptions} unresolved
             <span style={{ display: "block", fontSize: 11.5 }}>
               {/* Their FILES, not the newest one. Four files on two programmes
                   behind one number is the normal case, and dropping an admin
@@ -569,14 +569,14 @@ function UploaderRowView({ r, personTo }: {
                 <Link className="linkish" to={personTo(r)}>
                   {r.files === 1 ? "Review this file →" : `Review ${r.files} files →`}
                 </Link>
-              ) : <span style={{ color: "var(--p-faint)" }}>{u.put_right} put right</span>}
+              ) : <span style={{ color: "var(--p-faint)" }}>{u.put_right} resolved</span>}
             </span>
           </>
         ) : (
           <>
             <b style={{ color: "var(--p-ink)" }}>All clear</b>
             <span style={{ display: "block", fontSize: 11.5, color: "var(--p-faint)" }}>
-              {plural(u.put_right, "exception")} put right
+              {plural(u.put_right, "exception")} resolved
             </span>
           </>
         )}

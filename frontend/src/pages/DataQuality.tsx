@@ -302,7 +302,7 @@ export default function DataQuality({ filters, onLists }: TabProps) {
         <div className="card-h">
           <ListChecks className="ci" />
           <h3>Checks that failed most</h3>
-          <InfoTip text="This shows which data problems are most common, so the carrier knows what to raise with the broker." />
+          <InfoTip text="This shows which exceptions are most common, so the carrier knows what to raise with the broker." />
           <div className="right"><span className="sub">Top 10, most errors first</span></div>
         </div>
         <div className="tbl-wrap">

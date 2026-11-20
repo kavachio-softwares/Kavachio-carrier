@@ -49,17 +49,17 @@ function summaryLine(d: ExceptionResolutionReport, filtered: boolean, cadence: R
   const f = d.fixed, o = d.at_end ?? { ...d.open, running: true, as_at: "" };
   const when = inPeriod(cadence, periodTitle(cadence, d.month));
   const fixedPart = f.problems > 0
-    ? `${upFirst(when)}, ${plural(f.problems, "problem")} ${f.problems === 1 ? "was" : "were"} fixed, `
+    ? `${upFirst(when)}, ${plural(f.problems, "exception")} ${f.problems === 1 ? "was" : "were"} resolved, `
       + `taking ${fmtTook(f.avg_days)} on average. ${pct(f.within_target_pct)} `
-      + `${f.within_target === 1 ? "was" : "were"} fixed within the ${d.target_days}-day target.`
-    : `No problems were fixed ${when}${filtered ? " for this selection" : ""}.`;
+      + `${f.within_target === 1 ? "was" : "were"} resolved within the ${d.target_days}-day target.`
+    : `No exceptions were resolved ${when}${filtered ? " for this selection" : ""}.`;
   // Right now while the period is running; else on its last day.
   const on = o.running ? "right now" : `on ${periodTitle("day", o.as_at)}`;
   const waitingPart = o.problems > 0
-    ? ` ${plural(o.problems, "problem")} ${o.running ? (o.problems === 1 ? "is" : "are") : (o.problems === 1 ? "was" : "were")} `
-      + `still unresolved ${on}`
+    ? ` ${plural(o.problems, "exception")} ${o.running ? (o.problems === 1 ? "is" : "are") : (o.problems === 1 ? "was" : "were")} `
+      + `waiting to be resolved ${on}`
       + (o.past_target > 0 ? ` — ${num(o.past_target)} of them longer than the target.` : ", none longer than the target.")
-    : ` Nothing ${o.running ? "is" : "was"} still unresolved${o.running ? "" : ` ${on}`}.`;
+    : ` Nothing ${o.running ? "is" : "was"} waiting to be resolved${o.running ? "" : ` ${on}`}.`;
   return fixedPart + waitingPart;
 }
 
@@ -102,7 +102,7 @@ function ByBrokerProgramme({ rows, cadence, period, days }: {
           </thead>
           <tbody>
             {rows.length === 0 && (
-              <tr><td colSpan={8} className="muted" style={{ textAlign: "center" }}>No problems this {PERIOD_WORD[cadence]}.</td></tr>
+              <tr><td colSpan={8} className="muted" style={{ textAlign: "center" }}>No exceptions this {PERIOD_WORD[cadence]}.</td></tr>
             )}
             {shown.map(r => (
               <tr key={`${r.broker_party_id}:${r.program_id}`}>
@@ -224,7 +224,7 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         <div className="tile">
           <div className="k">
             Average fix time
-            <InfoTip text={`For the problems fixed this ${what}: the time from when each was first found to when it was fixed, on average.`} />
+            <InfoTip text={`For the exceptions resolved this ${what}: the time from when each was first found to when it was resolved, on average.`} />
             <When>{monthName}</When>
           </div>
           <div className="v">{first ? "…" : fmtTook(f?.avg_days)}</div>
@@ -232,7 +232,7 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         <div className="tile">
           <div className="k">
             Fixed within target
-            <InfoTip text={`Problems fixed this ${what} in no more than the target time. Each change to the target is saved in Audit Logs with the old and new value.`} />
+            <InfoTip text={`Exceptions resolved this ${what} in no more than the target time. Each change to the target is saved in Audit Logs with the old and new value.`} />
             <When>{monthName}</When>
           </div>
           <div className="v" style={{ color: "var(--p-ok-ink)" }}>
@@ -294,13 +294,13 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
       <div className="card" style={{ marginBottom: 18 }}>
         <div className="card-h">
           <Hourglass className="ci" />
-          <h3>How long problems have been unresolved</h3>
+          <h3>How long exceptions have been waiting</h3>
           <InfoTip text="Every problem waiting to be fixed at the end of the period picked — or now, while it is still running — by how long it had been waiting." />
           <When>{atEnd}</When>
         </div>
         <div className="tbl-wrap">
           <table>
-            <thead><tr><th className="l">Unresolved for</th><th className="r">Open problems</th></tr></thead>
+            <thead><tr><th className="l">Waiting for</th><th className="r">Exceptions</th></tr></thead>
             <tbody>
               {(o?.by_age ?? []).map(b => (
                 <tr key={b.key}>
@@ -343,8 +343,8 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
             <thead>
               <tr>
                 <th className="l">Owner</th><th className="l">Programme</th>
-                <th className="l">Unresolved for</th><th className="l">Problem</th><th className="r">Severity</th>
-                <th className="r">Count</th><th className="l">File</th><th className="r">Action</th>
+                <th className="l">Waiting for</th><th className="l">Problem</th><th className="r">Severity</th>
+                <th className="r">Exceptions</th><th className="l">File</th><th className="r">Action</th>
               </tr>
             </thead>
             <tbody>

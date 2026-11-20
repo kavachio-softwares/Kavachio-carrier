@@ -52,15 +52,15 @@ export default function BrokerExceptions() {
         {/* Three tiles, not the grid's default four, so they fill the row. */}
         <div className="tiles" style={{ marginBottom: 18, gridTemplateColumns: "repeat(3, 1fr)" }}>
           <div className={`tile${(t?.open ?? 0) > 0 ? " alert" : ""}`}>
-            <div className="k">Still open</div>
+            <div className="k">Unresolved</div>
             <div className="v" style={{ color: "var(--p-crit)" }}>{t ? t.open : "—"}</div>
           </div>
           <div className="tile">
-            <div className="k">Put right</div>
+            <div className="k">Resolved</div>
             <div className="v" style={{ color: "var(--p-ok)" }}>{t ? t.put_right : "—"}</div>
           </div>
           <div className="tile">
-            <div className="k">Files with open exceptions</div>
+            <div className="k">Files with unresolved exceptions</div>
             <div className="v">{t ? t.files_open : "—"}</div>
           </div>
         </div>
@@ -71,7 +71,7 @@ export default function BrokerExceptions() {
             <span>
               Not counted: {data!.replaced!.files} file{data!.replaced!.files === 1 ? "" : "s"} under
               a replaced contract{data!.replaced!.open > 0
-                ? `, ${data!.replaced!.open.toLocaleString()} exception${data!.replaced!.open === 1 ? "" : "s"} still open`
+                ? `, ${data!.replaced!.open.toLocaleString()} exception${data!.replaced!.open === 1 ? "" : "s"} unresolved`
                 : ""}.
             </span>
             <InfoTip text={"A replaced contract's files are kept for audit. Once the new contract has a file for that month, the old file's exceptions are left out of these numbers."} />
@@ -94,7 +94,7 @@ export default function BrokerExceptions() {
                     <tr>
                       <th>File Name</th>{showCarrier && <th>Carrier</th>}<th>Programme</th>
                       <th>Processed</th><th>Rows</th><th>Exceptions</th>
-                      <th>Still open</th><th>Put right</th><th></th>
+                      <th>Unresolved</th><th>Resolved</th><th></th>
                     </tr>
                   </thead>
                   <tbody>

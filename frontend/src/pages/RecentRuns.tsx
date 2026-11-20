@@ -141,7 +141,7 @@ export default function RecentRuns() {
               <>
                 <h2>File Submissions
                   <InfoTip text={"Every bordereau run for you, whoever sent it — what it produced, "
-                    + "what it flagged, and how much of that is still open."} />
+                    + "what it flagged, and how much of that is unresolved."} />
                 </h2>
               </>
             )}

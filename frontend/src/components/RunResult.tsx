@@ -292,7 +292,7 @@ export function RunResult({
                   Not validated — {result.status_reason ?? "the checks did not run on this file"}
                 </span>
               : isCheck && result.status === "clean"
-              ? <span style={{ color: "var(--p-ok)" }}>✓ Ready to send — no issues found</span>
+              ? <span style={{ color: "var(--p-ok)" }}>✓ Ready to send — no exceptions found</span>
               : <>
                   {result.row_count.toLocaleString()} rows {isCheck ? "checked" : "validated"}
                   {result.status === "clean"
@@ -304,7 +304,7 @@ export function RunResult({
             {notAgainstContract
               ? "The contract has no checks for this Bordereau Setup yet, so at most the date and amount formats were looked at. The carrier has to set the contract up in Bordereau Setup; then process the file again."
               : isCheck
-              ? "Self-check only — nothing was sent or saved. Fix any issues and check again, or Generate BDX to send."
+              ? "Self-check only — nothing was sent or saved. Fix any exceptions and check again, or Generate BDX to send."
               : actions
                 ? "Output generated. Exceptions don't block the file — review, or fix and re-run."
                 // No triage screen for this user, so don't tell them to "review":

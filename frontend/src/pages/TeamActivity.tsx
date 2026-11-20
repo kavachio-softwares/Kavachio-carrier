@@ -41,7 +41,7 @@ export default function TeamActivity() {
             <h2>Team Activity</h2>
             <p>
               What each person sent in the last {DAYS} days and how much of it is
-              still waiting — the exceptions on their files, open and put right.
+              still waiting — the exceptions on their files, unresolved and resolved.
               You are on the list too, for the bordereaux you send yourself.
             </p>
           </div>
@@ -73,7 +73,7 @@ export default function TeamActivity() {
                       <th style={{ textAlign: "right" }}>Files</th>
                       <th style={{ textAlign: "right" }}>Rows</th>
                       <th style={{ textAlign: "right" }}>Exceptions</th>
-                      <th style={{ textAlign: "right" }}>Still open</th>
+                      <th style={{ textAlign: "right" }}>Unresolved</th>
                       <th style={{ textAlign: "right" }}>Resolved</th>
                       <th style={{ textAlign: "right" }}>Their decisions</th>
                     </tr>

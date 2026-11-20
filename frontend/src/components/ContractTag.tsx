@@ -44,7 +44,7 @@ export function NotCountedBadge({ open, total }: { open: number; total: number }
     <span className="badge b-mut" data-testid="not-counted"
       title={"Kept for audit. The newer contract's file answers this month, so these "
         + "are not counted in Exceptions to Review."}>
-      <span className="d" />{open > 0 ? `${open} of ${total} open` : `${total} exceptions`} · not counted
+      <span className="d" />{open > 0 ? `${open} of ${total} unresolved` : `${total} exceptions`} · not counted
     </span>
   );
 }

@@ -363,10 +363,10 @@ def measures(pack: dict) -> list[tuple[str, str, list[dict]]]:
             row("Files clean first time", lambda m: Q(m)["clean_first_time_pct"],
                 lambda m: _of(Q(m)["clean_first_time"], V(m)["files"], Q(m)["clean_first_time_pct"]),
                 "points", "up", "pct"),
-            row("Most common problem", lambda m: None, lambda m: Q(m)["top_check"] or "—", "count", "none", "text"),
+            row("Most common exception", lambda m: None, lambda m: Q(m)["top_check"] or "—", "count", "none", "text"),
         ]),
         ("fixes", "Fixes", [
-            row("Problems fixed", lambda m: F(m)["fixed"], lambda m: _num(F(m)["fixed"]), "share", "none", "count"),
+            row("Exceptions resolved", lambda m: F(m)["fixed"], lambda m: _num(F(m)["fixed"]), "share", "none", "count"),
             row("Average fix time", lambda m: F(m)["avg_days"], lambda m: _took(F(m)["avg_days"]),
                 "time", "down", "days"),
             row(f"Fixed within target ({days})", lambda m: F(m)["within_target_pct"],
@@ -515,7 +515,7 @@ def glance(pack: dict, filtered: bool = False) -> str:
                 parts.append(f"{found} — {abs(ch)}% {'fewer' if ch < 0 else 'more'} than {before}.")
     if f["fixed"] > 0:
         within = "all" if f["within_target_pct"] == 100 else _pct(f["within_target_pct"])
-        parts.append(f"Problems were fixed in {_took(f['avg_days'])} on average, "
+        parts.append(f"Exceptions were resolved in {_took(f['avg_days'])} on average, "
                      f"{within} within the {pack['target_days']}-day target.")
     if t["never"] > 0:
         parts.append(f"{_plural(t['never'], 'file')} never arrived.")

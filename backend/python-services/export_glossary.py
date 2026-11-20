@@ -108,6 +108,14 @@ TERMS: list[tuple[tuple[str, ...], str]] = [
                     "looks unusual and should be looked at. Info: a note only, nothing needs to be done."),
     # fixes
     (("Problems fixed", "Problems put right"), "How many problems have been fixed."),
+    (("Exceptions resolved",), "How many exceptions have been resolved: fixed, accepted, or gone from a corrected "
+                               "file sent again."),
+    (("Resolved %",), "Exceptions resolved as a percentage of exceptions found."),
+    (("Exceptions found",), "How many exceptions the checks found when the files first arrived."),
+    (("Unresolved exceptions",), "Exceptions found but not resolved yet (at the end of the period, or today if the "
+                                 "period has not ended)."),
+    (("Files with unresolved exceptions",), "Files whose latest version still has exceptions waiting to be resolved."),
+    (("Most common exception",), "The check that failed most often in the period."),
     (("Put right %",), "Problems fixed as a percentage of problems found."),
     (("Problems found",), "How many problems were found when the files first arrived."),
     (("Problems still open", "Open problems", "Waiting", "Waiting to be fixed", "Still unresolved",

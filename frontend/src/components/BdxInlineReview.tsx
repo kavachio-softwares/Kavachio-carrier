@@ -1220,7 +1220,7 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                 style={spec && i !== tab ? { opacity: 0.65 } : undefined}
                 title={spec ? "Template spec / instructions — not policy data" : undefined}>
                 {sName} ({st?.totalRows ?? 0})
-                {pend > 0 ? ` · ${pend} open` : ""}{spec ? " · info" : ""}
+                {pend > 0 ? ` · ${pend} unresolved` : ""}{spec ? " · info" : ""}
               </button>
             );
           })}

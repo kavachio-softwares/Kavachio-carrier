@@ -150,8 +150,8 @@ function measures(r: MonthlyReport) {
       kind: "count", better: "none" },
   ];
   const fixes: Measure[] = [
-    { label: "Problems fixed", value: m => m.fixes.fixed, show: m => num(m.fixes.fixed),
-      kind: "share", better: "none", opens: "fixes", tip: `Problems fixed in the ${what}, even if they were found earlier.` },
+    { label: "Exceptions resolved", value: m => m.fixes.fixed, show: m => num(m.fixes.fixed),
+      kind: "share", better: "none", opens: "fixes", tip: `Exceptions resolved in the ${what}, whenever they were found.` },
     { label: "Average fix time", value: m => m.fixes.avg_days, show: m => fmtTook(m.fixes.avg_days),
       kind: "time", better: "down", opens: "fixes" },
     { label: `Fixed within target (${plural(r.target_days, "day")})`,
@@ -160,8 +160,10 @@ function measures(r: MonthlyReport) {
       kind: "points", better: "up", opens: "fixes" },
     { label: `Still unresolved at ${end}`, value: m => m.fixes.waiting,
       show: m => num(m.fixes.waiting), kind: "share", better: "down", opens: "fixes",
-      tip: `Problems not fixed by the end of the ${what}. If the ${what} is not over yet, counted as of today.` },
-    { label: `Unresolved for more than ${plural(r.target_days, "day")} at ${end}`, value: m => m.fixes.waiting_past_target,
+      tip: monthly
+        ? "Exceptions found but not resolved by the month's last day. For the month still running, as of today."
+        : `Exceptions found but not resolved by the end of the ${what}. For a ${what} still running, as of today.` },
+    { label: `Waiting longer than target at ${end}`, value: m => m.fixes.waiting_past_target,
       show: m => num(m.fixes.waiting_past_target), kind: "count", better: "down", opens: "fixes",
       tip: `Of the problems above, those open for more than ${plural(r.target_days, "day")} at the end of the ${what}.` },
   ];
@@ -205,7 +207,7 @@ function glance(r: MonthlyReport, filtered: boolean): string {
   if (f.fixed > 0) {
     const within = f.within_target_pct === 100 ? "all"
       : `${pct(f.within_target_pct)}`;
-    parts.push(`Problems were fixed in ${fmtTook(f.avg_days)} on average, ${within} within the ${r.target_days}-day target.`);
+    parts.push(`Exceptions were resolved in ${fmtTook(f.avg_days)} on average, ${within} within the ${r.target_days}-day target.`);
   }
   if (t.never > 0) parts.push(`${plural(t.never, "file")} never arrived.`);
   // Records ran, but nothing happened: a real nothing, said plainly.

@@ -634,11 +634,11 @@ def workbook(data: dict) -> bytes:
         ("Of files with a result", 14, lambda r: r["scored"]),
         ("On time and passed checks %", 16, lambda r: _cell_pct(r["clean_on_time_pct"])),
         ("Not checked", 12, lambda r: r["not_checked"]),
-        ("Files still with problems", 15, lambda r: r["files_with_problems"]),
-        ("Problems still open", 14, lambda r: r["problems_open"]),
-        ("Problems found", 14, lambda r: r["problems_found"]),
-        ("Problems put right", 14, lambda r: r["problems_fixed"]),
-        ("Put right %", 11, lambda r: _cell_pct(r["fixed_pct"])),
+        ("Files with unresolved exceptions", 15, lambda r: r["files_with_problems"]),
+        ("Unresolved exceptions", 14, lambda r: r["problems_open"]),
+        ("Exceptions found", 14, lambda r: r["problems_found"]),
+        ("Exceptions resolved", 14, lambda r: r["problems_fixed"]),
+        ("Resolved %", 11, lambda r: _cell_pct(r["fixed_pct"])),
         ("How it came in", 22, lambda r: ", ".join(r["file_types"]) or "Not received"),
     ]
     wb = Workbook()

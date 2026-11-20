@@ -612,7 +612,7 @@ function notesOf(data: Summary): Note[] {
   // (user, 20 Nov 2026). Only the left-out case, reachable through the API or
   // an old drill-down link, is still said.
   if (op.files && op.excluded) out.push({ files: op.list, text: many(op.files,
-    "1 file with open problems is left out", "{n} files with open problems are left out") });
+    "1 file with unresolved exceptions is left out", "{n} files with unresolved exceptions are left out") });
   if (c.percent_unverified_templates) out.push({ text: many(c.percent_unverified_templates,
     "1 output template writes a rate whose form (25% or 0.25) could not be checked, so that rate needs review",
     "{n} output templates write a rate whose form (25% or 0.25) could not be checked, so those rates need review") });
@@ -623,7 +623,7 @@ function notesOf(data: Summary): Note[] {
 }
 
 function noteFile(f: NoteFile): string {
-  const extra = [f.programme, f.open ? count(f.open, "open problem", "open problems") : null, f.problem]
+  const extra = [f.programme, f.open ? count(f.open, "unresolved exception", "unresolved exceptions") : null, f.problem]
     .filter(Boolean).join(", ");
   return `“${f.filename ?? `file #${f.export_id}`}”` + (extra ? ` (${extra})` : "");
 }

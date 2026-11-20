@@ -450,10 +450,10 @@ def test_the_excel_file_is_the_table(book):
     ws = load_workbook(io.BytesIO(pp.workbook(out))).active
     head = [c.value for c in ws[1]]
     assert head[:6] == ["Rank", "Broker", "Programme", "Contract", "Files due", "Files received"]
-    assert "Problems put right" in head and not any(h.startswith("Change since") for h in head)
+    assert "Exceptions resolved" in head and not any(h.startswith("Change since") for h in head)
     assert ws.max_row == 1 + len(out["rows"])
     alpha = next(r for r in ws.iter_rows(min_row=2, values_only=True) if r[1] == "Alpha Brokers")
-    assert alpha[0] == 3 and alpha[head.index("Put right %")] == 0.9
+    assert alpha[0] == 3 and alpha[head.index("Resolved %")] == 0.9
     assert "Late or missing" not in head
     assert (alpha[head.index("Late")], alpha[head.index("Missing")]) == (1, 1)
 

@@ -154,7 +154,7 @@ export default function SubmissionPanel({ arrivalId, onChanged, onOpenVersion }:
         <div className="note" style={{ marginTop: 8 }}>{doc.message}</div>)}
       {doc.status === "held_at_deadline" && (
         <div className="note warn" style={{ marginTop: 8 }}>
-          The correction deadline passed with exceptions still open. Your programme rule keeps the
+          The correction deadline passed with unresolved exceptions. Your programme rule keeps the
           file on hold — accept it as it is, or keep waiting for the broker.
         </div>)}
       {err && <div className="note crit" style={{ marginTop: 8 }}>{err}</div>}
@@ -172,7 +172,7 @@ export default function SubmissionPanel({ arrivalId, onChanged, onOpenVersion }:
               Accept As It Is</button>)}
           {doc.can_deliver && confirm && (<>
             <span style={{ fontSize: 12, alignSelf: "center" }}>
-              Deliver with {doc.progress.remaining} open exception{doc.progress.remaining === 1 ? "" : "s"} recorded?</span>
+              Deliver with {doc.progress.remaining} unresolved exception{doc.progress.remaining === 1 ? "" : "s"} recorded?</span>
             <button className="btn pri" disabled={busy} onClick={() => act("deliver")}>
               {busy ? "Delivering…" : "Yes, Deliver"}</button>
             <button className="btn" disabled={busy} onClick={() => setConfirm(false)}>Cancel</button>

@@ -76,7 +76,7 @@ export default function PersonActivity() {
           <div className="t">
             <h2>
               {data?.person.name ?? files?.person.name ?? "Team member"}
-              <InfoTip text={`What they sent and what they put right, in the last ${DAYS} days.`} />
+              <InfoTip text={`What they sent and which exceptions they resolved, in the last ${DAYS} days.`} />
             </h2>
           </div>
           <div className="actions">
@@ -197,7 +197,7 @@ function FilesSection({ files, err }: { files: PersonFiles | null; err: boolean 
                              fontVariantNumeric: "tabular-nums" }}>
                 {g.files} {g.files === 1 ? "file" : "files"} · {g.rows} rows ·{" "}
                 <b style={{ color: g.open ? "var(--p-ink)" : "var(--p-faint)" }}>{g.open}</b> open
-                {g.put_right > 0 && <> · {g.put_right} put right</>}
+                {g.put_right > 0 && <> · {g.put_right} resolved</>}
               </span>
             </div>
             <div className="tbl-wrap">
@@ -207,7 +207,7 @@ function FilesSection({ files, err }: { files: PersonFiles | null; err: boolean 
                     <th>File</th>
                     <th style={{ textAlign: "right" }}>Rows</th>
                     <th style={{ textAlign: "right" }}>Exceptions</th>
-                    <th style={{ textAlign: "right" }}>Still open</th>
+                    <th style={{ textAlign: "right" }}>Unresolved</th>
                     <th style={{ textAlign: "right" }} title="By anyone on your team">
                       Resolved
                     </th>

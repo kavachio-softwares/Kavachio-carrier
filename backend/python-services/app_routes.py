@@ -6186,8 +6186,9 @@ def dashboard_broker_performance(mga: str,
         names = {p.id: (p.legal_name or p.dba_name or "—") for p in
                  s.query(Party).filter(Party.id.in_([bid for bid, _ in ranked] or [0])).all()}
 
-        from exception_tally import current_export_ids, export_tally
+        from exception_tally import correction_bases, current_export_ids, tally_with_fixes
         live = current_export_ids(s, tenant_id=tid)
+        base_cache: dict = {}
 
         def _work(broker_id) -> dict:
             """Every live file this broker sent this carrier in the window."""
@@ -6200,13 +6201,15 @@ def dashboard_broker_performance(mga: str,
             if program_id is not None:
                 ids_q = ids_q.filter(OutputExport.program_id == program_id)
             ids = [i for (i,) in ids_q.all()]
+            # Exceptions resolved before a Fix & Validate version count too.
+            bases = correction_bases(s, ids)
             for eid in ids:
                 # One export at a time, then let it go: the exceptions column
                 # runs to megabytes on a big bordereau.
                 r = s.get(OutputExport, eid)
                 if r is None:
                     continue
-                t = export_tally(r)
+                t = tally_with_fixes(s, r, bases, base_cache)
                 total["files"] += 1
                 total["rows"] += t["rows"]
                 total["exceptions"] += t["exceptions"]
@@ -6536,8 +6539,9 @@ def dashboard_broker_files(broker_party_id: int, mga: str,
     since = datetime.utcnow() - timedelta(days=days)
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
-        from exception_tally import (contract_flags, current_export_ids,
-                                     export_tally, export_versions)
+        from exception_tally import (contract_flags, correction_bases,
+                                     current_export_ids, export_versions,
+                                     tally_with_fixes)
         # Listed with files under a replaced contract (labelled, for audit);
         # counted without the ones a newer contract's file has answered.
         live = current_export_ids(s, tenant_id=tid, include_replaced=True)
@@ -6553,6 +6557,9 @@ def dashboard_broker_files(broker_party_id: int, mga: str,
                       .filter(Program.tenant_id == tid).all()}
         versions = export_versions(s, eids)
         flags = contract_flags(s, eids)
+        # A Fix & Validate version reads 0 exceptions on its own; the ones the
+        # broker resolved to get there are counted from the file as sent.
+        bases, base_cache = correction_bases(s, eids), {}
 
         items, by_prog = [], {}
         lo, hi = (page - 1) * page_size, (page - 1) * page_size + page_size
@@ -6560,7 +6567,7 @@ def dashboard_broker_files(broker_party_id: int, mga: str,
             r = s.get(OutputExport, eid)
             if r is None:
                 continue
-            t = export_tally(r)
+            t = tally_with_fixes(s, r, bases, base_cache)
             g = by_prog.setdefault(r.program_id, {
                 "id": r.program_id,
                 "name": prog_names.get(r.program_id) or "No programme",

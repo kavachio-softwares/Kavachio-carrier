@@ -234,7 +234,7 @@ export default function BrokerDashboard() {
                     onClick={c.waiting_on_me > 0 ? () => setWaitingOpen(true) : undefined} />
           <StatCard title="Exceptions to Review" value={c.agency_exceptions} icon={AlertCircle}
                     tone={c.agency_exceptions > 0 ? "alert" : undefined}
-                    subtitle="Still open on your files"
+                    subtitle="Unresolved on your files"
                     onClick={() => nav("/broker/exceptions")} />
           {/* What is owed next. Opens the calendar on the month that matters:
               the oldest missed file's if there is one — the calendar itself
@@ -344,9 +344,9 @@ function RecentFiles() {
                   : r.exception_count > 0
                   ? (exceptionsLeft(r).open > 0
                     ? <span className="badge b-crit" title={exceptionsLeft(r).title}><span className="d" />
-                        {exceptionsLeft(r).open} of {r.exception_count} open</span>
+                        {exceptionsLeft(r).open} of {r.exception_count} unresolved</span>
                     : <span className="badge b-ok" title={exceptionsLeft(r).title}><span className="d" />
-                        All {r.exception_count} put right</span>)
+                        All {r.exception_count} resolved</span>)
                   : <span className="badge b-ok"><span className="d" />Clean</span>}
               </div>
             ))}

@@ -77,7 +77,7 @@ export default function BrokerFiles() {
         <div className="page-head">
           <div className="t">
             <h2>{data?.broker.name ?? "Broker"}
-              <InfoTip text={`What they sent you in the last ${DAYS} days, and what is still open — by programme.`} />
+              <InfoTip text={`What they sent you in the last ${DAYS} days, and which exceptions are unresolved — by programme.`} />
             </h2>
           </div>
           <div className="actions">
@@ -131,7 +131,7 @@ export default function BrokerFiles() {
                           <th>File</th>
                           <th>Reporting period</th>
                           <th style={{ textAlign: "right" }}>Exceptions</th>
-                          <th style={{ textAlign: "right" }}>Still open</th>
+                          <th style={{ textAlign: "right" }}>Unresolved</th>
                           <th style={{ textAlign: "right" }}>Resolved</th>
                           <th>Sent</th>
                           <th></th>

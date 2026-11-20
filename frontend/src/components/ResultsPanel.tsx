@@ -180,7 +180,7 @@ export default function ResultsPanel({ exportId, uploadId, fromParam }: {
         </div>
         {s && (
           <p className="muted" style={{ fontSize: 12.5, margin: "10px 0 0" }}>
-            {s.exceptions} exception{s.exceptions === 1 ? "" : "s"} in all · {s.exceptions_open} open · {s.exceptions_resolved} resolved
+            {s.exceptions} exception{s.exceptions === 1 ? "" : "s"} in all · {s.exceptions_open} unresolved · {s.exceptions_resolved} resolved
           </p>
         )}
       </div>

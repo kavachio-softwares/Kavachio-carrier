@@ -367,7 +367,7 @@ export function exceptionsLeft(r: OperatorRun): { open: number; total: number; t
   const total = r.exception_count;
   const open = r.open ?? total;
   return { open, total,
-    title: `${open} of ${total} still open · ${r.put_right ?? total - open} put right` };
+    title: `${open} of ${total} unresolved · ${r.put_right ?? total - open} resolved` };
 }
 
 export const getOperatorHome = () =>

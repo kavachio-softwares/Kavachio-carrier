@@ -169,7 +169,7 @@ export default function FixLink() {
           setMsg(d.status.startsWith("delivered")
             ? `Version ${d.version} delivered to ${d.carrier ?? "the carrier"}.`
             : d.status === "with_exceptions"
-              ? `Version ${d.version} checked. ${plural(d.progress.remaining, "exception")} still open.`
+              ? `Version ${d.version} checked. ${plural(d.progress.remaining, "exception")} unresolved.`
               : null);
         }
       } catch { /* keep following; a 401 is handled by refresh */ }
@@ -390,7 +390,7 @@ export default function FixLink() {
           <div className="note warn" data-testid="delivered-open-note" style={{ marginBottom: 14 }}>
             <b>Delivered to {doc.carrier ?? "the carrier"}
               {doc.delivered_at ? ` on ${fmtDate(doc.delivered_at)}` : ""}.</b>{" "}
-            You can still resolve the open exceptions. When you submit, {doc.carrier ?? "the carrier"} receives
+            You can still resolve the unresolved exceptions. When you submit, {doc.carrier ?? "the carrier"} receives
             the corrected file as version {nextVersion}; version {doc.version} is kept.
           </div>
         )}
@@ -433,7 +433,7 @@ export default function FixLink() {
               <div className="tile"><div className="k">Critical</div><div className="v" style={{ color: "var(--p-crit)" }}>{critical}</div></div>
               <div className="tile"><div className="k">Warning</div><div className="v" style={{ color: "var(--p-warn)" }}>{warning}</div></div>
               <div className="tile"><div className="k">Resolved</div><div className="v" style={{ color: "var(--p-ok)" }}>{resolved}</div></div>
-              <div className="tile"><div className="k">Open</div><div className="v">{openCount}</div></div>
+              <div className="tile"><div className="k">Unresolved</div><div className="v">{openCount}</div></div>
             </div>
 
             <div className="tabs" role="tablist">
@@ -441,7 +441,7 @@ export default function FixLink() {
                 BDX Sheet
               </button>
               <button role="tab" className={tab === "rules" ? "on" : ""} onClick={() => setTab("rules")}>
-                Issues by Rule <span style={{ marginLeft: 6, fontSize: 11.5, fontWeight: 600, padding: "1px 7px",
+                Exceptions by Rule <span style={{ marginLeft: 6, fontSize: 11.5, fontWeight: 600, padding: "1px 7px",
                   borderRadius: 99, background: "var(--p-surface-2)", border: "1px solid var(--p-border)" }}>{groups.length}</span>
               </button>
             </div>
@@ -537,7 +537,7 @@ function ValidationResult({ check }: { check: FixValidation }) {
   const remaining = check.open_after;
   const carry = remaining > 0
     ? ` ${plural(remaining, "exception")} will remain open in version ${check.version}.`
-    : ` Version ${check.version} will have no open exceptions.`;
+    : ` Version ${check.version} will have no unresolved exceptions.`;
   if (!failing) {
     return (
       <div className="note ok" style={{ marginBottom: 14, display: "flex", gap: 8, alignItems: "flex-start" }}>
@@ -555,7 +555,7 @@ function ValidationResult({ check }: { check: FixValidation }) {
       </div>
       <div className="tbl-wrap">
         <table>
-          <thead><tr><th>Sheet</th><th>Row</th><th>Column</th><th>Value</th><th>Issue</th></tr></thead>
+          <thead><tr><th>Sheet</th><th>Row</th><th>Column</th><th>Value</th><th>Exception</th></tr></thead>
           <tbody>
             {check.still_failing.slice(0, 10).map((r) => (
               <tr key={r.key}>
@@ -638,7 +638,7 @@ function VersionHistory({ versions, current }: { versions: FixVersion[]; current
                   <td>{channelText(v.source)}</td>
                   <td>
                     {v.exceptions == null ? <span className="muted">—</span>
-                      : isCur && v.open != null ? `${v.open} of ${v.exceptions} open`
+                      : isCur && v.open != null ? `${v.open} of ${v.exceptions} unresolved`
                       : v.exceptions}
                   </td>
                   <td>

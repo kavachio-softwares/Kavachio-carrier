@@ -396,7 +396,7 @@ export default function KavachioAdminDashboard() {
           </ChartCard>
 
           <ChartCard title="Open Exceptions by Severity"
-            info={<InfoTip text={"Exceptions still open on files run in this period. \"Resolved\" = decisions made in this period. Pick All time for the whole backlog."} />}>
+            info={<InfoTip text={"Unresolved exceptions on files run in this period. \"Resolved\" = decisions made in this period. Pick All time for the whole backlog."} />}>
             {ox.total === 0 ? <div className="empty">Nothing is waiting to be reviewed.</div> : (
               <>
                 <div style={{ display: "flex", gap: 2, height: 14, marginBottom: 10 }}>
@@ -445,27 +445,27 @@ export default function KavachioAdminDashboard() {
         {/* ===== Where the open exceptions are ===== */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18, marginBottom: 18 }}>
           <ChartCard title="Exceptions by Carrier"
-            info={<InfoTip text={"Carriers with the most open exceptions first. Each bar splits that carrier's exceptions this period into open and put right.\nCompare the counts, not bar lengths. Click a carrier to see its recent files."} />}>
-            <RankedBars cap={6} unit="open" title="Exceptions by Carrier"
+            info={<InfoTip text={"Carriers with the most unresolved exceptions first. Each bar splits that carrier's exceptions this period into unresolved and resolved.\nCompare the counts, not bar lengths. Click a carrier to see its recent files."} />}>
+            <RankedBars cap={6} unit="unresolved" title="Exceptions by Carrier"
               rows={ox.by_carrier.map(r => ({ id: r.id, name: r.name, value: r.open,
                                               settled: r.settled }))}
-              empty="Nothing is open at any carrier."
+              empty="No unresolved exceptions at any carrier."
               linkTo={r => codeOf[r.id] ? `/tenants/${codeOf[r.id]}?tab=runs` : "/tenants"} />
             {ox.carriers_clear > 0 && (
               <div className="muted" style={{ fontSize: 12.5, marginTop: 12 }}>
-                {plural(ox.carriers_clear, "other carrier has", "other carriers have")} files with nothing open.
+                {plural(ox.carriers_clear, "other carrier has", "other carriers have")} files with no unresolved exceptions.
               </div>
             )}
           </ChartCard>
           <ChartCard title="Exceptions by Broker"
-            info={<InfoTip text={"Brokers with the most open exceptions first, across all their carriers. Each bar splits that broker's exceptions this period into open and put right.\nCompare the counts, not bar lengths."} />}>
-            <RankedBars cap={6} unit="open" title="Exceptions by Broker"
+            info={<InfoTip text={"Brokers with the most unresolved exceptions first, across all their carriers. Each bar splits that broker's exceptions this period into unresolved and resolved.\nCompare the counts, not bar lengths."} />}>
+            <RankedBars cap={6} unit="unresolved" title="Exceptions by Broker"
               rows={ox.by_broker.map(r => ({ id: r.id, name: r.name, value: r.open,
                                              settled: r.settled }))}
-              empty="Nothing is open for any broker." />
+              empty="No unresolved exceptions for any broker." />
             {ox.brokers_clear > 0 && (
               <div className="muted" style={{ fontSize: 12.5, marginTop: 12 }}>
-                {plural(ox.brokers_clear, "other broker has", "other brokers have")} files with nothing open.
+                {plural(ox.brokers_clear, "other broker has", "other brokers have")} files with no unresolved exceptions.
               </div>
             )}
           </ChartCard>

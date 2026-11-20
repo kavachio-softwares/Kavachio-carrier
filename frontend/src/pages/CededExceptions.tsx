@@ -163,7 +163,7 @@ function Triage({ d, onSaved }: { d: CededDetail; onSaved: (d: CededDetail) => v
           </div>
         ) : !!d.send_blocked_by?.length && (
           <div className="note warn" style={{ marginBottom: 18 }}>
-            <b>Not ready to send.</b> A Critical rule has rows still open: {d.send_blocked_by.join("; ")}.
+            <b>Not ready to send.</b> A Critical rule has unresolved exceptions: {d.send_blocked_by.join("; ")}.
             Approve, Fix or Dismiss each row, then Fix &amp; Validate.
           </div>
         )}
@@ -188,7 +188,7 @@ function Triage({ d, onSaved }: { d: CededDetail; onSaved: (d: CededDetail) => v
               <div className="tile"><div className="k">Critical</div><div className="v" style={{ color: "var(--p-crit)" }}>{crit}</div></div>
               <div className="tile"><div className="k">Warning</div><div className="v" style={{ color: "var(--p-warn)" }}>{items.length - crit}</div></div>
               <div className="tile"><div className="k">Resolved</div><div className="v" style={{ color: "var(--p-ok)" }}>{items.length - open}</div></div>
-              <div className="tile"><div className="k">Open</div><div className="v">{open}</div></div>
+              <div className="tile"><div className="k">Unresolved</div><div className="v">{open}</div></div>
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
@@ -405,7 +405,7 @@ function useFixAndValidate(d: CededDetail, onSaved: (d: CededDetail) => void) {
       const still = (nd.checks ?? []).flatMap(c => c.items ?? []).filter(it => it.still_fails).length;
       setMsg(`The statement was prepared again with your decisions and every row checked again. `
         + (still ? `${plural(still, "corrected value")} still break${still === 1 ? "s" : ""} the rule — open again. ` : "")
-        + (open ? `${plural(open, "exception")} still open.` : nd.can_send ? "It is ready to send." : "No exception is open."));
+        + (open ? `${plural(open, "exception")} unresolved.` : nd.can_send ? "It is ready to send." : "No exception is unresolved."));
     } catch (e) {
       setErr(fieldErrors(e).message);
     } finally {

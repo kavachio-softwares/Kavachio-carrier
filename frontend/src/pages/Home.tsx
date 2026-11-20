@@ -250,7 +250,7 @@ export default function Home() {
   const canProcess = canAccessPath("/direct");
   const quickActions = [
     { to: "/monthly-report", label: "Monthly Report", icon: BarChart3,
-      hint: "Last month's files, problems and fixes",
+      hint: "Last month's files, exceptions and resolutions",
       soft: "var(--p-info-soft)", ink: "var(--p-info-ink)" },
     { to: "/executive-report", label: "Executive Report", icon: Presentation,
       hint: "The whole book for leadership, to download or email",
@@ -968,7 +968,7 @@ export default function Home() {
           <div className="card" style={{ padding: "24px 20px", display: "flex", flexDirection: "column" }}>
             <div className="card-h" style={{ marginBottom: 20 }}>
               <h3>Exceptions Breakdown</h3>
-              <InfoTip text="Distribution of open exceptions by severity." />
+              <InfoTip text="Distribution of unresolved exceptions by severity." />
             </div>
             {stats?.pending_exceptions ? (
               <div style={{ width: "100%", height: 260, position: "relative" }}>
@@ -1004,12 +1004,12 @@ export default function Home() {
                   <div style={{ fontSize: 30, fontWeight: 700, color: "#0f172a", lineHeight: 1 }}>
                     {fmt(stats.pending_exceptions)}
                   </div>
-                  <div style={{ fontSize: 12.5, color: "#64748b", marginTop: 2 }}>Open</div>
+                  <div style={{ fontSize: 12.5, color: "#64748b", marginTop: 2 }}>Unresolved</div>
                 </div>
               </div>
             ) : (
               <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--p-faint)", fontSize: 15, fontWeight: 500 }}>
-                No open exceptions! 🎉
+                No unresolved exceptions! 🎉
               </div>
             )}
           </div>

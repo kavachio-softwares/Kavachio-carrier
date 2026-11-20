@@ -372,13 +372,13 @@ export default function UploadExceptions() {
         {delivery?.delivered && (
           <div className={`note${locked ? "" : " warn"}`} data-testid="delivery-note"
             style={{ marginBottom: 18 }}>
-            <b>{delivery.flagged ? "Delivered to the carrier with open exceptions" : "Delivered to the carrier"}
+            <b>{delivery.flagged ? "Delivered to the carrier with unresolved exceptions" : "Delivered to the carrier"}
               {delivery.delivered_at ? ` on ${fmtDateTime(delivery.delivered_at)}` : ""}.</b>{" "}
             {locked
               ? "Every critical and warning exception is resolved, so this version is locked."
               : roleViewOnly
-                ? "The broker can still resolve the open exceptions; each Fix & Validate sends you a corrected version."
-                : "You can still resolve the open exceptions. Each Fix & Validate makes a new version and sends it to the carrier as the corrected file; this one is kept."}
+                ? "The broker can still resolve the unresolved exceptions; each Fix & Validate sends you a corrected version."
+                : "You can still resolve the unresolved exceptions. Each Fix & Validate makes a new version and sends it to the carrier as the corrected file; this one is kept."}
           </div>
         )}
         {roleViewOnly && (
@@ -468,7 +468,7 @@ export default function UploadExceptions() {
               <div className="tile"><div className="k">Critical</div><div className="v" style={{ color: "var(--p-crit)" }}>{critical}</div></div>
               <div className="tile"><div className="k">Warning</div><div className="v" style={{ color: "var(--p-warn)" }}>{warning}</div></div>
               <div className="tile"><div className="k">Resolved</div><div className="v" style={{ color: "var(--p-ok)" }}>{resolved}</div></div>
-              <div className="tile"><div className="k">Open</div><div className="v">{open}</div></div>
+              <div className="tile"><div className="k">Unresolved</div><div className="v">{open}</div></div>
             </div>
 
             {/* ── search ── */}

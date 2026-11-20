@@ -253,8 +253,8 @@ function Body({ r, programId, fileType, brokerId }: {
             <th>Missing <InfoTip text="Due, but not come in yet." /></th>
             <th>Passed checks first time</th>
             <th>On time and passed checks <InfoTip text="Files that came on time AND passed every check the first time. This is what brokers are ranked on." /></th>
-            <th>Still has problems <InfoTip text="Files that came in whose latest version still has problems not put right. Underneath: how many problems are still open." /></th>
-            <th>Problems fixed while cleaning <InfoTip text="Of the problems found when the file first came, how many have been put right since (fixed, accepted or resent)." /></th>
+            <th>Files with unresolved exceptions <InfoTip text="Files that came in whose latest version still has unresolved exceptions. Underneath: how many exceptions are unresolved." /></th>
+            <th>Exceptions resolved while cleaning <InfoTip text="Of the exceptions found when the file first came, how many have been resolved since (fixed, accepted or resent)." /></th>
             <th className="l">How it came in</th>
           </tr></thead>
           <tbody>{r.rows.map((x, i) => {
@@ -290,9 +290,9 @@ function Body({ r, programId, fileType, brokerId }: {
                 : x.files_with_problems
                   ? <><span style={{ fontWeight: 700, color: RED }}>{x.files_with_problems} file{x.files_with_problems === 1 ? "" : "s"}</span>
                       <div className="sub" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                        {x.problems_open} open
+                        {x.problems_open} unresolved
                         {x.problems_link && <Link to={x.problems_link} className="linkish" style={{ display: "inline-flex" }}
-                          title={x.files_with_problems > 1 ? "See the exceptions on the file with the most still open"
+                          title={x.files_with_problems > 1 ? "See the exceptions on the file with the most unresolved"
                             : "See the exceptions on this file"}
                           aria-label="See the exceptions"><Eye size={15} /></Link>}
                       </div></>
@@ -300,7 +300,7 @@ function Body({ r, programId, fileType, brokerId }: {
               <td>{!x.received ? <span className="sub">—</span>
                 : x.problems_found
                   ? <>{x.problems_fixed} of {x.problems_found}<div className="sub">{x.fixed_pct}%</div></>
-                  : <span className="sub">No problems found</span>}</td>
+                  : <span className="sub">No exceptions found</span>}</td>
               <td className="l">{x.file_types.length ? x.file_types.join(", ") : <span className="sub">Not received</span>}</td>
             </tr>);
           })}</tbody>

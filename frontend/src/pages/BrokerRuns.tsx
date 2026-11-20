@@ -81,9 +81,9 @@ export default function BrokerRuns() {
                             : r.exception_count > 0
                             ? (exceptionsLeft(r).open > 0
                               ? <span className="badge b-warn" title={exceptionsLeft(r).title}><span className="d" />
-                                  {exceptionsLeft(r).open} of {r.exception_count} open</span>
+                                  {exceptionsLeft(r).open} of {r.exception_count} unresolved</span>
                               : <span className="badge b-ok" title={exceptionsLeft(r).title}><span className="d" />
-                                  All {r.exception_count} put right</span>)
+                                  All {r.exception_count} resolved</span>)
                             : r.status === "not_validated"
                               ? <span className="badge"><span className="d" />Not Validated</span>
                               : <span className="badge b-ok"><span className="d" />Clean</span>}

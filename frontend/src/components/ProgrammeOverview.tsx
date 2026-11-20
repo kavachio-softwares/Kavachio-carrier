@@ -227,7 +227,7 @@ function Row({ r, periodLabel, picked, onPick }: {
         )}
       </td>
       <td title={r.exceptions
-        ? `${r.exceptions_open} of ${r.exceptions} still open, across ${plural(r.files, "file", "files")} checked ${inPeriod}`
+        ? `${r.exceptions_open} of ${r.exceptions} unresolved, across ${plural(r.files, "file", "files")} checked ${inPeriod}`
         : undefined}>
         {r.exceptions_open === 0 ? (
           <span style={faint}>{r.files ? "None" : "—"}</span>

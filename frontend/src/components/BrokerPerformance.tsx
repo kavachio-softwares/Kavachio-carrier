@@ -92,7 +92,7 @@ export default function BrokerPerformance({ mga, programme, period, periodLabel 
     <ChartCard
       title="Broker Performance"
       info={<InfoTip text={
-        `Broker companies that sent files most recently, ${inWhen}. Green = share of issues resolved, amber = still open, grey = nothing flagged.\n`
+        `Broker companies that sent files most recently, ${inWhen}. Green = exceptions resolved, amber = unresolved, grey = no exceptions.\n`
         + (programme ? `${programme.name}'s brokers that sent nothing show "No file received".\n` : "")
         + "Click a broker to see its files by programme."} />}
     >
@@ -110,7 +110,7 @@ export default function BrokerPerformance({ mga, programme, period, periodLabel 
             {/* No key when no broker sent a file: there are no bars to read. */}
             {sent.length > 0 && <>
               <Swatch color={RESOLVED} label="Resolved" />
-              <Swatch color={OPEN} label="Still open" />
+              <Swatch color={OPEN} label="Unresolved" />
             </>}
             {/* Only when a grey bar is on the chart — a key for something not
                 drawn reads as a missing series. */}
@@ -158,7 +158,7 @@ function Row({ r, when, inWhen }: { r: BrokerPerf; when: string; inWhen: string 
     const last = r.last_run_at ? `Last file: ${monthYear(r.last_run_at)}` : "Has never sent a file";
     return (
       <div title={`${r.name}\nNo file received ${inWhen}\n${last}`}
-        style={{ display: "grid", gridTemplateColumns: "minmax(120px, 180px) 1fr 130px",
+        style={{ display: "grid", gridTemplateColumns: "minmax(120px, 180px) 1fr 170px",
                  alignItems: "center", gap: 14 }}>
         <span style={{ minWidth: 0 }}>
           <span style={{ display: "block", fontSize: 13, fontWeight: 600, color: "var(--p-ink)",
@@ -174,15 +174,14 @@ function Row({ r, when, inWhen }: { r: BrokerPerf; when: string; inWhen: string 
       </div>
     );
   }
-  const cleanPct = r.runs ? Math.round((r.clean / r.runs) * 100) : 0;
+  // Files = each month's file once, as its latest version — not every upload
+  // or re-check of it (`runs`, which read as "84 files sent").
+  const files = `${w.files} ${w.files === 1 ? "file" : "files"}`;
   const tip = [
     r.name,
-    `${when}: ${r.runs} ${r.runs === 1 ? "file" : "files"} — ${r.clean} clean, `
-      + `${r.flagged} with issues` + (r.not_checked ? `, ${r.not_checked} not checked` : ""),
     w.exceptions
-      ? `${w.exceptions} issues across ${w.files} ${w.files === 1 ? "file" : "files"}`
-        + ` (${w.rows} rows) — ${w.resolved} resolved, ${w.open} still open`
-      : w.files ? "Nothing flagged on any of them" : "No file checked",
+      ? `${when}: ${files} — ${w.exceptions} exceptions, ${w.resolved} resolved, ${w.open} unresolved`
+      : w.files ? `${when}: ${files} — no exceptions` : "No file checked",
     w.files ? "Click for its files, split by programme" : "",
   ].filter(Boolean).join("\n");
 
@@ -194,7 +193,7 @@ function Row({ r, when, inWhen }: { r: BrokerPerf; when: string; inWhen: string 
           {r.name}
         </span>
         <span style={{ display: "block", fontSize: 11.5, color: "var(--p-faint)" }}>
-          {r.runs} {r.runs === 1 ? "file" : "files"} · {cleanPct}% clean
+          {files}
         </span>
       </span>
 
@@ -222,19 +221,19 @@ function Row({ r, when, inWhen }: { r: BrokerPerf; when: string; inWhen: string 
         {!w.files ? "—" : !w.exceptions ? (
           <><b style={{ color: "var(--p-ink)" }}>Clean</b>
             <span style={{ display: "block", fontSize: 11.5, color: "var(--p-faint)" }}>
-              no issues found
+              no exceptions
             </span></>
         ) : (
-          <><b style={{ color: "var(--p-ink)" }}>{w.open}</b> of {w.exceptions} open
+          <><b style={{ color: "var(--p-ink)" }}>{w.open}</b> unresolved
             <span style={{ display: "block", fontSize: 11.5, color: "var(--p-faint)" }}>
-              {w.resolved} resolved · {w.files} {w.files === 1 ? "file" : "files"}
+              {w.resolved} resolved of {w.exceptions} exceptions
             </span></>
         )}
       </span>
     </>
   );
 
-  const grid = { display: "grid", gridTemplateColumns: "minmax(120px, 180px) 1fr 130px",
+  const grid = { display: "grid", gridTemplateColumns: "minmax(120px, 180px) 1fr 170px",
                  alignItems: "center", gap: 14 } as const;
   return w.files ? (
     <Link to={filesPath(r)} title={tip} className="rb-row"
