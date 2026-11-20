@@ -12,21 +12,22 @@
 // column for it, which left it empty, and the first reason a row needs review.
 // Currencies are never added together — each is its own tab.
 //
-// Deliberately NOT a sidebar entry: opened from the Dashboard (both seats), as
-// Policies is.
+// Shown as "Financial Reporting": the carrier's sidebar lists it under Reports
+// (20 Nov 2026); the broker opens it from their Dashboard. Excel download:
+// GET /reports/financial-summary/file (financial_export.py).
 //
 // 38.1: every amount opens the Policies page on the policies behind it — the
 // same window, figure, currency, programme and broker (api/policies drillLink).
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
-  Ban, Banknote, Handshake, Landmark, Layers, Percent, Receipt, TrendingUp, Wallet,
+  Ban, Banknote, Download, Handshake, Landmark, Layers, Percent, Receipt, TrendingUp, Wallet,
   type LucideIcon,
 } from "lucide-react";
 import {
-  getFinancialRows, getFinancialSummary, type Basis, type CurrencyGroup, type Figure,
+  downloadFinancialReport, getFinancialRows, getFinancialSummary, type Basis, type CurrencyGroup, type Figure,
   type FigureStatus, type FileRef, type FinancialRows, type FinancialSummary as Summary,
-  type MetricKey, type MetricTotals, type MetricWhy, type MissingFile, type NetMismatch, type PartTotals,
+  type MetricKey, type MetricTotals, type MetricWhy, type NetMismatch, type PartTotals,
   type TransactionType,
 } from "../api/finance";
 import { drillLink } from "../api/policies";
@@ -149,47 +150,38 @@ const NEVER_FILLED = "Kavachio never fills in a missing figure or counts it as 0
 // total files are handled by the setup's ITD setting (backend itd.py), which is
 // off unless switched on — hence the second note.
 const HOW_TOTALS_WORK =
-  "Each month counts only its own file; Quarter and Year add the months. Rates = total commission (or brokerage) ÷ total gross premium.\n"
-  + "If a broker's file repeats earlier months, those are counted again unless running totals are switched on in its Bordereau Setup.";
-const ROWS_TAB = "The Bordereau rows tab gives every row's reason.";
+  "All financial figures come directly from the bordereau files and are added together. "
+  + "Cancellations and return premiums count as negative amounts.\n"
+  + "Only commission or brokerage amounts (when only a rate is provided) and their rates are calculated.\n"
+  + "Quarterly and yearly totals combine the monthly figures.";
 
 function fileName(f: FileRef): string {
   const n = `“${f.filename ?? `file #${f.export_id}`}”`;
   return f.programme ? `${n} (${f.programme})` : n;
 }
 
-function fileList(files: FileRef[]): string {
-  const shown = files.slice(0, 2).map(fileName);
-  const more = files.length - shown.length;
-  return more > 0 ? `${shown.join(", ")} and ${more} more` : shown.join(" and ");
-}
-
-function rowsLeft(f: MissingFile): string {
-  if (f.rows !== f.of_rows) return `${f.rows} of its ${f.of_rows} rows`;
-  return f.of_rows === 1 ? "its only row" : `all ${f.of_rows} rows`;
-}
-
-/** One figure's reasons, as the server found them (financial_summary._why). */
+/** One figure's reasons, as the server found them (financial_summary._why),
+ *  in plain words and counts only — no file names (user, 20 Nov 2026): the
+ *  Bordereau rows tab is where a reader finds the files and rows. */
 function figureWhy(w: MetricWhy | undefined, title: string, reviewOnly = false): string[] {
   if (!w) return [];
   const out: string[] = [];
+  const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+  const rows = (n: number) => `${n} policy row${n === 1 ? "" : "s"}`;
   if (w.review_rows) {
-    const n = w.review_rows;
-    const ex = w.review[0];
-    out.push(`${title}: ${n} row${n === 1 ? " needs" : "s need"} review`
-      + (ex ? ` — e.g. ${fileName(ex)}, row ${ex.row}: ${ex.reason}.` : "."));
+    out.push(`${title} needs a check in ${rows(w.review_rows)}.`);
   }
   if (reviewOnly) return out;
   if (w.no_column.length) {
-    out.push(`${fileList(w.no_column)} ${w.no_column.length === 1 ? "has" : "have"} no ${title} column.`);
+    out.push(`${files(w.no_column.length)} ${w.no_column.length === 1 ? "has" : "have"} no ${title} column.`);
   }
   if (w.switched_off.length) {
-    out.push(`${fileList(w.switched_off)}: ${title} is switched off in the output template.`);
+    out.push(`${title} is switched off in the output template of ${files(w.switched_off.length)}.`);
   }
-  for (const f of w.empty.slice(0, 2)) {
-    out.push(`${fileName(f)} left ${title} empty on ${rowsLeft(f)}.`);
+  if (w.empty.length) {
+    const left = w.empty.reduce((n, f) => n + f.rows, 0);
+    out.push(`${title} was left empty in ${rows(left)}.`);
   }
-  if (w.empty.length > 2) out.push(`${w.empty.length - 2} more files left it empty too.`);
   return out;
 }
 
@@ -214,7 +206,7 @@ function missingWhy(group: CurrencyGroup, key: MetricKey): string {
   const parts: string[] = [];
   const amount = RATE_AMOUNT[key];
   if (amount) {
-    parts.push(`Total ${TITLE[amount].toLowerCase()} ÷ total gross premium, and no row this period has both.`);
+    parts.push(`This needs ${TITLE[amount].toLowerCase()} and gross premium on the same policy row, and no row this period has both.`);
     parts.push(...figureWhy(why[amount], TITLE[amount]));
     parts.push(...figureWhy(why.gross_premium, TITLE.gross_premium));
     parts.push(...figureWhy(why[key], TITLE[key], true));
@@ -223,19 +215,21 @@ function missingWhy(group: CurrencyGroup, key: MetricKey): string {
   }
   const used = [why[key], amount && why[amount], amount && why.gross_premium]
     .filter((w): w is MetricWhy => !!w);
-  if (used.some(w => w.review_rows)) parts.push(ROWS_TAB);
   if (used.some(w => w.no_column.length || w.switched_off.length || w.empty.length)) parts.push(NEVER_FILLED);
   return parts.length ? parts.join(" ") : "No row this period carries this figure.";
 }
 
-/** "18 reported · 2 calculated · 1 needs review" — the facts behind a total. */
+/** How many policy rows (bordereau lines) are behind a total, by how each row
+ *  gave the figure: "Sent in 2 policy rows · Missing in 1 policy row". Rows,
+ *  not policies — one policy can appear on several rows of a file. */
 function countsLine(m: MetricTotals): string {
   const c = m.current.counts;
+  const rows = (n: number) => `${n} policy row${n === 1 ? "" : "s"}`;
   const parts: string[] = [];
-  if (c.reported) parts.push(`${c.reported} reported`);
-  if (c.calculated) parts.push(`${c.calculated} calculated`);
-  if (c.needs_review) parts.push(`${c.needs_review} need${c.needs_review === 1 ? "s" : ""} review`);
-  if (c.not_reported) parts.push(`${c.not_reported} not reported`);
+  if (c.reported) parts.push(`Sent in ${rows(c.reported)}`);
+  if (c.calculated) parts.push(`Worked out for ${rows(c.calculated)}`);
+  if (c.needs_review) parts.push(`Needs a check in ${rows(c.needs_review)}`);
+  if (c.not_reported) parts.push(`Missing in ${rows(c.not_reported)}`);
   return parts.join(" · ");
 }
 
@@ -247,7 +241,12 @@ export default function FinancialSummary() {
   const [period, setPeriod] = useState<string | null>(null);
   const [programId, setProgramId] = useState<number | null>(null);
   const [brokerId, setBrokerId] = useState<number | null>(null);
-  const [openProblems, setOpenProblems] = useState<"include" | "exclude">("include");
+  // Files with open problems are always counted: the "leave them out" switch
+  // was taken off the screen (user, 20 Nov 2026) so a reader is not asked to
+  // weigh review states. The API still takes the parameter.
+  const openProblems = "include" as const;
+  const [saving, setSaving] = useState(false);
+  const [saveFailed, setSaveFailed] = useState<string | null>(null);
   const [currency, setCurrency] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("overview");
 
@@ -271,8 +270,20 @@ export default function FinancialSummary() {
   const groups = data?.groups ?? [];
   const group: CurrencyGroup | undefined =
     groups.find(g => g.currency === currency) ?? groups[0];
-  const filtered = programId != null || brokerId != null || openProblems === "exclude";
+  const filtered = programId != null || brokerId != null;
   const w = data?.windows;
+
+  // The same period and filters as on screen, as an Excel file.
+  const download = () => {
+    if (!data?.period) return;
+    setSaving(true); setSaveFailed(null);
+    downloadFinancialReport({
+      basis, period: data.period, program_id: programId, broker_party_id: broker ? null : brokerId,
+      carrier_id: broker ? carrierId : null, open_problems: openProblems,
+    }, `Financial Report ${periodName(data.period)}.xlsx`)
+      .catch(() => setSaveFailed("Could not download the file. Please try again."))
+      .finally(() => setSaving(false));
+  };
 
   const drillTo: DrillTo | null = data?.period && group ? o => drillLink(
     { from: "financial", label: o.label, basis, period: data.period ?? undefined, window: o.window,
@@ -285,15 +296,21 @@ export default function FinancialSummary() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Financial Summary
+            <h2>Financial Reporting
               <InfoTip text={broker
                 ? "Premium, commission and other money in the bordereaux you sent, by programme, against the previous period and the same period last year."
                 : "Premium, commission and other money in your brokers' bordereaux, by programme and broker, against the previous period and the same period last year."} />
             </h2>
           </div>
-          <div className="actions">
-            <Link className="btn" to="/policies">Policy Explorer</Link>
+          <div className="actions" style={{ alignItems: "center" }}>
+            {saveFailed && <span className="sub" style={{ color: "var(--p-crit)" }}>{saveFailed}</span>}
+            {/* <Link className="btn" to="/policies">Policy Explorer</Link> */}
             <Link className="btn" to={broker ? "/broker" : "/home"}>← Dashboard</Link>
+            <button type="button" className="btn" onClick={download}
+              disabled={saving || !data?.period}>
+              <Download size={14} style={{ marginRight: 6, verticalAlign: -2 }} />
+              {saving ? "Preparing…" : "Download Excel"}
+            </button>
           </div>
         </div>
 
@@ -349,17 +366,9 @@ export default function FinancialSummary() {
                 </select>
               </label>
             )}
-            <label className="fbar-field">
-              <span className="sub">Files with open problems</span>
-              <select className="fbar-select" aria-label="Files with open problems" value={openProblems}
-                onChange={e => setOpenProblems(e.target.value as "include" | "exclude")}>
-                <option value="include">Included</option>
-                <option value="exclude">Left out</option>
-              </select>
-            </label>
             {filtered && (
               <span className="linkish fbar-clear-link" onClick={() => {
-                setProgramId(null); setBrokerId(null); setOpenProblems("include");
+                setProgramId(null); setBrokerId(null);
               }}>Clear filters</span>
             )}
           </div>
@@ -397,7 +406,7 @@ export default function FinancialSummary() {
                 <button key={t.key} role="tab" aria-selected={tab === t.key}
                   className={tab === t.key ? "on" : ""} onClick={() => setTab(t.key)}>
                   {t.label}
-                  {t.key === "rows" && group && <span className="sub"> · {group.rows}</span>}
+                  {t.key === "rows" && group && <span className="sub"> · {group.listed_rows}</span>}
                 </button>
               ))}
             </div>
@@ -480,7 +489,7 @@ function CompareTable({ group, data, drillTo }: { group: CurrencyGroup; data: Su
               <th>Change</th>
               {showLy && <th>{periodName(w.last_year?.period)}</th>}
               {showLy && <th>Change</th>}
-              <th className="l">Policy rows this period</th>
+              <th className="l">Policy rows behind it</th>
             </tr>
           </thead>
           <tbody>
@@ -598,12 +607,12 @@ function notesOf(data: Summary): Note[] {
     "{n} files are exact copies of a newer file and are counted once") });
   if (c.unreadable.length) out.push({ files: c.unreadable, text: many(c.unreadable.length,
     "1 file could not be read", "{n} files could not be read") });
-  if (op.files) out.push(op.excluded
-    ? { files: op.list, text: many(op.files, "1 file with open problems is left out",
-        "{n} files with open problems are left out") }
-    : { files: op.list, text: many(op.files, "1 file still has open problems and is counted",
-        "{n} files still have open problems and are counted"),
-        after: `Set “Files with open problems” to Excluded to leave ${op.files === 1 ? "it" : "them"} out.` });
+  // Files with open problems are always counted and no longer named here: the
+  // note only existed to point at the "leave them out" switch, which is gone
+  // (user, 20 Nov 2026). Only the left-out case, reachable through the API or
+  // an old drill-down link, is still said.
+  if (op.files && op.excluded) out.push({ files: op.list, text: many(op.files,
+    "1 file with open problems is left out", "{n} files with open problems are left out") });
   if (c.percent_unverified_templates) out.push({ text: many(c.percent_unverified_templates,
     "1 output template writes a rate whose form (25% or 0.25) could not be checked, so that rate needs review",
     "{n} output templates write a rate whose form (25% or 0.25) could not be checked, so those rates need review") });
@@ -719,11 +728,11 @@ function RowsCard({ basis, period, programId, brokerId, carrierId, openProblems,
     <div className="card">
       <div className="card-h" style={{ flexWrap: "wrap", gap: 12 }}>
         <h3>Bordereau rows behind this period
-          <InfoTip text="Every policy row counted above, with each figure's label. Hover a Calculated or Needs review figure to see the working or the reason." />
+          <InfoTip text={"Policy rows whose figures were all read clearly. Rows with a figure that needs a check are not listed.\nHover a Calculated figure to see how it was worked out."} />
         </h3>
         <div className="right">
           <span className="seg sm">
-            {([null, "calculated", "needs_review", "not_reported"] as (FigureStatus | null)[]).map(s => (
+            {([null, "calculated", "not_reported"] as (FigureStatus | null)[]).map(s => (
               <button key={s ?? "all"} type="button" className={status === s ? "on" : ""}
                 onClick={() => setStatus(s)}>{s ? `With ${STATUS_LABEL[s].toLowerCase()}` : "All rows"}</button>
             ))}

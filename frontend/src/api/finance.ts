@@ -51,6 +51,8 @@ export interface CurrencyGroup {
   currency: string;
   label: string;
   rows: number;
+  /** Rows the Bordereau rows tab lists: those with no figure needing review. */
+  listed_rows: number;
   totals: Totals;
   by_programme: PartTotals[];
   /** Empty for a broker seat. */
@@ -189,4 +191,19 @@ export async function getFinancialRows(p: SummaryParams & {
   page?: number; page_size?: number;
 }): Promise<FinancialRows> {
   return (await api.get<FinancialRows>("/reports/financial-summary/rows", { params: clean(p) })).data;
+}
+
+/** The Financial Reporting screen as an Excel file — the same period and
+ *  filters: totals per currency, by programme, by broker (carrier), every
+ *  bordereau row behind them, and the Column Guide. */
+export async function downloadFinancialReport(p: SummaryParams, filename: string): Promise<void> {
+  const r = await api.get<Blob>("/reports/financial-summary/file", { params: clean(p), responseType: "blob" });
+  const href = URL.createObjectURL(r.data);
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 1000);
 }

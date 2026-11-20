@@ -101,7 +101,7 @@ app = FastAPI(title="BDX Mapper", version="0.3.0")
 import os as _os
 _cors_origins = [o.strip() for o in _os.getenv(
     "CORS_ORIGINS",
-    "http://localhost:5174,http://127.0.0.1:5174,http://192.168.2.92:5174",
+    "http://localhost:5173, http://localhost:5173,http://127.0.0.1:5173,http://127.0.0.1:5174,http://192.168.2.92:5174, http://192.168.2.92:5173",
 ).split(",") if o.strip()]
 
 # Password-reset & invite emails link to APP_BASE_URL, so that origin must be

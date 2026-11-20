@@ -556,9 +556,10 @@ def summary(s, p, *, basis: str = "month", period: Optional[str] = None,
     groups: dict[str, dict] = {}
     for w in WINDOWS:
         for o, _cells, fig in rows[w]:
-            g = groups.setdefault(_currency_key(fig), {"rows": 0, "acc": {}})
+            g = groups.setdefault(_currency_key(fig), {"rows": 0, "listed": 0, "acc": {}})
             if w == "current":
                 g["rows"] += 1
+                g["listed"] += not _unclear(fig)
             for part in ("all", ("programme", o.program_id), ("broker", o.broker_party_id)):
                 acc = g["acc"].setdefault(part, {}).setdefault(w, _blank())
                 _add(acc, fig)
@@ -579,6 +580,7 @@ def summary(s, p, *, basis: str = "month", period: Optional[str] = None,
     for key, g in sorted(groups.items(), key=lambda kv: (kv[0] in (NOT_STATED, IN_REVIEW), -kv[1]["rows"], kv[0])):
         out_groups.append({
             "currency": key, "label": _currency_label(key), "rows": g["rows"],
+            "listed_rows": g["listed"],
             "totals": _compare(g["acc"].get("all") or {}),
             "by_programme": _parts(g, "programme"),
             "by_broker": _parts(g, "broker") if b["seat"].kind == "carrier" else [],
@@ -588,7 +590,8 @@ def summary(s, p, *, basis: str = "month", period: Optional[str] = None,
     # row, and per currency group (the rows tab's type buttons).
     for g in out_groups:
         g["transactions"] = _transactions(fig for _o, _c, fig in rows["current"]
-                                          if _currency_key(fig) == g["currency"])
+                                          if _currency_key(fig) == g["currency"]
+                                          and not _unclear(fig))   # the rows the tab lists
     unknown_pct = sorted({tid for tid, conv in b["conventions"].items()
                           if any(c[0] == "unknown" for c in conv.values())}, key=str)
 
@@ -644,6 +647,11 @@ def summary(s, p, *, basis: str = "month", period: Optional[str] = None,
 
 
 # ── the rows behind it ──────────────────────────────────────────────────────
+def _unclear(fig: dict) -> bool:
+    """A row where any figure needs review: not listed on the rows tab."""
+    return any(fig[k]["status"] == ff.REVIEW for k in METRICS)
+
+
 def rows(s, p, *, basis: str = "month", period: Optional[str] = None,
          window: str = "current", program_id: Optional[int] = None,
          broker_party_id: Optional[int] = None, carrier_id: Optional[int] = None,
@@ -666,6 +674,12 @@ def rows(s, p, *, basis: str = "month", period: Optional[str] = None,
     picked = []
     for o, cells, fig in b["rows"][window]:
         if currency and _currency_key(fig) != currency:
+            continue
+        # A row with any figure that needs review is not listed (user, 20 Nov
+        # 2026): the tab shows only rows whose figures were all read cleanly.
+        # Its clean figures still count in the totals; `listed_rows` on the
+        # summary is how many rows this leaves.
+        if _unclear(fig):
             continue
         if status and not any(fig[k]["status"] == status for k in METRICS):
             continue

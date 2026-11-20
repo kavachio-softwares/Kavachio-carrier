@@ -133,6 +133,27 @@ TERMS: list[tuple[tuple[str, ...], str]] = [
     (("Commission",), "The share of the premium that the broker keeps as payment for selling the policies."),
     (("Premium",), "The amount customers pay for their policies."),
     (("Currency",), "The currency of the amount, for example USD or GBP."),
+    # Financial Reporting (task 35)
+    (("Total gross written premium (100%)",), "The full premium of the risk, before the carrier's share is taken. "
+                                              "Equal to gross premium when the carrier takes the whole risk."),
+    (("Commission rate",), "Total commission divided by total gross premium, as a percentage."),
+    (("Brokerage",), "A fee the broker keeps for placing the business, reported separately from commission."),
+    (("Brokerage rate",), "Total brokerage divided by total gross premium, as a percentage."),
+    (("Fees",), "Fees as the file reports them. Never taken off any other amount."),
+    (("Taxes",), "Taxes on the premium as the file reports them. Never taken off any other amount."),
+    (("Net premium (bordereau)",), "The premium after commission, as the file reports it. Kavachio "
+                                                 "does not work it out."),
+    (("Earned premium",), "The part of the premium for cover already given. Shown only where the file reports it."),
+    (("Figure",), "The money amount the line is about, for example Gross premium or Commission."),
+    (("Change on previous period", "Gross premium change on previous period"),
+     "How much the figure went up or down against the period before. Rates show the change in percentage points."),
+    (("Change on same period last year",), "How much the figure went up or down against the same period a year "
+                                           "earlier. Rates show the change in percentage points."),
+    (("Policy rows behind it",), "How many lines of the brokers' files gave this figure (Sent), had it worked out "
+                                 "from other figures (Worked out), need a check, or left it out (Missing)."),
+    (("Row",), "The line number in the file."),
+    (("Transaction",), "What the line records, as the file wrote it, for example New, Renewal or Cancellation."),
+    (("Notes",), "Which figures on the line were worked out or need a check, and why."),
     (("Premium cap",), "The most premium the contract allows the broker to sell. Above this, the carrier has not "
                        "agreed to take on more risk."),
     (("Written so far",), "How much premium has been sold under the contract so far."),

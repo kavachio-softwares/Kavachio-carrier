@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, ChevronDown, Layers, ListChecks, ClipboardList,
   FileCheck, CalendarDays, ScrollText, History, FileSpreadsheet, BarChart3, Presentation, Timer, AlertTriangle, Award,
-  FileSearch,
+  FileSearch, Wallet,
 } from "lucide-react";
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
@@ -179,6 +179,9 @@ const GROUPS: {
       { to: "/executive-report", label: "Executive Report", icon: Presentation },
       // 36: each broker's clean files on time, best and worst.
       { to: "/partner-performance", label: "Partner Performance", icon: Award },
+      // 35: premium, commission and net premium in the brokers' files. The
+      // page is still /financial-summary; on screen it is "Financial Reporting".
+      { to: "/financial-summary", label: "Financial Reporting", icon: Wallet },
     ],
   },
   {
@@ -319,10 +322,10 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // Files has no sidebar entry — it is opened from the Dashboard — so /files
   // (and /intake, which redirects there) keeps Dashboard lit.
   if (under("/intake") || under("/files")) return "/home";
-  // Financial Summary has no sidebar entry either — both seats open it from
-  // their Dashboard, so that stays lit. Policies does for the carrier (under
-  // Operations), which lights itself; the broker has none, so its Dashboard.
-  if (under("/financial-summary")) return isBrokerSeat() ? "/broker" : "/home";
+  // Financial Reporting lights itself for the carrier (under Reports); the
+  // broker has no entry and opens it from their Dashboard, so that stays lit.
+  // Policies does for the carrier (under Operations); the broker's Dashboard.
+  if (under("/financial-summary") && isBrokerSeat()) return "/broker";
   if (under("/policies") && isBrokerSeat()) return "/broker";
 
   // The Operational Report's Data Quality and Exception Resolution tabs.

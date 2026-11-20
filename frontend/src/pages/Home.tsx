@@ -704,12 +704,12 @@ export default function Home() {
           {(canProcess || canAccessPath("/policies")) && (
             <div className="actions">
               {/* A shortcut: Policy Explorer is also in the sidebar, under Operations. */}
-              {canAccessPath("/policies") && (
+              {/* {canAccessPath("/policies") && (
                 <Link className="btn" to="/policies">Policy Explorer</Link>
-              )}
-              {canAccessPath("/financial-summary") && (
-                <Link className="btn" to="/financial-summary">Financial Summary</Link>
-              )}
+              )} */}
+              {/* {canAccessPath("/financial-summary") && (
+                <Link className="btn" to="/financial-summary">Financial Reporting</Link>
+              )} */}
               {canProcess && <Link className="btn pri" to="/direct">＋ Process Bordereaux</Link>}
             </div>
           )}
@@ -1027,35 +1027,15 @@ export default function Home() {
           </div>
         )}
 
-        {/* ONE month for the cards below — Overdue Bordereaux (carrier admin),
-            and Bordereaux Processed. They used to count the current
-            month only; this lets a carrier look back a month at a time, or at
-            every month together. The cards still open their full lists. */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
-                      gap: 12, marginBottom: 12 }}>
-          <div style={{ display: "flex", alignItems: "center" }}>
-            <h3 style={{ margin: 0, fontSize: 16 }}>Monthly Activity</h3>
-            <InfoTip text={(carrierAdmin ? "Overdue Bordereaux and Bordereaux Processed"
-              : "The cards below") + " count the month and year picked here. All Months "
-              + "counts the whole year; All Years counts everything."} />
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {/* With All Years there is no one year to take a month of. */}
-            <select className="fbar-select" aria-label="Month"
-              value={year === ALL ? ALL : month} disabled={year === ALL}
-              onChange={e => setMonth(e.target.value)}>
-              <option value={ALL}>All Months</option>
-              {MONTH_NAMES.map((name, i) => (
-                <option key={name} value={pad2(i + 1)}>{name}</option>
-              ))}
-            </select>
-            <select className="fbar-select" aria-label="Year"
-              value={year} onChange={e => setYear(e.target.value)}>
-              <option value={ALL}>All Years</option>
-              {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
-            </select>
-          </div>
-        </div> 
+        {/* The cards below — Overdue Bordereaux (carrier admin) and
+            Bordereaux Processed — count the month and year picked on the
+            Activity bar above. They had a second, identical Month/Year pair
+            here, bound to the same state; one filter for the whole block. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+          <h3 style={{ margin: 0, fontSize: 16 }}>Monthly Activity</h3>
+          <InfoTip text={(carrierAdmin ? "Overdue Bordereaux and Bordereaux Processed"
+            : "The cards below") + " count the month and year picked at the top of Activity."} />
+        </div>
 
           {carrierAdmin ? (
             /* Overdue Bordereaux on the left, Bordereaux Processed and

@@ -690,3 +690,45 @@ def test_windows_shift_across_years():
     assert fs.windows("2027-01", "month") == {"current": "2027-01", "previous": "2026-12", "last_year": "2026-01"}
     assert fs.windows("2027-Q1", "quarter") == {"current": "2027-Q1", "previous": "2026-Q4", "last_year": "2026-Q1"}
     assert fs.windows("2027", "year") == {"current": "2027", "previous": "2026", "last_year": "2026"}
+
+
+# ── the Excel download (financial_export.py, GET …/file) ─────────────────────
+def _book(out, rows, seat):
+    import financial_export as fe
+    from openpyxl import load_workbook
+    return load_workbook(io.BytesIO(fe.workbook(out, rows, seat)))
+
+
+def test_the_download_holds_the_screen_totals_per_currency_and_every_row(files):
+    files.exports = [export(1, "2027-03", [full_row(gross=1200, cur="USD"),
+                                           full_row("P2", gross=500, cur="GBP")]),
+                     export(2, "2027-02", [full_row(gross=1000, cur="USD")])]
+    out = fs.summary(None, CARRIER)
+    wb = _book(out, fs.rows(None, CARRIER, page_size=1_000_000)["items"], "carrier")
+    assert wb.sheetnames == ["Summary", "By programme", "By broker", "Bordereau rows", "Column Guide"]
+    gross = {r[0]: r[2:4] for r in wb["Summary"].iter_rows(min_row=5, values_only=True)
+             if r[1] == "Gross premium"}
+    assert gross == {"USD": (1200, 1000), "GBP": (500, None)}     # never added together
+    assert wb["Summary"].cell(4, 3).value == "Mar 2027"
+    assert sorted(r[0] for r in wb["Bordereau rows"].iter_rows(min_row=2, values_only=True)) == ["P1", "P2"]
+    rate = next(r for r in wb["Summary"].iter_rows(min_row=5, values_only=True)
+                if r[0] == "USD" and r[1] == "Commission rate")
+    assert rate[2] == pytest.approx(_totals(out)["commission_pct"]["current"]["value"] / 100)
+
+
+def test_a_broker_download_has_no_broker_sheet_or_column(files):
+    files.exports = [export(1, "2027-03", [full_row()], broker=50, program=11)]
+    out = fs.summary(None, BROKER)
+    wb = _book(out, fs.rows(None, BROKER, page_size=1_000_000)["items"], out["seat"])
+    assert "By broker" not in wb.sheetnames
+    assert "Broker" not in [c.value for c in wb["Bordereau rows"][1]]
+
+
+def test_a_row_with_an_unclear_figure_is_not_listed_but_its_clean_figures_count(files):
+    files.exports = [export(1, "2027-03", [full_row(gross=1000), full_row("P2", gross="TBC", net=500)])]
+    out = fs.summary(None, CARRIER)
+    g = next(x for x in out["groups"] if x["currency"] == "USD")
+    assert (g["rows"], g["listed_rows"]) == (2, 1)
+    listed = fs.rows(None, CARRIER)
+    assert [r["policy"] for r in listed["items"]] == ["P1"] and listed["total"] == 1
+    assert _totals(out)["net_premium"]["current"]["value"] == 1400     # P2's clean net still counts
