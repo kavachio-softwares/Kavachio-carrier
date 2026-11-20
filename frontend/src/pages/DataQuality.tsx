@@ -142,7 +142,7 @@ export default function DataQuality({ filters, onLists }: TabProps) {
         <div className="tile">
           <div className="k">
             Files handled
-            <InfoTip text={`Every file processed this ${PERIOD_WORD[cadence]}, counted once. A re-generate, self-check or preview is not a new file.`} />
+            <InfoTip text={`Files checked in the ${PERIOD_WORD[cadence]}. A corrected or resent version counts as a new file. Checking the same file again does not.`} />
           </div>
           <div className="v">{loading ? "…" : num(v?.files)}</div>
           <div className="foot">

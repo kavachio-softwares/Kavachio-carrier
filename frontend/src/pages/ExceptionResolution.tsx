@@ -57,15 +57,17 @@ function summaryLine(d: ExceptionResolutionReport, filtered: boolean, cadence: R
   const on = o.running ? "right now" : `on ${periodTitle("day", o.as_at)}`;
   const waitingPart = o.problems > 0
     ? ` ${plural(o.problems, "problem")} ${o.running ? (o.problems === 1 ? "is" : "are") : (o.problems === 1 ? "was" : "were")} `
-      + `waiting to be fixed ${on}`
+      + `still unresolved ${on}`
       + (o.past_target > 0 ? ` — ${num(o.past_target)} of them longer than the target.` : ", none longer than the target.")
-    : ` Nothing ${o.running ? "is" : "was"} waiting to be fixed${o.running ? "" : ` ${on}`}.`;
+    : ` Nothing ${o.running ? "is" : "was"} still unresolved${o.running ? "" : ` ${on}`}.`;
   return fixedPart + waitingPart;
 }
 
 /** One row per broker on each programme, most waiting longer than target first. */
-function ByBrokerProgramme({ rows, cadence, period }: {
+function ByBrokerProgramme({ rows, cadence, period, days }: {
   rows: FixGroupRow[]; cadence: ReportCadence; period: string;
+  /** The carrier's target in words: "5 days". */
+  days: string;
 }) {
   // "Fixed in October", or "Fixed in the week of 9 Nov 2026", "Fixed on 17 Nov 2026".
   const fixedIn = cadence === "month" ? `in ${fmtMonthName(period)}` : inPeriod(cadence, periodTitle(cadence, period));
@@ -80,7 +82,7 @@ function ByBrokerProgramme({ rows, cadence, period }: {
       <div className="card-h">
         <Users2 className="ci" />
         <h3>By broker and programme</h3>
-        <div className="right"><span className="sub">Most waiting longer than target first</span></div>
+        <div className="right"><span className="sub">Most problems over {days} first</span></div>
       </div>
       <div className="tbl-wrap">
         <table>
@@ -88,14 +90,14 @@ function ByBrokerProgramme({ rows, cadence, period }: {
             <tr>
               <th colSpan={2} />
               <th colSpan={3} style={{ ...split, textAlign: "center" }}>Fixed {fixedIn}</th>
-              <th colSpan={3} style={{ ...split, textAlign: "center" }}>Waiting now</th>
+              <th colSpan={3} style={{ ...split, textAlign: "center" }}>Current unresolved problems</th>
             </tr>
             <tr>
               <th className="l">Owner</th><th className="l">Programme</th>
               <th className="r" style={split}>Fixed</th><th className="r">Average fix time</th>
-              <th className="r">Within target</th>
-              <th className="r" style={split}>Waiting</th>
-              <th className="r">Longer than target</th><th className="r">Longest waiting</th>
+              <th className="r">Within {days}</th>
+              <th className="r" style={split}>Unresolved</th>
+              <th className="r">Over {days}</th><th className="r">Oldest problem</th>
             </tr>
           </thead>
           <tbody>
@@ -184,6 +186,8 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
   const open = data?.open;
   const atEnd = data?.at_end && !data.at_end.running ? `At ${periodTitle("day", data.at_end.as_at)}` : "Right now";
   const target = data?.target_days;
+  // "5 days": the carrier's own target, in the labels that name it.
+  const days = target != null ? plural(target, "day") : "the target";
   const filtered = programId != null || brokerId != null;
   const first = loading && !data;
   const what = PERIOD_WORD[cadence];
@@ -268,7 +272,7 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         </div>
         <div className="tile">
           <div className="k">
-            Waiting to be fixed
+            Still unresolved
             <InfoTip text="Every problem not fixed by the end of the period picked — or now, while it is still running — whatever month it was found in." />
             <When>{atEnd}</When>
           </div>
@@ -276,7 +280,7 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         </div>
         <div className="tile" style={(o?.past_target ?? 0) > 0 ? { borderColor: "#F3D2D7" } : undefined}>
           <div className="k">
-            Waiting longer than target
+            Unresolved for more than {days}
             <InfoTip text="Of those, the ones waiting longer than the target at that time — the ones to chase first." />
             <When>{atEnd}</When>
           </div>
@@ -290,13 +294,13 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
       <div className="card" style={{ marginBottom: 18 }}>
         <div className="card-h">
           <Hourglass className="ci" />
-          <h3>How long problems have been waiting</h3>
+          <h3>How long problems have been unresolved</h3>
           <InfoTip text="Every problem waiting to be fixed at the end of the period picked — or now, while it is still running — by how long it had been waiting." />
           <When>{atEnd}</When>
         </div>
         <div className="tbl-wrap">
           <table>
-            <thead><tr><th className="l">Waiting for</th><th className="r">Problems</th></tr></thead>
+            <thead><tr><th className="l">Unresolved for</th><th className="r">Open problems</th></tr></thead>
             <tbody>
               {(o?.by_age ?? []).map(b => (
                 <tr key={b.key}>
@@ -314,13 +318,13 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
         </div>
       </div>
 
-      <ByBrokerProgramme rows={data?.by_broker_programme ?? []} cadence={cadence} period={period} />
+      <ByBrokerProgramme rows={data?.by_broker_programme ?? []} cadence={cadence} period={period} days={days} />
 
       {/* ---- 41.3: everything waiting, one row per file and problem ------ */}
       <div className="card" style={{ marginBottom: 18 }}>
         <div className="card-h" style={{ flexWrap: "wrap" }}>
           <Hourglass className="ci" />
-          <h3>Waiting to be fixed</h3>
+          <h3>Unresolved problems – detailed list</h3>
           <InfoTip text="Every problem not fixed yet, as of today, one row per file and problem, longest waiting first. Owner = who must act: the file's broker, or the carrier if no broker sent it." />
           <div className="right">
             <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -339,8 +343,8 @@ export default function ExceptionResolution({ filters, onLists }: TabProps) {
             <thead>
               <tr>
                 <th className="l">Owner</th><th className="l">Programme</th>
-                <th className="l">Waiting for</th><th className="l">Problem</th><th className="r">Severity</th>
-                <th className="r">Problems</th><th className="l">File</th><th className="r">Action</th>
+                <th className="l">Unresolved for</th><th className="l">Problem</th><th className="r">Severity</th>
+                <th className="r">Count</th><th className="l">File</th><th className="r">Action</th>
               </tr>
             </thead>
             <tbody>

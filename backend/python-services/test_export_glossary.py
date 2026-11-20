@@ -178,8 +178,8 @@ def test_the_pdf_guide_is_read_from_the_pdf_tables(name):
 def test_a_section_left_out_leaves_its_columns_out_of_the_guide():
     full = _guide(load_workbook(io.BytesIO(_xlsx_of("operational"))))
     bare = _guide(load_workbook(io.BytesIO(_xlsx_of("operational", drop=("top_checks", "waiting")))))
-    assert "Severity" in full and "Who must act" in full
-    assert "Severity" not in bare and "Who must act" not in bare and "Waiting for" not in bare
+    assert "Severity" in full and "Owner" in full
+    assert "Severity" not in bare and "Owner" not in bare and "Unresolved for" not in bare
     # Executive: a report sent before the quality sections has no Severity.
     old = _guide(load_workbook(io.BytesIO(_xlsx_of("executive", full=False))))
     new = _guide(load_workbook(io.BytesIO(_xlsx_of("executive"))))
@@ -189,9 +189,10 @@ def test_a_section_left_out_leaves_its_columns_out_of_the_guide():
 def test_headings_that_change_with_the_period_are_still_matched():
     month = _guide(load_workbook(io.BytesIO(_xlsx_of("operational"))))
     week = _guide(load_workbook(io.BytesIO(_xlsx_of("operational", cadence="week", period="2026-10-26"))))
-    assert "Waiting to be fixed at month end" in month
-    assert "Waiting to be fixed at the end of the week" in week
-    assert month["Waiting to be fixed at month end"] == week["Waiting to be fixed at the end of the week"]
+    assert "Still unresolved at month end" in month
+    assert "Still unresolved at the end of the week" in week
+    assert month["Still unresolved at month end"] == week["Still unresolved at the end of the week"]
+    assert "longer than the target" in month["Unresolved for more than 5 days at month end"]
     # The period columns share one line, whatever they are called.
     assert any("October 2026" in k for k in month) and any("Week of 26 Oct 2026" in k for k in week)
     assert month["vs last month"] == week["vs last week"]

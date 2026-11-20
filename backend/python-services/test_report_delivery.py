@@ -353,7 +353,7 @@ def test_the_excel_file_has_one_sheet_per_part():
     pack = rd.build_pack(s, 1, "2026-10", now=NOW)
     wb = load_workbook(io.BytesIO(rd.render_xlsx(pack, "Test Carrier")))
     assert wb.sheetnames == ["Key numbers", "By broker and programme", "Checks that failed most",
-                             "Errors still waiting", "Waiting list", "Column Guide"]
+                             "Unresolved problems", "Unresolved problems list", "Column Guide"]
     assert wb["Key numbers"]["A1"].value == "Operational Report — October 2026"
     # The title is the box's first line, centred across the table; under it
     # the period in words and the dates it compares, then the table. Every
@@ -364,12 +364,12 @@ def test_the_excel_file_has_one_sheet_per_part():
     assert key["A1"].alignment.horizontal == "center"
     assert key["A3"].value.startswith("Covers 1 – 31 Oct 2026, compared with 1 – 30 Sep 2026")
     assert key["A4"].value == "Measure" and key["A5"].value == "Timeliness"
-    end = next(c.row for c in key["A"] if c.value == "Waiting longer than target at month end")
+    end = next(c.row for c in key["A"] if c.value == "Unresolved for more than 5 days at month end")
     assert key["A1"].border.top.style == "medium" and key["A4"].border.left.style == "medium"
     assert key.cell(row=end, column=6).border.bottom.style == "medium"
     assert key.cell(row=end + 2, column=1).value == "Green is better, red is worse, grey is only more or less work."
     assert key.cell(row=end + 2, column=1).border.left.style is None
-    assert wb["Errors still waiting"]["A3"].border.left.style == "medium"
+    assert wb["Unresolved problems"]["A3"].border.left.style == "medium"
     # Only the colour key under the table: no notes, no six months.
     assert key.cell(row=end + 3, column=1).value is None
 
@@ -393,10 +393,10 @@ def test_a_full_month_renders_in_both_files_with_its_comparisons():
     ws = load_workbook(io.BytesIO(rd.render_xlsx(pack, "Test Carrier")))["Key numbers"]
     rows = {r[0]: r for r in ws.iter_rows(min_row=5, values_only=True) if r[0]}
     # October 1 of 1 on time; September's file was 3 days late.
-    assert rows["Arrived on time"][1] == 1.0 and rows["Arrived on time"][2] == 0.0
-    assert rows["Arrived on time"][3] == "+100 pts"
+    assert rows["Files received on time"][1] == 1.0 and rows["Files received on time"][2] == 0.0
+    assert rows["Files received on time"][3] == "+100 pts"
     assert rows["Errors found"][1:4] == (3, 6, "-50%")
-    assert rows["Arrived on time"][4] == "Not available"      # October 2025: before the records
+    assert rows["Files received on time"][4] == "Not available"      # October 2025: before the records
 
 
 def test_changes_read_the_way_the_screen_reads_them():
@@ -415,14 +415,14 @@ def test_a_week_renders_in_both_files_named_for_its_dates():
     pack = rd.build_pack(s, 1, "2026-10-26", now=NOW, cadence="week")
     wb = load_workbook(io.BytesIO(rd.render_xlsx(pack, "Test Carrier")))
     assert wb.sheetnames == ["Key numbers", "By broker and programme", "Checks that failed most",
-                             "Errors still waiting", "Waiting list", "Column Guide"]
+                             "Unresolved problems", "Unresolved problems list", "Column Guide"]
     ws = wb["Key numbers"]
     assert ws["A1"].value == "Operational Report — Week of 26 Oct 2026"
     assert ws["A3"].value == "Covers 26 Oct – 1 Nov 2026, compared with 19 – 25 Oct 2026 and 27 Oct – 2 Nov 2025."
     assert [c.value for c in ws[4]][:6] == ["Measure", "Week of 26 Oct 2026", "Week of 19 Oct 2026",
                                             "vs last week", "Week of 27 Oct 2025", "vs last year"]
     labels = [r[0] for r in ws.iter_rows(min_row=5, values_only=True) if r[0]]
-    assert "Waiting to be fixed at the end of the week" in labels
+    assert "Still unresolved at the end of the week" in labels
     assert rd.render_pdf(pack, "Test Carrier").startswith(b"%PDF")
     assert [n for n, _d, _m in rd.files(pack, "both", "Test Carrier")] == [
         "Operational Report week of 2026-10-26.pdf", "Operational Report week of 2026-10-26.xlsx"]
@@ -478,17 +478,21 @@ def test_the_files_carry_the_checks_that_failed_and_the_errors_still_waiting():
         "Broker 8", 2, 1)
 
     wb = load_workbook(io.BytesIO(rd.render_xlsx(pack, "Test Carrier")))
+    # The broker sheet says it in the Key numbers' words, the target included.
+    bp = [c.value for c in wb["By broker and programme"][1]]
+    assert (bp[2], bp[3], bp[10]) == ("Files expected so far", "Files received on time",
+                                      "Unresolved for more than 5 days")
     checks = wb["Checks that failed most"]
     # Counts only — no share columns, as on screen.
     assert [c.value for c in checks[1]] == ["#", "Check", "Severity", "Files", "Errors"]
     assert (checks["B2"].value, checks["E2"].value) == ("Premium must be more than 0", 1)
-    waiting = wb["Errors still waiting"]
-    assert waiting["A1"].value.startswith("As at 4 Nov 2026: 2 waiting, 1 longer than the 5-day target")
+    waiting = wb["Unresolved problems"]
+    assert waiting["A1"].value.startswith("As at 4 Nov 2026: 2 unresolved, 1 unresolved for more than 5 days")
     assert [waiting.cell(row=r, column=1).value for r in range(4, 8)] == [
         "0–2 days", "3–7 days", "8–30 days", "Over 30 days"]
-    assert [c.value for c in waiting[3]][:3] == ["Waiting for", "Errors", "Past the target"]
+    assert [c.value for c in waiting[3]][:3] == ["Unresolved for", "Open problems", "Past the target"]
     assert waiting["A10"].value == "Broker 8"
-    listed = wb["Waiting list"]
+    listed = wb["Unresolved problems list"]
     # The longest waiting first, one row per file and check.
     assert (listed["A2"].value, listed["D2"].value, listed["G2"].value) == (
         "Broker 8", "Premium must be more than 0", 1)

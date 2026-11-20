@@ -336,15 +336,15 @@ def measures(pack: dict) -> list[tuple[str, str, list[dict]]]:
     days = f"{pack['target_days']} day{'' if pack['target_days'] == 1 else 's'}"
     return [
         ("timeliness", "Timeliness", [
-            row("Files due", lambda m: T(m)["due"], lambda m: _num(T(m)["due"]), "count", "none", "count"),
-            row("Arrived on time", lambda m: T(m)["on_time_pct"],
+            row("Files expected", lambda m: T(m)["due"], lambda m: _num(T(m)["due"]), "count", "none", "count"),
+            row("Files received on time", lambda m: T(m)["on_time_pct"],
                 lambda m: _of(T(m)["on_time"], T(m)["due_so_far"], T(m)["on_time_pct"]), "points", "up", "pct"),
-            row("Arrived late", lambda m: T(m)["late"], lambda m: _num(T(m)["late"]), "count", "down", "count"),
+            row("Files received late", lambda m: T(m)["late"], lambda m: _num(T(m)["late"]), "count", "down", "count"),
             row("Overdue", lambda m: T(m)["overdue"], lambda m: _num(T(m)["overdue"]), "count", "down", "count"),
-            row("Never arrived", lambda m: T(m)["never"], lambda m: _num(T(m)["never"]), "count", "down", "count"),
-            row("Average days late", lambda m: T(m)["avg_days_late"], lambda m: _took(T(m)["avg_days_late"]),
+            row("Files never received", lambda m: T(m)["never"], lambda m: _num(T(m)["never"]), "count", "down", "count"),
+            row("Average delay", lambda m: T(m)["avg_days_late"], lambda m: _took(T(m)["avg_days_late"]),
                 "time", "down", "days"),
-            row("Late-file cases still open", lambda m: T(m)["cases_open"], lambda m: _num(T(m)["cases_open"]),
+            row("Unresolved late-file cases", lambda m: T(m)["cases_open"], lambda m: _num(T(m)["cases_open"]),
                 "count", "down", "count"),
         ]),
         ("volumes", "Volumes", [
@@ -372,9 +372,9 @@ def measures(pack: dict) -> list[tuple[str, str, list[dict]]]:
             row(f"Fixed within target ({days})", lambda m: F(m)["within_target_pct"],
                 lambda m: _of(F(m)["within_target"], F(m)["fixed"], F(m)["within_target_pct"]),
                 "points", "up", "pct"),
-            row(f"Waiting to be fixed at {end}", lambda m: F(m)["waiting"],
+            row(f"Still unresolved at {end}", lambda m: F(m)["waiting"],
                 lambda m: _num(F(m)["waiting"]), "share", "down", "count"),
-            row(f"Waiting longer than target at {end}", lambda m: F(m)["waiting_past_target"],
+            row(f"Unresolved for more than {days} at {end}", lambda m: F(m)["waiting_past_target"],
                 lambda m: _num(F(m)["waiting_past_target"]), "count", "down", "count"),
         ]),
     ]
@@ -398,7 +398,7 @@ def headline(pack: dict) -> list[tuple[str, str]]:
                                        q["clean_first_time_pct"])),
         ("Errors found", f"{_num(q['errors'])} ({_num(q['critical'])} critical)"),
         ("Average fix time", _took(f["avg_days"])),
-        (f"Waiting longer than target at {END_WORDS[c]}", _num(f["waiting_past_target"])),
+        (f"Unresolved for more than {_days_word(pack)} at {END_WORDS[c]}", _num(f["waiting_past_target"])),
     ]
 
 
@@ -643,8 +643,8 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
         story.append(para(COLOUR_KEY, small))
 
     story.append(para("By broker and programme", h2))
-    rows = [["Broker", "Programme", "Files on time", "Clean first time", "Errors",
-             "Average fix time", "Waiting longer than target"]]
+    rows = [["Broker", "Programme", "Files received on time", "Clean first time", "Errors",
+             "Average fix time", f"Unresolved for more than {_days_word(pack)}"]]
     for b in pack["by_broker_programme"]:
         rows.append([para(b.get("broker_name") or "—", cell),
                      para(b.get("programme_name") or "—", cell),
@@ -653,7 +653,7 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
                      _num(b["errors"]), _took(b["avg_fix_days"]), _num(b["waiting_past_target"])])
     if len(rows) == 1:
         rows.append([f"Nothing this {what}", "", "", "", "", "", ""])
-    story.append(table(rows, [doc.width * w for w in (.2, .2, .13, .13, .09, .11, .14)], left=2))
+    story.append(table(rows, [doc.width * w for w in (.18, .18, .13, .11, .08, .11, .21)], left=2))
 
     # 40.1 — what the checks found most (the Data Quality tab's list, top 5).
     top = pack.get("top_checks")
@@ -672,7 +672,7 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
     # Exception Resolution tab's numbers, as at the day the file was made).
     w = pack.get("waiting")
     if w is not None:
-        rows = [["Waiting for", "Errors"]]
+        rows = [["Unresolved for", "Open problems"]]
         tones = []
         for b in w["by_age"]:
             late = b["past_target"] and b["problems"] > 0
@@ -681,15 +681,15 @@ def render_pdf(pack: dict, carrier: str, scope: str = "") -> bytes:
                 tones.append((len(rows) - 1, 0, "crit"))
         # The heading, the counts and the age table stay on one page.
         story.append(KeepTogether([
-            para(f"Errors still waiting, as at {_short_day(w['as_at'])}", h2),
-            para(f"{_num(w['problems'])} waiting · {_num(w['past_target'])} longer than the "
-                 f"{w['target_days']}-day target · longest waiting {_age(w['oldest_days'])}.", sub),
+            para(f"Unresolved problems, as at {_short_day(w['as_at'])}", h2),
+            para(f"{_num(w['problems'])} unresolved · {_num(w['past_target'])} unresolved for more than "
+                 f"{_days_word(pack)} · oldest problem {_age(w['oldest_days'])}.", sub),
             Spacer(1, 4),
             table(rows, [doc.width * x for x in (.24, .1)], tones=tones),
         ]))
         story.append(Spacer(1, 8))
         shown = w["by_owner"][:10]
-        rows = [["Who must act", "Programme", "Waiting", "Longer than target", "Longest waiting"]]
+        rows = [["Owner", "Programme", "Unresolved", f"Over {_days_word(pack)}", "Oldest problem"]]
         tones = []
         for g in shown:
             rows.append([para(g.get("owner") or "—", cell), para(g.get("programme_name") or "—", cell),
@@ -816,9 +816,9 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
         ws.column_dimensions[col].width = 18
 
     wb2 = wb.create_sheet("By broker and programme")
-    heads = ["Broker", "Programme", "Files due so far", "Arrived on time", "On time %",
+    heads = ["Broker", "Programme", "Files expected so far", "Files received on time", "On time %",
              "Files checked", "Clean first time", "Clean first time %", "Errors",
-             "Average fix time (days)", "Waiting longer than target"]
+             "Average fix time (days)", f"Unresolved for more than {_days_word(pack)}"]
     for c, h in enumerate(heads, 1):
         put(wb2, 1, c, h, font=bold, fill=grey)
     for i, b in enumerate(pack["by_broker_programme"], 2):
@@ -829,7 +829,7 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
                 b["errors"], b["avg_fix_days"], b["waiting_past_target"]]
         for c, v in enumerate(vals, 1):
             put(wb2, i, c, v, "0%" if c in (5, 8) else ("0.0" if c == 10 else None))
-    for col, w in zip("ABCDEFGHIJK", (28, 28, 14, 14, 11, 13, 15, 16, 10, 20, 24)):
+    for col, w in zip("ABCDEFGHIJK", (28, 28, 22, 23, 11, 13, 15, 16, 10, 20, 33)):
         wb2.column_dimensions[col].width = w
     tables.append((wb2, 1, wb2.max_row, len(heads)))
 
@@ -856,12 +856,12 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
     # and who has to act; then the whole list, one row per file and check.
     wt = pack.get("waiting")
     if wt is not None:
-        sh = wb.create_sheet("Errors still waiting")
-        banner(sh, 1, f"As at {_short_day(wt['as_at'])}: {_num(wt['problems'])} waiting, "
-                      f"{_num(wt['past_target'])} longer than the {wt['target_days']}-day target, "
-                      f"longest waiting {_age(wt['oldest_days'])}.", 5, font=bold, height=20)
+        sh = wb.create_sheet("Unresolved problems")
+        banner(sh, 1, f"As at {_short_day(wt['as_at'])}: {_num(wt['problems'])} unresolved, "
+                      f"{_num(wt['past_target'])} unresolved for more than {_days_word(pack)}, "
+                      f"oldest problem {_age(wt['oldest_days'])}.", 5, font=bold, height=20)
         tables.append((sh, 1, 1, 5))
-        heads = ["Waiting for", "Errors", "Past the target"]
+        heads = ["Unresolved for", "Open problems", "Past the target"]
         for c, h in enumerate(heads, 1):
             put(sh, 3, c, h, font=bold, fill=grey)
         for i, b in enumerate(wt["by_age"], 4):
@@ -871,7 +871,7 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
                 font=tone_font["crit"] if b["past_target"] and b["problems"] else None)
         tables.append((sh, 3, 3 + len(wt["by_age"]), len(heads)))
         first = 5 + len(wt["by_age"])
-        heads = ["Who must act", "Programme", "Waiting", "Longer than target", "Longest waiting (days)"]
+        heads = ["Owner", "Programme", "Unresolved", f"Over {_days_word(pack)}", "Oldest problem (days)"]
         for c, h in enumerate(heads, 1):
             put(sh, first, c, h, font=bold, fill=grey)
         for i, g in enumerate(wt["by_owner"], first + 1):
@@ -886,9 +886,9 @@ def render_xlsx(pack: dict, carrier: str, scope: str = "") -> bytes:
         for col, w in zip("ABCDE", (34, 34, 12, 20, 24)):
             sh.column_dimensions[col].width = w
 
-        sh = wb.create_sheet("Waiting list")
-        heads = ["Who must act", "Programme", "Waiting for (days)", "Problem", "Severity",
-                 "Errors", "Longer than target", "File", "Period"]
+        sh = wb.create_sheet("Unresolved problems list")
+        heads = ["Owner", "Programme", "Unresolved for (days)", "Problem", "Severity",
+                 "Count", f"Over {_days_word(pack)}", "File", "Period"]
         for c, h in enumerate(heads, 1):
             put(sh, 1, c, h, font=bold, fill=grey)
         for i, g in enumerate(wt["groups"], 2):

@@ -60,18 +60,18 @@ TERMS: list[tuple[tuple[str, ...], str]] = [
     (("Open for",), "How many days it has been open."),
     (("Now",), "Where it stands today: still open, or how it ended."),
     # timeliness
-    (("Files due", "Files due so far"), "How many files brokers had to send whose due date has passed or falls in "
+    (("Files due", "Files due so far", "Files expected"), "How many files brokers had to send whose due date has passed or falls in "
                                         "the period. A programme with no broker is not counted."),
     (("Files received",), "How many of the files due have arrived."),
-    (("On time", "Arrived on time", "Files on time"), "Files that arrived on or before their due date."),
+    (("On time", "Arrived on time", "Files on time", "Files received on time"), "Files that arrived on or before their due date."),
     (("On time %",), "Files that arrived on or before their due date, as a percentage of the files due."),
-    (("Late", "Arrived late"), "Files that arrived, but after their due date."),
+    (("Late", "Arrived late", "Files received late"), "Files that arrived, but after their due date."),
     (("Missing",), "Files that were due but have not arrived."),
     (("Late or missing",), "Files that arrived late or have not arrived at all."),
     (("Overdue",), "The due date has passed, no file has come yet, and the broker can still send it."),
-    (("Never arrived",), "The next period has started and this period's file still never came."),
-    (("Average days late",), "For the files that came late: how many days late they were, on average."),
-    (("Late-file cases still open",), "Late files still being followed up. They can be Overdue (past due), "
+    (("Never arrived", "Files never received"), "The next period has started and this period's file still never came."),
+    (("Average days late", "Average delay"), "For the files that came late: how many days late they were, on average."),
+    (("Late-file cases still open", "Unresolved late-file cases"), "Late files still being followed up. They can be Overdue (past due), "
                                       "Delinquent (still missing many days after the due date), In dispute (the "
                                       "broker disagrees) or Extended (the broker was given more time)."),
     # volumes
@@ -110,17 +110,19 @@ TERMS: list[tuple[tuple[str, ...], str]] = [
     (("Problems fixed", "Problems put right"), "How many problems have been fixed."),
     (("Put right %",), "Problems fixed as a percentage of problems found."),
     (("Problems found",), "How many problems were found when the files first arrived."),
-    (("Problems still open", "Open problems", "Waiting", "Waiting to be fixed"),
+    (("Problems still open", "Open problems", "Waiting", "Waiting to be fixed", "Still unresolved",
+      "Unresolved"),
      "Problems found but not fixed yet (at the end of the period, or today if the period has not ended)."),
     (("New problems",), "Problems found that day."),
     (("Files still with problems",), "Files whose latest version still has problems waiting to be fixed."),
     (("Average fix time",), "On average, how long it took from finding a problem to fixing it."),
     (("Fixed within target",), "How many problems were fixed within the target time ({target})."),
-    (("Waiting longer than target", "Longer than target", "Past the target"),
+    (("Waiting longer than target", "Longer than target", "Past the target", "Unresolved for more than",
+      "Over"),
      "Problems that have waited longer than the target time ({target}) to be fixed. These are the ones to chase "
      "first."),
-    (("Waiting for",), "How long the problems have been waiting to be fixed: {age_bands}."),
-    (("Longest waiting",), "How many days the oldest unfixed problem has been waiting."),
+    (("Waiting for", "Unresolved for"), "How long the problems have been waiting to be fixed: {age_bands}."),
+    (("Longest waiting", "Oldest problem"), "How many days the oldest unfixed problem has been waiting."),
     (("Escalations", "New escalations"), "Open problems that need a manager to step in: a file still missing long "
                                          "after its due date, a disagreement waiting for the carrier's decision, "
                                          "or anything left open past its due date."),

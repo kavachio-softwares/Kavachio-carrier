@@ -100,30 +100,30 @@ function measures(r: MonthlyReport) {
   // "at month end" for a month; "at the end of the week" and so on otherwise.
   const end = monthly ? "month end" : `the end of the ${what}`;
   const timeliness: Measure[] = [
-    { label: "Files due", value: m => m.timeliness.due, show: m => num(m.timeliness.due),
+    { label: "Files expected", value: m => m.timeliness.due, show: m => num(m.timeliness.due),
       kind: "count", better: "none", opens: "calendar",
-      tip: `Files whose due date falls in the ${what}. A programme with no broker owes nothing and is left out.` },
-    { label: "Arrived on time", value: m => m.timeliness.on_time_pct,
+      tip: `Files brokers had to send in the ${what}. Programmes with no broker are not counted.` },
+    { label: "Files received on time", value: m => m.timeliness.on_time_pct,
       show: m => ofPct(m.timeliness.on_time, m.timeliness.due_so_far, m.timeliness.on_time_pct),
       kind: "points", better: "up", opens: "calendar",
-      tip: "Of the files already due, how many came on or before their due date." },
-    { label: "Arrived late", value: m => m.timeliness.late, show: m => num(m.timeliness.late),
+      tip: "Files that came on or before their due date. Only files already due are counted." },
+    { label: "Files received late", value: m => m.timeliness.late, show: m => num(m.timeliness.late),
       kind: "count", better: "down", opens: "calendar" },
     { label: "Overdue", value: m => m.timeliness.overdue, show: m => num(m.timeliness.overdue),
-      kind: "count", better: "down", opens: "calendar", tip: "Past the due date, nothing yet, and still expected." },
-    { label: "Never arrived", value: m => m.timeliness.never, show: m => num(m.timeliness.never),
-      kind: "count", better: "down", opens: "calendar", tip: "The next period began and this one's file never came." },
-    { label: "Average days late", value: m => m.timeliness.avg_days_late,
+      kind: "count", better: "down", opens: "calendar", tip: "Files past their due date that have not come yet." },
+    { label: "Files never received", value: m => m.timeliness.never, show: m => num(m.timeliness.never),
+      kind: "count", better: "down", opens: "calendar", tip: `Files that never came, even after the next ${what} started.` },
+    { label: "Average delay", value: m => m.timeliness.avg_days_late,
       show: m => fmtTook(m.timeliness.avg_days_late), kind: "time", better: "down", opens: "calendar",
-      tip: "For the files that arrived late: how many days after their due date, on average." },
-    { label: "Late-file cases still open", value: m => m.timeliness.cases_open,
+      tip: "How many days late the late files were, on average." },
+    { label: "Unresolved late-file cases", value: m => m.timeliness.cases_open,
       show: m => num(m.timeliness.cases_open), kind: "count", better: "down", opens: "calendar",
-      tip: `Files due this ${what} whose late-file case is not settled yet — Overdue, Delinquent, In dispute or Extended. As it stands today.` },
+      tip: "Late files whose case is still open: overdue, very late, in dispute or given more time. Counted as of today." },
   ];
   const volumes: Measure[] = [
     { label: "Files handled", value: m => m.volumes.files, show: m => num(m.volumes.files),
       kind: "share", better: "none", opens: { policies: "files" },
-      tip: `Files checked in the ${what}, each counted once.` },
+      tip: `Files checked in the ${what}. A corrected or resent version counts as a new file. Checking the same file again does not.` },
     { label: "Rows handled", value: m => m.volumes.rows, show: m => num(m.volumes.rows),
       kind: "share", better: "none", opens: { policies: "rows" } },
     { label: `New${unit}`, value: m => m.volumes.new, show: m => num(m.volumes.new),
@@ -136,7 +136,7 @@ function measures(r: MonthlyReport) {
   const quality: Measure[] = [
     { label: "Errors found", value: m => m.quality.errors, show: m => num(m.quality.errors),
       kind: "share", better: "down", opens: { policies: "errors" },
-      tip: "Every error the checks found, as each file first arrived." },
+      tip: "All errors found when each file first came in." },
     { label: "Critical errors", value: m => m.quality.critical, show: m => num(m.quality.critical),
       kind: "share", better: "down", opens: { policies: "critical" } },
     { label: "Rows with errors", value: m => m.quality.rows_with_errors_pct,
@@ -145,29 +145,25 @@ function measures(r: MonthlyReport) {
     { label: "Files clean first time", value: m => m.quality.clean_first_time_pct,
       show: m => ofPct(m.quality.clean_first_time, m.volumes.files, m.quality.clean_first_time_pct),
       kind: "points", better: "up", opens: { policies: "clean" },
-      tip: "Files that passed every check when they arrived, so nobody had to fix, re-send or release them." },
+      tip: "Files with no errors when they first came in, so nobody had to fix them." },
     { label: "Most common problem", value: () => null, show: m => m.quality.top_check ?? "—",
       kind: "count", better: "none" },
   ];
   const fixes: Measure[] = [
     { label: "Problems fixed", value: m => m.fixes.fixed, show: m => num(m.fixes.fixed),
-      kind: "share", better: "none", opens: "fixes", tip: `Problems fixed in the ${what}, whenever they were found.` },
+      kind: "share", better: "none", opens: "fixes", tip: `Problems fixed in the ${what}, even if they were found earlier.` },
     { label: "Average fix time", value: m => m.fixes.avg_days, show: m => fmtTook(m.fixes.avg_days),
       kind: "time", better: "down", opens: "fixes" },
     { label: `Fixed within target (${plural(r.target_days, "day")})`,
       value: m => m.fixes.within_target_pct,
       show: m => ofPct(m.fixes.within_target, m.fixes.fixed, m.fixes.within_target_pct),
       kind: "points", better: "up", opens: "fixes" },
-    { label: `Waiting to be fixed at ${end}`, value: m => m.fixes.waiting,
+    { label: `Still unresolved at ${end}`, value: m => m.fixes.waiting,
       show: m => num(m.fixes.waiting), kind: "share", better: "down", opens: "fixes",
-      tip: monthly
-        ? "Problems found but not fixed by the month's last day. For the month still running, as of today."
-        : `Problems found but not fixed by the end of the ${what}. For a ${what} still running, as of today.` },
-    { label: `Waiting longer than target at ${end}`, value: m => m.fixes.waiting_past_target,
+      tip: `Problems not fixed by the end of the ${what}. If the ${what} is not over yet, counted as of today.` },
+    { label: `Unresolved for more than ${plural(r.target_days, "day")} at ${end}`, value: m => m.fixes.waiting_past_target,
       show: m => num(m.fixes.waiting_past_target), kind: "count", better: "down", opens: "fixes",
-      tip: monthly
-        ? "Of those, the ones already older than the target on the month's last day."
-        : `Of those, the ones already older than the target at the end of the ${what}.` },
+      tip: `Of the problems above, those open for more than ${plural(r.target_days, "day")} at the end of the ${what}.` },
   ];
   return { timeliness, volumes, quality, fixes };
 }
@@ -282,14 +278,14 @@ export default function MonthlyOverview({ filters, onLists, qs }: TabProps) {
 
   const groups = r && ms ? [
     { title: "Timeliness", rows: ms.timeliness,
-      to: `/bordereau-calendar?month=${calendarMonth}`, link: "Open Bordereau Calendar",
+      to: `/bordereau-calendar?month=${calendarMonth}`, link: "View Bordereau Calendar",
       note: noneDue ? `No files were due in this ${what}` : null },
     { title: "Volumes", rows: ms.volumes,
-      to: `/monthly-report/data-quality${qs}`, link: "Open Data Quality", note: null },
+      to: `/monthly-report/data-quality${qs}`, link: "View Data Quality", note: null },
     { title: "Data quality", rows: ms.quality,
-      to: `/monthly-report/data-quality${qs}`, link: "Open Data Quality", note: null },
+      to: `/monthly-report/data-quality${qs}`, link: "View Data Quality", note: null },
     { title: "Fixes", rows: ms.fixes,
-      to: `/monthly-report/exception-resolution${qs}`, link: "Open Exception Resolution", note: null },
+      to: `/monthly-report/exception-resolution${qs}`, link: "View Exception Resolution", note: null },
   ] : [];
   const columns = r?.last_year ? 6 : 4;
 
