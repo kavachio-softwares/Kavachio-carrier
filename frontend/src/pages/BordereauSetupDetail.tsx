@@ -14,6 +14,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Banner } from "../components/ui/Banner";
 import { Modal } from "../components/ui/Modal";
+import { RestoreSetupModal } from "../components/RestoreSetupModal";
 import { Sk } from "../components/ui/Skeleton";
 import {
   ContractInline, ContractStatusChip, InlineExtraTab, isLibraryText,
@@ -108,6 +109,7 @@ export default function BordereauSetupDetail() {
   // Activation straight from this read-only view: a setup that only needs to be
   // switched on shouldn't have to be opened in the editor and re-saved.
   const [confirmActivate, setConfirmActivate] = useState(false);
+  const [restoring, setRestoring] = useState(false);
   const [activating, setActivating] = useState(false);
   // Which of the two carrier seats is reading this. A carrier USER finishing a
   // setup sends it up for approval; the carrier ADMIN puts it live, and is the
@@ -386,7 +388,15 @@ export default function BordereauSetupDetail() {
                 waiting is the admin's to decide on. A button labelled
                 "Activate" for somebody who cannot activate would be a button
                 that lies about what it does. */}
-            {pipeline && pipeline.status !== "active" && !pending && (
+            {/* A setup that was REPLACED is switched back on deliberately: it
+                says what it replaces, asks why, and is recorded (51.1). */}
+            {pipeline && pipeline.status === "superseded" && isAdmin && (
+              <Button variant="secondary" disabled={activating} onClick={() => setRestoring(true)}>
+                <ShieldCheck size={15} /> Make active again
+              </Button>
+            )}
+            {pipeline && pipeline.status !== "active" && !pending
+              && !(pipeline.status === "superseded" && isAdmin) && (
               <Button variant="secondary" disabled={activating}
                 onClick={() => { setActivateErr(null); setConfirmActivate(true); }}>
                 <ShieldCheck size={15} />
@@ -764,6 +774,14 @@ export default function BordereauSetupDetail() {
           goes live alongside — and none of that changes the decision being
           made: either every bordereau runs through this setup or it does not.
           A dialog people skip is a dialog that is not asking anything. */}
+      {pipeline && (
+        <RestoreSetupModal pipelineId={pipeline.id} open={restoring} onClose={() => setRestoring(false)}
+          onDone={async () => {
+            setRestoring(false);
+            const { data } = await api.get<PipelineDetail>(`/pipelines/${pipeline.id}`);
+            setPipeline(data);
+            setActivateMsg("This setup is active again. Files already processed were not changed.");
+          }} />)}
       <Modal open={confirmActivate}
         title={pending ? "Approve this setup?"
                : isAdmin ? "Activate this setup?" : "Send this for approval?"}

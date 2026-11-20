@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 
 import audit_feed
+import audit_one
 from auth_deps import Principal, current_principal
 from db import SessionLocal
 
@@ -62,6 +63,10 @@ def audit_logs(
     action: Optional[str] = None,
     q: Optional[str] = None,
     record: Optional[str] = None,
+    verb: Optional[str] = None,
+    programme: Optional[int] = None,
+    status: Optional[str] = None,
+    tz: int = 0,
     principal: Principal = Depends(current_principal),
 ):
     """One page of this seat's audit trail.
@@ -73,8 +78,9 @@ def audit_logs(
     """
     with SessionLocal() as s:
         v = audit_feed.viewer_for(s, principal)
-        return audit_feed.page(s, v, _filters(days, since, until, actor, action, q, record),
-                               page, page_size)
+        # Area (`action`), Action (`verb`), Programme and Status: audit_one.
+        f = audit_one.narrow(s, _filters(days, since, until, actor, None, q, record), action or "", verb or "")
+        return audit_one.page(s, v, f, page, page_size, programme=programme, status=status or "", tz=tz)
 
 
 @router.get("/logs/group")
@@ -100,13 +106,27 @@ def audit_log_group(
                                      key, offset, limit)
 
 
+@router.get("/logs/event")
+def audit_log_event(id: str, tz: int = 0, principal: Principal = Depends(current_principal)):
+    """One entry in full for the Event details panel (audit_one.event): who,
+    what, what changed and why, everything else it recorded, and what was done
+    to the same record before. Same scope as the list."""
+    from fastapi import HTTPException
+    with SessionLocal() as s:
+        out = audit_one.event(s, audit_feed.viewer_for(s, principal), id, tz)
+    if out is None:
+        raise HTTPException(404, "That entry is not one you can see.")
+    return out
+
+
 @router.get("/options")
 def audit_options(principal: Principal = Depends(current_principal)):
     """The dropdown contents — built from what this seat can actually see, so
     no filter is offered that could only ever return nothing, and no name
     reaches a dropdown that the table itself would mask."""
     with SessionLocal() as s:
-        return audit_feed.options(s, audit_feed.viewer_for(s, principal))
+        v = audit_feed.viewer_for(s, principal)
+        return {**audit_feed.options(s, v), **audit_one.options(s, v)}
 
 
 # --- the download ----------------------------------------------------------
@@ -122,8 +142,11 @@ _COLUMNS = [
     ("actor_role",   "Role"),
     ("actor_org",    "Organisation"),
     ("carrier",      "Carrier"),
+    ("area",         "Area"),
     ("action_label", "Action"),
     ("detail",       "What exactly"),
+    ("old",          "Old value"),
+    ("new",          "New value"),
     ("bulk",         "Bulk update"),
     ("target_kind",  "Target type"),
     ("target",       "Target / file"),
@@ -162,6 +185,10 @@ def audit_export(
     action: Optional[str] = None,
     q: Optional[str] = None,
     record: Optional[str] = None,
+    verb: Optional[str] = None,
+    programme: Optional[int] = None,
+    status: Optional[str] = None,
+    tz: int = 0,
     principal: Principal = Depends(current_principal),
 ):
     """Every row the current filters select, capped at audit_feed.MAX_EXPORT_ROWS.
@@ -172,8 +199,8 @@ def audit_export(
     """
     with SessionLocal() as s:
         v = audit_feed.viewer_for(s, principal)
-        rows = audit_feed.export_rows(
-            s, v, _filters(days, since, until, actor, action, q, record))
+        f = audit_one.narrow(s, _filters(days, since, until, actor, None, q, record), action or "", verb or "")
+        rows = audit_one.export_rows(s, v, f, programme=programme, status=status or "", tz=tz)
 
     if (format or "csv").lower() in ("xlsx", "excel"):
         return _xlsx(rows)
@@ -212,7 +239,7 @@ def _xlsx(rows: list[dict]) -> Response:
         cell.alignment = Alignment(vertical="center")
     for r in rows:
         ws.append([_cell(r, k) for k, _label in _COLUMNS])
-    widths = [20, 26, 26, 26, 22, 42, 64, 30, 20, 36, 14, 12, 15, 26]
+    widths = [20, 26, 26, 26, 22, 24, 42, 64, 30, 30, 30, 20, 36, 14, 12, 15, 26]
     for i, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
     ws.freeze_panes = "A2"

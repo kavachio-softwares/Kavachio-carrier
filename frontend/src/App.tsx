@@ -18,6 +18,7 @@ import PersonActivity from "./pages/PersonActivity";
 import FilesByCarrier from "./pages/FilesByCarrier";
 import BrokerContracts from "./pages/BrokerContracts";
 import BrokerProgrammeRules from "./pages/BrokerProgrammeRules";
+import BrokerAuditFindings from "./pages/BrokerAuditFindings";
 import BrokerInvitations from "./pages/BrokerInvitations";
 import BrokerBordereau from "./pages/BrokerBordereau";
 import TenantDetail from "./pages/TenantDetail";
@@ -182,6 +183,7 @@ export default function App() {
         <Route path="/broker" element={<BrokerDashboard />} />
         <Route path="/broker/contracts" element={<BrokerContracts />} />
         <Route path="/broker/programme-rules" element={<BrokerProgrammeRules />} />
+        <Route path="/broker/audit-findings" element={<BrokerAuditFindings />} />
         {/* The broker's monthly run — the broker admin's. */}
         <Route path="/broker/bordereau" element={<BrokerBordereau />} />
         <Route path="/broker/runs" element={<BrokerRuns />} />

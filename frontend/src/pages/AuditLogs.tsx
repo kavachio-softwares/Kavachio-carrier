@@ -1,29 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { Activity, Download, Eye, Paperclip, Search, ShieldCheck, Users } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
 import {
-  downloadAuditLogs, downloadCorrectionEvidence, getAuditGroup, getAuditLogs, getAuditOptions,
-  type AuditOptions, type AuditQuery, type AuditRow,
+  Activity, Calendar, ChevronDown, ChevronUp, Download, Eye, Paperclip, RotateCcw, Search, ShieldCheck, User, Users, X,
+} from "lucide-react";
+import {
+  downloadAuditLogs, downloadCorrectionEvidence, getAuditEvent, getAuditGroup, getAuditLogs, getAuditOptions,
+  type AuditEvent, type AuditOptions, type AuditQuery, type AuditRow,
 } from "../api/audit";
 import { downloadErrorText } from "../api/client";
-import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useServerList } from "../hooks/useServerList";
 import { Pagination } from "../components/Pagination";
 import { fmtDateTime } from "../utils/date";
 import { InfoTip } from "../components/InfoTip";
-import { getTrailSummary, type TrailSummary } from "../api/auditHistory";
-import {
-  ContractHistory, DownloadsViews, Facts, FileVersions, PartnerSubmissions, SidePanel, Tile, tiles,
-} from "./AuditHistoryTabs";
-// Tasks 48.1, 48.2 and 49.1 — each in its own file.
-import ChangeHistoryTab from "./ChangeHistoryTab";
-import RuleHistoryTab from "./RuleHistoryTab";
-import AuditReinsurerViews from "./AuditReinsurerViews";
+import { getHistoryChoices, getTrailSummary, type Choice, type TrailSummary } from "../api/auditHistory";
+import { userRole } from "../auth";
+import { AuditsTab } from "./AuditManagement";
+import { PackageModal } from "./AuditPackage";
+import { IntegrityRetention } from "./IntegrityRetention";
+import { Facts, PartnerMonitoring, SidePanel, Tile, tiles } from "./AuditHistoryTabs";
 import { AuditRecordFilter } from "../components/AuditRecordFilter";
 
-// 200 a page, read by scrolling the table itself (its header stays put); the
-// page controls under it move between pages of 200.
-const PAGE_SIZE = 200;
+// 20 a page (every Audit Logs table pages by 20); the page controls under the
+// table move between pages.
+const PAGE_SIZE = 20;
 
 /** What this seat's trail actually covers — said once, at the top, because the
  *  answer is different for every role and a table of rows cannot say it. */
@@ -60,9 +59,10 @@ function daysAgo(n: number): string {
 const RANGES = [
   { key: "7", label: "Last 7 days" },
   { key: "30", label: "Last 30 days" },
-  { key: "90", label: "Last 90 days" },
+  { key: "90", label: "Last 3 months" },
+  { key: "365", label: "Last 12 months" },
   { key: "all", label: "All time" },
-  { key: "custom", label: "Custom range…" },
+  { key: "custom", label: "Custom date" },
 ];
 
 function rangeDates(key: string, from: string, to: string): { from?: string; to?: string } {
@@ -71,69 +71,145 @@ function rangeDates(key: string, from: string, to: string): { from?: string; to?
   return { from: daysAgo(Number(key)), to: localDay(new Date()) };
 }
 
-/** The tabs, in the order a reader asks: what happened, who looked at what,
- *  then the histories of files, contracts and versions (audit_history.py). */
-const TABS = [
-  { key: "trail", label: "Audit Trails", sub: "Track all changes, approvals and activities across the system." },
-  { key: "rules", label: "Rule History",
-    sub: "Every rule and mapping, version by version: created, changed, switched off — the earlier version kept." },
-  { key: "changes", label: "Change History",
-    sub: "Every change to an important record: the old value, the new value, who changed it, when and why." },
-  { key: "access", label: "Downloads & Views", sub: "Who opened or downloaded which data, and when." },
-  { key: "submissions", label: "Partner Submission History",
-    sub: "Every file a broker owed, across all programmes, and what was done when one was late." },
-  { key: "contracts", label: "Contract History", sub: "Every draft, change, renewal and status change on each contract." },
-  { key: "versions", label: "File Versions", sub: "Every version of every file a broker sent. Earlier versions are always kept." },
-] as const;
-type TabKey = typeof TABS[number]["key"];
+type Module = NonNullable<AuditOptions["modules"]>[number];
+
+/** The ⓘ beside Area: each Area with its Sub-areas, in the server's words. */
+function areaHelp(modules: Module[]): string {
+  return ["Each Area is a part of the menu; Sub-area narrows it to one part.",
+          ...modules.map(m => `• ${m.label}: ${m.subs.map(x => x.label).join(", ")}.`)].join("\n");
+}
+
+/** The ⓘ beside Sub-area: what each part of the chosen Area holds. */
+function subHelp(m: Module): string {
+  return [`The parts of ${m.label}.`, ...m.subs.map(x => `• ${x.label}: ${x.info ?? ""}`)].join("\n");
+}
+
+/** "Asha - Wani org (Broker)"; a whole company is "Wani org - all people (Broker)". */
+function personLabel(a: { label: string; role: string; org?: string | null; side?: string | null; everyone?: boolean }): string {
+  if (!a.side) return `${a.label} — ${a.role}`;
+  if (a.everyone) return `${a.org || a.label} - all people (${a.side})`;
+  return a.org && a.org !== a.label ? `${a.label} - ${a.org} (${a.side})` : `${a.label} (${a.side})`;
+}
+
+/** Carrier people first, then each broker company with its own people right
+ *  under it ("Wani org - all people", then Asha, Ravi…), Kavachio last. */
+function sortedPeople<T extends { label: string; org?: string | null; side?: string | null; everyone?: boolean }>(xs: T[]): T[] {
+  const side = (a: T) => ({ Carrier: 0, Broker: 1 } as Record<string, number>)[a.side ?? ""] ?? 2;
+  const key = (a: T) => [side(a), (a.org ?? "").toLowerCase(), a.everyone ? 0 : 1, a.label.toLowerCase()] as const;
+  return [...xs].sort((a, b) => {
+    const x = key(a), y = key(b);
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
+    return 0;
+  });
+}
+
+/** Screens that open from a link (finding emails, the dashboard's audit
+ *  findings card) and are not part of the list. */
+const PAGES = {
+  audits: { title: "Audits", sub: "Record audits of contracts and brokers, and follow each finding until it is closed." },
+  partners: { title: "Partner Monitoring", sub: "How each broker is doing: files, lateness, open findings and risk." },
+  integrity: { title: "Integrity & Retention",
+               sub: "Proof that audit records were never changed, how long they are kept, and legal holds." },
+} as const;
+type PageKey = keyof typeof PAGES;
+const CARRIER_ONLY = new Set<string>(["audits", "partners", "integrity"]);
+
+/** The tabs this list replaced: an old link (?tab=rules) opens the list with
+ *  the filter that answers the same question. */
+const OLD_TABS: Record<string, { area?: string; verb?: string }> = {
+  rules: { area: "rules" }, changes: { verb: "changed" }, access: { area: "m_access" },
+  submissions: { area: "files" }, contracts: { area: "contracts" }, treaties: { area: "treaties" },
+  versions: { area: "files" },
+};
 
 /**
- * Audit Logs — who did what, when, and how it ended.
+ * Audit Logs — who did what, when, and how it ended. One list for every seat.
  *
- * One screen for all five seats. The filters and the columns are the same
- * everywhere; what changes is WHOSE rows the server sends back and what it is
- * willing to call them (audit_feed.py). So there is no role branching here
- * beyond the sentence at the top — if this screen ever needed to hide a row,
- * that would mean the server had already sent one it should not have.
+ * The filters and the columns are the same everywhere; what changes is WHOSE
+ * rows the server sends back and what it is willing to call them
+ * (audit_feed.py, audit_one.py). The old tabs are filters now: Area, Action,
+ * Programme and Status, and the Old / New value columns.
  */
 export default function AuditLogs() {
-  const [range, setRange] = useState("30");
+  const [search, setSearch] = useSearchParams();
+  const isBroker = (userRole() ?? "").startsWith("broker");
+  const tab = search.get("tab") ?? "";
+  if (tab in PAGES && !(isBroker && CARRIER_ONLY.has(tab))) return <LinkedPage which={tab as PageKey} />;
+  return <OneList search={search} setSearch={setSearch} />;
+}
+
+/** Audits, Partner Monitoring and Integrity & Retention, opened from a link. */
+function LinkedPage({ which }: { which: PageKey }) {
+  const p = PAGES[which];
+  return (
+    <div className="proto">
+      <div className="view full">
+        <Link to="/audit" className="linkish" style={{ display: "inline-block", marginBottom: 10 }}>← Audit Logs</Link>
+        <div className="page-head">
+          <div className="t"><h2>{p.title}</h2><p>{p.sub}</p></div>
+        </div>
+        {which === "integrity" ? <IntegrityRetention /> : which === "audits" ? <AuditsTab /> : <PartnerMonitoring />}
+      </div>
+    </div>
+  );
+}
+
+type Defaults = { range: string; area: string; verb: string; actor: string; programme: string; status: string };
+const START: Defaults = { range: "30", area: "all", verb: "", actor: "", programme: "", status: "" };
+
+function OneList({ search, setSearch }: {
+  search: URLSearchParams; setSearch: ReturnType<typeof useSearchParams>[1];
+}) {
+  // An old tab link, or a notice opening the list on one Area ("?action=contracts").
+  const old = OLD_TABS[search.get("tab") ?? ""] ?? {};
+  const [range, setRange] = useState(START.range);
   const [from, setFrom] = useState(daysAgo(30));
   const [to, setTo] = useState(localDay(new Date()));
-  const [actor, setActor] = useState("");
-  const [record, setRecord] = useState("");
-  // A notice can open this page on one Action type ("?action=contracts").
-  const [search, setSearch] = useSearchParams();
-  const tab: TabKey = (TABS.find(x => x.key === search.get("tab"))?.key ?? "trail") as TabKey;
-  const pickTab = (k: TabKey) => {
-    const next = new URLSearchParams(search);
-    if (k === "trail") next.delete("tab"); else next.set("tab", k);
-    setSearch(next, { replace: true });
-  };
-  const [action, setAction] = useState(search.get("action") || "all");
+  // Area is a menu module ("m_contracts"); Sub-area one part of it ("signing").
+  // A link may name either; a Sub-area finds its Area once the lists arrive.
+  const linked = old.area ?? search.get("action") ?? "";
+  const [area, setArea] = useState(linked.startsWith("m_") ? linked : START.area);
+  const [sub, setSub] = useState(linked && !linked.startsWith("m_") ? linked : "");
+  const [verb, setVerb] = useState(old.verb ?? START.verb);
+  const [actor, setActor] = useState(START.actor);
+  const [programme, setProgramme] = useState(START.programme);
+  const [status, setStatus] = useState(START.status);
+  const [record, setRecord] = useState(search.get("record") ?? "");
+  const [typed, setTyped] = useState("");
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(true);
+  const [packing, setPacking] = useState(false);
   const [opened, setOpened] = useState<AuditRow | null>(null);
   const [sum, setSum] = useState<TrailSummary | null>(null);
   const [evidenceError, setEvidenceError] = useState("");
-  const [typed, setTyped] = useState("");
-  const q = useDebouncedValue(typed, 300);
   const [opts, setOpts] = useState<AuditOptions | null>(null);
+  const [programmes, setProgrammes] = useState<Choice[]>([]);
   const [busy, setBusy] = useState<"" | "csv" | "xlsx">("");
   const [failed, setFailed] = useState(false);
   const [openGroup, setOpenGroup] = useState<AuditRow | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
 
   useEffect(() => { getAuditOptions().then(setOpts).catch(() => setOpts(null)); }, []);
+  useEffect(() => { getHistoryChoices().then(r => setProgrammes(r.programmes)).catch(() => setProgrammes([])); }, []);
+  // The old tab is now a filter; drop it from the address so a reload keeps the list.
+  useEffect(() => {
+    if (search.get("tab") || search.get("action")) {
+      const next = new URLSearchParams(search);
+      next.delete("tab"); next.delete("action"); next.delete("view");
+      setSearch(next, { replace: true });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const query: AuditQuery = useMemo(
-    () => ({ ...rangeDates(range, from, to), actor, action, q, record }),
-    [range, from, to, actor, action, q, record],
+    () => ({ ...rangeDates(range, from, to), actor, action: sub || area, verb, q, record,
+             programme: programme ? Number(programme) : null, status }),
+    [range, from, to, actor, area, sub, verb, q, record, programme, status],
   );
 
   useEffect(() => {
-    if (tab !== "trail") return;
     setSum(null);
     getTrailSummary(query).then(setSum).catch(() => setSum(null));
-  }, [JSON.stringify(query), tab]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(query)]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const list = useServerList<AuditRow, { seat?: string }>(
     (page, size) => getAuditLogs(query, page, size)
@@ -148,7 +224,92 @@ export default function AuditLogs() {
 
   const seat = list.extra?.seat ?? "";
   const showCarrier = seat === "platform";
-  const filtered = Boolean(actor || (action && action !== "all") || q || record || range !== "30");
+
+  const nameOf = (items: { key: string; label: string }[] | undefined, key: string) =>
+    items?.find(x => x.key === key)?.label ?? key;
+  // With an Area chosen, Action and Status list only what happens in that Area.
+  const module = opts?.modules?.find(m => m.key === area);
+  const subLabel = module?.subs.find(x => x.key === sub)?.label
+    ?? opts?.modules?.flatMap(m => m.subs).find(x => x.key === sub)?.label ?? sub;
+  const scope = sub || (area !== "all" ? area : "");
+  const actionChoices = (scope ? opts?.area_actions?.[scope] : undefined) ?? opts?.verbs ?? [];
+  const statusChoices = (scope ? opts?.area_statuses?.[scope] : undefined) ?? opts?.statuses ?? [];
+  // The Action list is the same everywhere: keep the Action and Status picked
+  // if the new Area or Sub-area has them.
+  const keepChoices = (nextScope: string) => {
+    const acts = nextScope ? opts?.area_actions?.[nextScope] : opts?.verbs;
+    if (verb && !acts?.some(x => x.key === verb)) setVerb("");
+    const keep = nextScope ? opts?.area_statuses?.[nextScope] : opts?.statuses;
+    if (status && !keep?.some(x => x.key === status)) setStatus("");
+  };
+  const pickArea = (next: string) => {
+    setArea(next); setSub("");
+    keepChoices(next !== "all" ? next : "");
+  };
+  const pickSub = (next: string) => {
+    setSub(next);
+    keepChoices(next || (area !== "all" ? area : ""));
+  };
+  // A link that named a Sub-area: show its Area too.
+  useEffect(() => {
+    if (sub && area === "all") {
+      const m = opts?.modules?.find(x => x.subs.some(y => y.key === sub));
+      if (m) setArea(m.key);
+    }
+  }, [opts]); // eslint-disable-line react-hooks/exhaustive-deps
+  const rangeLabel = RANGES.find(r => r.key === range)?.label ?? "";
+  // What is narrowing the list, each with its own ✕ (the "Showing:" line).
+  const chips: { label: string; clear: () => void }[] = [
+    ...(range !== START.range ? [{ label: `Date: ${range === "custom" ? `${from} – ${to}` : rangeLabel}`,
+                                   clear: () => setRange(START.range) }] : []),
+    ...(area !== "all" ? [{ label: `Area: ${module?.label ?? area}`, clear: () => pickArea("all") }] : []),
+    ...(sub ? [{ label: `Sub-area: ${subLabel}`, clear: () => pickSub("") }] : []),
+    ...(verb ? [{ label: `Action: ${nameOf(actionChoices, verb)}`, clear: () => setVerb("") }] : []),
+    ...(actor ? [{ label: `Person: ${(() => { const a = opts?.actors.find(x => x.key === actor); return a ? personLabel(a) : actor; })()}`,
+                   clear: () => setActor("") }] : []),
+    ...(programme ? [{ label: `Programme: ${programmes.find(p => String(p.id) === programme)?.name ?? programme}`,
+                       clear: () => setProgramme("") }] : []),
+    ...(status ? [{ label: `Status: ${nameOf(statusChoices, status)}`, clear: () => setStatus("") }] : []),
+    ...(record ? [{ label: `${({ contract: "Contract #", policy: "Policy: ", file: "File: " } as Record<string, string>)[record.split(":")[0]] ?? "Record: "}${record.slice(record.indexOf(":") + 1)}`,
+                    clear: () => setRecord("") }] : []),
+    ...(q ? [{ label: `Search: “${q}”`, clear: () => { setQ(""); setTyped(""); } }] : []),
+  ];
+
+  const reset = () => {
+    setRange(START.range); setFrom(daysAgo(30)); setTo(localDay(new Date()));
+    setArea(START.area); setSub(""); setVerb(START.verb); setActor(START.actor);
+    setProgramme(START.programme); setStatus(START.status); setRecord(""); setTyped(""); setQ("");
+  };
+
+  // The audit package takes the filters it can use: dates, programme, broker
+  // (a broker company or one broker's person) and policy. All time is the last
+  // 24 months, the package's own longest default.
+  const packageAsk = () => {
+    const d = rangeDates(range, from, to);
+    const a = opts?.actors.find(x => x.key === actor);
+    const brokerId = actor.startsWith("broker:") ? Number(actor.slice(7)) : undefined;
+    const policy = record.startsWith("policy:") ? record.slice(7) : undefined;
+    const ask = {
+      from: d.from ?? (range === "all" ? daysAgo(730) : undefined), to: d.to ?? localDay(new Date()),
+      programme: programme ? Number(programme) : ("" as const), broker: brokerId ?? ("" as const),
+      ...(policy ? { policy } : {}),
+      ...(range === "all" ? { dates: "Last 24 months" }
+        : range !== "custom" ? { dates: RANGES.find(r => r.key === range)?.label } : {}),
+    };
+    const shown: [string, string][] = [
+      ["Dates", range === "all" ? "The last 24 months" : range === "custom" ? `${from} – ${to}`
+        : RANGES.find(r => r.key === range)?.label ?? ""],
+      ["Programme", programme ? programmes.find(p => String(p.id) === programme)?.name ?? programme : "All programmes"],
+      ["Broker", brokerId && a ? (a.org || a.label) : "All brokers"],
+      ...(policy ? [["Policy", policy] as [string, string]] : []),
+    ];
+    const notUsed = [
+      ...(area !== "all" ? ["Area"] : []), ...(sub ? ["Sub-area"] : []), ...(verb ? ["Action"] : []),
+      ...(status ? ["Status"] : []), ...(q ? ["Search"] : []),
+      ...(actor && !brokerId ? ["Person"] : []), ...(record.startsWith("contract:") ? ["Contract"] : []),
+    ];
+    return { ask, shown, notUsed };
+  };
 
   const save = async (format: "csv" | "xlsx") => {
     setBusy(format);
@@ -161,117 +322,149 @@ export default function AuditLogs() {
         <div className="page-head">
           <div className="t">
             <h2>Audit Logs <InfoTip text={SUBTITLE[seat] ?? "Who did what, when, and how it ended."} /></h2>
-            <p>{TABS.find(x => x.key === tab)?.sub}</p>
+            <p>Everything anyone did, in one list. Use the filters to narrow it down.</p>
           </div>
-          {tab === "trail" && <div className="actions" style={{ display: "flex", gap: 8 }}>
+          <div className="actions" style={{ display: "flex", gap: 8 }}>
+            {/* One file for a policy or a period: every check that ran, its
+                contract wording and page, every result and decision (50.1). */}
+            <button className="btn sm" onClick={() => setPacking(true)}><Download size={13} /> Audit package</button>
             {/* Two formats because they are read two different ways: CSV feeds
                 a system, Excel is what a person opens to filter and keep. */}
-            <button className="btn sm" disabled={!!busy || list.total === 0}
-              onClick={() => save("csv")}>
+            <button className="btn sm" disabled={!!busy || list.total === 0} onClick={() => save("csv")}>
               <Download size={13} /> {busy === "csv" ? "Preparing…" : "Download CSV"}
             </button>
-            <button className="btn pri sm" disabled={!!busy || list.total === 0}
-              onClick={() => save("xlsx")}>
+            <button className="btn pri sm" disabled={!!busy || list.total === 0} onClick={() => save("xlsx")}>
               <Download size={13} /> {busy === "xlsx" ? "Preparing…" : "Download Excel"}
             </button>
-          </div>}
-        </div>
-
-        <div className="audit-tabs" role="tablist" style={{ display: "flex", gap: 4, flexWrap: "wrap",
-             borderBottom: "1px solid var(--p-border)", marginBottom: 14 }}>
-          {TABS.map(x => (
-            <button key={x.key} type="button" role="tab" aria-selected={tab === x.key} onClick={() => pickTab(x.key)}
-              style={{ background: "none", border: "none", padding: "8px 12px", cursor: "pointer", fontSize: 14,
-                       fontWeight: tab === x.key ? 700 : 500,
-                       color: tab === x.key ? "var(--p-brand, #077282)" : "var(--p-muted)",
-                       borderBottom: `2px solid ${tab === x.key ? "var(--p-brand, #077282)" : "transparent"}`,
-                       marginBottom: -1 }}>{x.label}</button>))}
-        </div>
-
-        {tab === "submissions" ? <PartnerSubmissions />
-          : tab === "changes" ? <ChangeHistoryTab />
-          : tab === "rules" ? <RuleHistoryTab />
-          : tab === "contracts" ? <ContractHistory />
-          : tab === "versions" ? <FileVersions />
-          : (<>
-
-        <div className="card" style={{ marginBottom: 14 }}>
-          {/* flex-end: every control is labelled, so they share one bottom line
-              — and "Clear filters" sits on it rather than floating mid-label. */}
-          <div className="card-h" style={{ gap: 14, flexWrap: "wrap", borderBottom: "none",
-                                           alignItems: "flex-end" }}>
-            <label className="fbar-field">
-              <span className="sub">Timestamp</span>
-              <select className="fbar-select" aria-label="Timestamp range" value={range}
-                onChange={e => setRange(e.target.value)}>
-                {RANGES.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
-              </select>
-            </label>
-
-            {range === "custom" && (
-              <label className="fbar-field">
-                <span className="sub">Timestamp between</span>
-                <span className="fbar-daterange">
-                  <input type="date" className="fbar-date" aria-label="From date"
-                    value={from} max={to} onChange={e => setFrom(e.target.value)} />
-                  <span className="sub">–</span>
-                  <input type="date" className="fbar-date" aria-label="To date"
-                    value={to} min={from} onChange={e => setTo(e.target.value)} />
-                </span>
-              </label>
-            )}
-
-            <label className="fbar-field">
-              <span className="sub">Person or company</span>
-              <select className="fbar-select" aria-label="Role or actor" value={actor}
-                onChange={e => setActor(e.target.value)}>
-                <option value="">Everyone</option>
-                {opts?.actors.map(a => (
-                  <option key={a.key} value={a.key}>{a.label} — {a.role}</option>
-                ))}
-              </select>
-            </label>
-
-            {tab === "trail" && <label className="fbar-field">
-              <span className="sub">Action type</span>
-              <select className="fbar-select" aria-label="Action type" value={action}
-                onChange={e => setAction(e.target.value)}>
-                {(opts?.action_groups ?? [{ key: "all", label: "All actions", actions: [] }])
-                  .map(g => <option key={g.key} value={g.key}>{g.label}</option>)}
-              </select>
-            </label>}
-
-            <AuditRecordFilter value={record} onChange={setRecord} />
-
-            {/* Labelled like the three dropdowns, or it sits a caption-height
-                higher than them. */}
-            <label className="fbar-field grow">
-              <span className="sub">Search</span>
-              <span className="search">
-                <Search className="ic" />
-                <input type="search" placeholder="Search a person, file or action"
-                  aria-label="Search the audit trail"
-                  value={typed} onChange={e => setTyped(e.target.value)} />
-              </span>
-            </label>
-
-            {filtered && (
-              <span className="linkish fbar-clear-link" onClick={() => {
-                setRange("30"); setFrom(daysAgo(30)); setTo(localDay(new Date()));
-                setActor(""); setAction("all"); setTyped(""); setRecord("");
-              }}>Clear filters</span>
-            )}
           </div>
         </div>
 
-        {tab === "access" ? <><DownloadsViews query={query} /><AuditReinsurerViews query={query} /></> : (<>
+        <div className="card afl" style={{ marginBottom: 14 }}>
+          <button type="button" className="afl-head" onClick={() => setOpen(o => !o)} aria-expanded={open}>
+            {open ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+            <span>Filters</span>
+            {chips.length > 0 && <span className="afl-count">{chips.length} applied</span>}
+          </button>
+          {open && <>
+            <div className="afl-grid">
+              <label className="afl-f">
+                <span>Date</span>
+                <span className="afl-box">
+                  <Calendar size={14} className="afl-ic" />
+                  <select aria-label="Date" value={range} onChange={e => setRange(e.target.value)}
+                    className={range !== START.range ? "on" : ""}>
+                    {RANGES.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
+                  </select>
+                </span>
+              </label>
+              <label className="afl-f">
+                <span>Area{!!opts?.modules?.length && <InfoTip text={areaHelp(opts.modules)} />}</span>
+                <span className="afl-box">
+                  <select aria-label="Area" value={area} onChange={e => pickArea(e.target.value)}
+                    className={area !== "all" ? "on" : ""}>
+                    <option value="all">All areas</option>
+                    {opts?.modules?.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
+                  </select>
+                </span>
+              </label>
+              <label className="afl-f">
+                <span>Sub-area{module && <InfoTip text={subHelp(module)} />}</span>
+                <span className="afl-box">
+                  <select aria-label="Sub-area" value={sub} onChange={e => pickSub(e.target.value)}
+                    disabled={!module} className={sub ? "on" : ""}>
+                    <option value="">{module ? `All of ${module.label}` : "Pick an Area first"}</option>
+                    {module?.subs.map(x => <option key={x.key} value={x.key}>{x.label}</option>)}
+                  </select>
+                </span>
+              </label>
+              <label className="afl-f">
+                <span>Action</span>
+                <span className="afl-box">
+                  <select aria-label="Action" value={verb} onChange={e => setVerb(e.target.value)}
+                    className={verb ? "on" : ""}>
+                    <option value="">All actions</option>
+                    {actionChoices.map(a => <option key={a.key} value={a.key}>{a.label}</option>)}
+                  </select>
+                </span>
+              </label>
+              <label className="afl-f">
+                <span>Person or company</span>
+                <span className="afl-box">
+                  <User size={14} className="afl-ic" />
+                  <select aria-label="Person or company" value={actor} onChange={e => setActor(e.target.value)}
+                    className={actor ? "on" : ""}>
+                    <option value="">Everyone</option>
+                    {sortedPeople(opts?.actors ?? []).map(a => <option key={a.key} value={a.key}>{personLabel(a)}</option>)}
+                  </select>
+                </span>
+              </label>
+              <label className="afl-f">
+                <span>Programme</span>
+                <span className="afl-box">
+                  <select aria-label="Programme" value={programme} onChange={e => setProgramme(e.target.value)}
+                    className={programme ? "on" : ""}>
+                    <option value="">All programmes</option>
+                    {programmes.map(p => <option key={p.id} value={String(p.id)}>{p.name}</option>)}
+                  </select>
+                </span>
+              </label>
+              <label className="afl-f">
+                <span>Status</span>
+                <span className="afl-box">
+                  <select aria-label="Status" value={status} onChange={e => setStatus(e.target.value)}
+                    className={status ? "on" : ""}>
+                    <option value="">All statuses</option>
+                    {statusChoices.map(a => <option key={a.key} value={a.key}>{a.label}</option>)}
+                  </select>
+                </span>
+              </label>
+            </div>
+
+            {range === "custom" && (
+              <div className="afl-row">
+                <label className="afl-f" style={{ flex: "0 0 auto" }}>
+                  <span>From – to</span>
+                  <span className="afl-dates">
+                    <input type="date" aria-label="From date" value={from} max={to} onChange={e => setFrom(e.target.value)} />
+                    <span className="sub">–</span>
+                    <input type="date" aria-label="To date" value={to} min={from} onChange={e => setTo(e.target.value)} />
+                  </span>
+                </label>
+              </div>
+            )}
+
+            <form className="afl-row" onSubmit={e => { e.preventDefault(); setQ(typed.trim()); }}>
+              <span className="search afl-search">
+                <Search className="ic" />
+                <input type="search" placeholder="Search anything in the table: a name, file, contract, value, status or date"
+                  aria-label="Search the audit logs" value={typed}
+                  onChange={e => { setTyped(e.target.value); if (!e.target.value) setQ(""); }} />
+              </span>
+              <AuditRecordFilter value={record} onChange={setRecord} />
+              <button type="submit" className="btn pri"><Search size={14} /> Search</button>
+              <button type="button" className="btn" onClick={reset}><RotateCcw size={14} /> Reset</button>
+            </form>
+
+            {chips.length > 0 && (
+              <div className="afl-chips">
+                <span className="sub">Showing:</span>
+                {chips.map(c => (
+                  <button type="button" key={c.label} className="afl-chip" onClick={c.clear} title="Remove this filter">
+                    {c.label} <X size={12} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </>}
+        </div>
+
         <div style={tiles(5)}>
           <Tile icon={Activity} label="Total activities" value={sum?.activities} colour="#7c3aed"
             info="Everything recorded in these dates that matches the filters." />
           <Tile icon={Users} label="People" value={sum?.people} colour="#2563eb"
             info="Different people who did something in these dates." />
           <Tile icon={Eye} label="Data viewed" value={sum?.viewed} colour="#0d9488"
-            info="Times someone opened a file, a policy, a contract document or a report. See them on Downloads & Views." />
+            info="Times someone opened a file, a policy, a contract document or a report. Pick Area: Downloads and views to list them." />
           <Tile icon={Download} label="Downloads" value={sum?.downloaded} colour="#d97706"
             info="Times someone saved a file, a contract or a report to their computer." />
           <Tile icon={ShieldCheck} label="Rule changes" value={sum?.rule_changes} colour="#16a34a"
@@ -284,50 +477,53 @@ export default function AuditLogs() {
 
         <div className="card">
           {failed ? (
-            <div className="empty">Could not load the audit trail.</div>
+            <div className="empty">Could not load the audit logs.</div>
           ) : list.loading && list.items.length === 0 ? (
             <div className="empty">Loading…</div>
           ) : list.total === 0 ? (
             <div className="empty">
-              {filtered
-                ? "Nothing matches these filters. Try a wider date range."
+              {chips.length
+                ? "Nothing matches these filters. Try a wider date range, or press Reset."
                 : "Nothing has been recorded yet."}
             </div>
           ) : (
             <>
               <div className="tbl-wrap audit-scroll" ref={scroller}>
-                <table>
+                <table className="afl-table">
                   <thead>
                     <tr>
-                      <th style={{ whiteSpace: "nowrap" }}>Timestamp ↓</th>
-                      <th>Actor / role</th>
-                      <th style={{ minWidth: 320 }}>Action / what exactly</th>
-                      <th>Target / file</th>
-                      {showCarrier && <th>Carrier</th>}
-                      <th>Status</th>
+                      <th style={{ width: 118 }}>When ↓</th>
+                      <th style={{ width: 130 }}>Who</th>
+                      <th style={{ width: 120 }}>Area</th>
+                      <th>What they did</th>
+                      <th style={{ width: 150 }}>On what</th>
+                      <th style={{ width: 120 }}>Old value</th>
+                      <th style={{ width: 120 }}>New value</th>
+                      {showCarrier && <th style={{ width: 110 }}>Carrier</th>}
+                      <th style={{ width: 110 }}>Status</th>
                     </tr>
                   </thead>
                   <tbody>
                     {list.items.map(r => (
                       <tr key={r.id} onClick={() => setOpened(r)} style={{ cursor: "pointer" }}
                         title="Click to see the details">
-                        <td className="muted" style={{ whiteSpace: "nowrap" }}>
-                          {fmtDateTime(r.at)}
-                        </td>
+                        <td className="muted">{fmtDateTime(r.at)}</td>
                         <td>
                           <b>{r.actor}</b>
                           <div className="sub">{r.actor_role}</div>
                         </td>
                         <td>
+                          {r.module && <div className="sub">{r.module}</div>}
+                          {r.area ? <span className="afl-area">{r.area}</span> : <span className="muted">—</span>}
+                        </td>
+                        <td>
                           {r.action_label}
                           {/* Exactly what was done — the field, the policy, the
-                              old and new value. An audit line that says only
+                              row counts. An audit line that says only
                               "Corrected a value" has recorded that something
                               happened, not what. */}
                           {r.detail && (
-                            <div className="sub" style={{ marginTop: 2, whiteSpace: "normal" }}>
-                              {r.detail}
-                            </div>
+                            <div className="sub" style={{ marginTop: 2, whiteSpace: "normal" }}>{r.detail}</div>
                           )}
                           {/* A bulk save is one line here; every change in it
                               is one click away, exactly as it was recorded. */}
@@ -359,6 +555,8 @@ export default function AuditLogs() {
                           {r.target_kind && <div className="sub">{r.target_kind}</div>}
                           {r.target}
                         </td>
+                        <td className="afl-val">{r.old ?? <span className="muted">—</span>}</td>
+                        <td className="afl-val">{r.new ?? <span className="muted">—</span>}</td>
                         {showCarrier && <td className="muted">{r.carrier ?? "—"}</td>}
                         <td>
                           <span className={`badge ${TONE_CLASS[r.tone] ?? "b-mut"}`}>
@@ -375,24 +573,115 @@ export default function AuditLogs() {
             </>
           )}
         </div>
-        </>)}
-        </>)}
       </div>
       <GroupDrawer row={openGroup} query={query} onClose={() => setOpenGroup(null)} />
-      <SidePanel open={!!opened} title="Event details" sub={opened && fmtDateTime(opened.at)}
+      {packing && <PackageModal {...packageAsk()} onClose={() => setPacking(false)} />}
+      <SidePanel open={!!opened} title={opened?.action_label ?? "Event details"}
+        sub={opened && <>{fmtDateTime(opened.at)} · <span className={`badge ${TONE_CLASS[opened.tone] ?? "b-mut"}`}><span className="d" />{opened.status}</span></>}
         onClose={() => setOpened(null)}>
-        {opened && <Facts rows={[
-          ["Date and time", fmtDateTime(opened.at)],
-          ["Person", <><b>{opened.actor}</b>{opened.actor_role ? ` · ${opened.actor_role}` : ""}</>],
-          ["Organisation", opened.actor_org],
-          ...(showCarrier ? [["Carrier", opened.carrier] as [string, string | null]] : []),
-          ["What they did", opened.action_label],
-          ["What exactly", opened.detail],
-          ["On", opened.target && opened.target !== "—"
-            ? `${opened.target_kind ? `${opened.target_kind}: ` : ""}${opened.target}` : null],
-          ["Result", <span className={`badge ${TONE_CLASS[opened.tone] ?? "b-mut"}`}><span className="d" />{opened.status}</span>],
-        ]} />}
+        {opened && <EventDetails row={opened} showCarrier={showCarrier}
+          onShowRecord={(rec, words) => {
+            setOpened(null);
+            if (rec) setRecord(rec); else if (words) { setTyped(words); setQ(words); }
+          }} />}
       </SidePanel>
+    </div>
+  );
+}
+
+/** The Event details panel: the entry in full, read when it is opened
+ *  (audit_one.event). Until it arrives — or for a bulk line, which has no
+ *  single entry — it shows what the row itself carries. */
+function EventDetails({ row, showCarrier, onShowRecord }: {
+  row: AuditRow; showCarrier: boolean; onShowRecord: (record: string | null, words: string | null) => void;
+}) {
+  const [ev, setEv] = useState<AuditEvent | null>(null);
+  const [state, setState] = useState<"loading" | "ok" | "none">("loading");
+  useEffect(() => {
+    let live = true;
+    setEv(null); setState("loading");
+    if (row.group) { setState("none"); return; }
+    getAuditEvent(row.id)
+      .then(e => { if (live) { setEv(e); setState("ok"); } })
+      .catch(() => { if (live) setState("none"); });
+    return () => { live = false; };
+  }, [row.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
+    <div className="evd-sec"><div className="evd-h">{title}</div>{children}</div>
+  );
+  const keep = (rows: [string, React.ReactNode][]) => rows.filter(([, v]) => v !== null && v !== undefined && v !== "");
+  const who = ev?.who;
+  const what = ev?.what;
+  const changes = ev?.changes ?? row.changes ?? [];
+
+  return (
+    <div className="evd">
+      <Section title="Who">
+        <Facts rows={keep([
+          ["Person", <b>{who?.person ?? row.actor}</b>],
+          ["Role", who?.role ?? row.actor_role],
+          ["Organisation", who?.organisation ?? row.actor_org],
+          ...(showCarrier ? [["Carrier", who?.carrier ?? row.carrier] as [string, React.ReactNode]] : []),
+          ["How", who?.how ?? null],
+          ["IP address", who?.ip ?? null],
+        ])} />
+      </Section>
+      <Section title="What">
+        <Facts rows={keep([
+          ["Area", what?.area ?? row.module ?? null],
+          ["Sub-area", what?.sub_area ?? row.area ?? null],
+          ["Action type", what?.action_type ?? null],
+          ["What they did", row.action_label],
+          ["Details", row.detail || null],
+          ["On", what?.on ?? (row.target && row.target !== "—" ? `${row.target_kind ? `${row.target_kind}: ` : ""}${row.target}` : null)],
+          ["Programme", what?.programme ?? null],
+          ["Contract", what?.contract ?? null],
+        ])} />
+      </Section>
+      {(changes.length > 0 || ev?.reason) && (
+        <Section title="What changed">
+          {changes.length > 0 && (
+            <div className="tbl-wrap">
+              <table className="evd-tbl">
+                <thead><tr><th>Field</th><th>Old value</th><th /><th>New value</th></tr></thead>
+                <tbody>
+                  {changes.map((c, i) => (
+                    <tr key={i}>
+                      <td>{c.field ?? "—"}</td>
+                      <td>{c.old ?? "—"}</td>
+                      <td className="evd-arrow">→</td>
+                      <td>{c.new ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {ev?.reason && <Facts rows={[["Reason given", ev.reason]]} />}
+        </Section>
+      )}
+      {!!ev?.more.length && (
+        <Section title="More details">
+          <Facts rows={ev.more.map(m => [m.label, m.value] as [string, React.ReactNode])} />
+        </Section>
+      )}
+      {!!ev?.earlier.length && (
+        <Section title="Earlier on this record">
+          <div className="evd-tl">
+            {ev.earlier.map((x, i) => (
+              <div key={i}><span className="muted">{fmtDateTime(x.at)}</span> {x.who}: {x.what}</div>
+            ))}
+          </div>
+          {(ev.record || ev.search) && (
+            <button type="button" className="linkish" onClick={() => onShowRecord(ev.record, ev.search)}>
+              Show everything on this record →
+            </button>
+          )}
+        </Section>
+      )}
+      {state === "loading" && <div className="muted" style={{ fontSize: 12.5 }}>Loading the full details…</div>}
+      {ev && <div className="evd-ref">Reference: {ev.reference} (quote this when asking support)</div>}
     </div>
   );
 }
@@ -400,7 +689,7 @@ export default function AuditLogs() {
 // Where a decision was made — said once in the drawer's header, not 40 times.
 const WHERE_NOTES = [" · on the exceptions review link", " · on the exceptions screen in the portal"];
 // The drawer reads a bulk update 50 changes at a time ("Load more").
-const GROUP_PAGE = 50;
+const GROUP_PAGE = 20;
 
 /** Every change in one bulk save, in a right-hand drawer — the full record the
  *  single summary line stands for, one row per value, as it was saved. */

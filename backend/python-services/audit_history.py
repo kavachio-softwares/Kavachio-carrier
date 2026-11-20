@@ -49,8 +49,18 @@ class Reach:
         return self.broker is None or broker_id == self.broker
 
 
+def chosen_mga(mga: Optional[str]) -> Optional[str]:
+    """The carrier code a screen sent, or None when none was really picked.
+    The frontend sends its placeholder "default" (auth.currentMga) for a
+    Kavachio admin, who has no carrier of their own: that means every carrier,
+    not a carrier called "default"."""
+    m = (mga or "").strip()
+    return None if m in ("", "default") else m
+
+
 def reach(s, principal, mga: Optional[str] = None) -> Reach:
     v = af.viewer_for(s, principal)
+    mga = chosen_mga(mga)
     if v.is_platform:
         if mga:
             from app_routes import resolve_tenant_id
@@ -142,12 +152,15 @@ class People:
 
 
 # ── the trail's tiles ──────────────────────────────────────────────────────
-def summary(s, principal, f: af.Filters) -> dict:
-    """The numbers above the trail, for the same dates and filters."""
+def summary(s, principal, f: af.Filters, programme: Optional[int] = None, status: str = "",
+            tz: int = 0) -> dict:
+    """The numbers above the trail, for the same dates and filters. The total
+    follows every filter; the other four follow dates, person, Area and Action."""
     from db import AccessLog, ActivityEvent
+    import audit_one
     v = af.viewer_for(s, principal)
     sc = af.scope_for(s, v)
-    total = af.page(s, v, f, 1, 1)["total"]
+    total = audit_one.page(s, v, f, 1, 1, programme=programme, status=status, tz=tz)["total"]
     q_ids = af._search_targets(s, f.q) if f.q else ([], [])
     people: set = set()
     rule_changes = 0
@@ -458,12 +471,19 @@ def _steps_of(s, contracts: list, people: People) -> dict[int, list[dict]]:
     import change_history as chist
     edits = chist.edits_near(s, ids)
     out: dict[int, list[dict]] = {}
+    lifecycle = {c.id: (getattr(c, "lifecycle", None) or "").lower() for c in contracts}
     for cid, steps in by.items():
         steps.sort(key=lambda x: x["_k"])
         now = None
         rows = []
+        # Added in Kavachio, it starts as a draft; uploaded already signed and
+        # never sent anywhere since, it was active from the start.
+        moved = any(STEPS.get(x["action"], (None, None, None))[2] for x in steps)
+        first = "Active" if lifecycle.get(cid) == "active" and not moved else "Draft"
         for st in steps:
             words, kind, after = STEPS.get(st["action"], (_status_words(st["action"]), "Change", None))
+            if st["action"] == "raised":
+                after = first
             before = now
             if after:
                 now = after
@@ -617,3 +637,171 @@ def choices(s, principal, mga=None) -> dict:
                                key=lambda x: x["name"].lower())
     return {"programmes": by_name(dict(pq.limit(2000).all())),
             "brokers": [] if r.broker is not None else by_name(names["party"])}
+
+
+# ── Partner Monitoring (54.1) ──────────────────────────────────────────────
+MONITOR_MONTHS = 6
+LATE_HIGH = 3          # late files in the window that make a broker High risk
+RISK_RULE = (f"High: an open critical finding, a missing file, or {LATE_HIGH} or more late files "
+             f"in the last {MONITOR_MONTHS} months. Medium: any open finding, or 1–{LATE_HIGH - 1} late files. "
+             "Low: everything else.")
+
+
+def risk_of(late: int, missing: int, open_findings: int, critical: int) -> tuple[str, list[str]]:
+    """(High | Medium | Low, the reasons in words)."""
+    why = []
+    if critical:
+        why.append(f"{critical} open critical {'finding' if critical == 1 else 'findings'}")
+    if missing:
+        why.append(f"{missing} missing {'file' if missing == 1 else 'files'}")
+    if late:
+        why.append(f"{late} late {'file' if late == 1 else 'files'}")
+    if open_findings - critical > 0:
+        n = open_findings - critical
+        why.append(f"{n} open {'finding' if n == 1 else 'findings'}")
+    if critical or missing or late >= LATE_HIGH:
+        return "High", why
+    if open_findings or late:
+        return "Medium", why
+    return "Low", why or ["Nothing late, missing or open"]
+
+
+# The kind of company in a programme's "broker" place (party_type). A claims
+# handler is a TPA, and sits in the same place (hierarchy_routes).
+PARTNER_TYPES = {"broker": "Broker", "tpa": "Claims handler (TPA)", "mga": "MGA", "mgu": "MGU",
+                 "agency": "Agency", "insurer": "Insurer", "carrier": "Carrier", "reinsurer": "Reinsurer",
+                 "vendor": "Vendor", "individual": "Individual", "other": "Other"}
+
+
+def _monitor_rows(s, r: Reach, *, broker=None, programme=None, today=None) -> list[dict]:
+    from db import ExpectedSubmission as E, Program, ProgramBroker
+    from intake_models import FileArrival
+    import audit_management as am
+    today = today or dt.datetime.utcnow().date()
+    since = (dt.datetime.combine(today, dt.time()) - dt.timedelta(days=round(MONITOR_MONTHS * 30.44))).date()
+    pb = s.query(ProgramBroker.broker_party_id, ProgramBroker.program_id).join(
+        Program, Program.id == ProgramBroker.program_id)
+    if r.tenants is not None:
+        pb = pb.filter(Program.tenant_id.in_(sorted(r.tenants) or [0]))
+    if broker:
+        pb = pb.filter(ProgramBroker.broker_party_id == broker)
+    if programme:
+        pb = pb.filter(ProgramBroker.program_id == programme)
+    progs: dict[int, set] = {}
+    for b, p in pb.all():
+        if b:
+            progs.setdefault(b, set()).add(p)
+    if not progs:
+        return []
+    eq = r.filter(s.query(E), E.tenant_id, E.broker_party_id).filter(
+        E.broker_party_id.in_(list(progs)), E.due_date >= since, E.due_date <= today)
+    if programme:
+        eq = eq.filter(E.program_id == programme)
+    late: dict[int, int] = {}
+    missing: dict[int, int] = {}
+    for e in eq:
+        st = _state(e, today)
+        if st == "received_late":
+            late[e.broker_party_id] = late.get(e.broker_party_id, 0) + 1
+        elif st in ("overdue", "never_arrived"):
+            missing[e.broker_party_id] = missing.get(e.broker_party_id, 0) + 1
+    fq = r.filter(s.query(FileArrival.matched_broker_party_id, func.count()), FileArrival.tenant_id,
+                  FileArrival.matched_broker_party_id).filter(
+        FileArrival.matched_broker_party_id.in_(list(progs)),
+        FileArrival.received_at >= dt.datetime.combine(since, dt.time()), FileArrival.outcome == "accepted")
+    if programme:
+        fq = fq.filter(FileArrival.program_id == programme)
+    sent = dict(fq.group_by(FileArrival.matched_broker_party_id).all())
+    tenant = next(iter(r.tenants)) if r.tenants and len(r.tenants) == 1 else None
+    findings = am.open_findings_by_broker(s, tenant)
+    names = _names(s, (), list(progs))
+    from db import Party
+    kinds = dict(s.query(Party.id, Party.party_type).filter(Party.id.in_(list(progs))))
+    rows = []
+    for b, ps in progs.items():
+        f = findings.get(b, {"open": 0, "critical": 0})
+        level, why = risk_of(late.get(b, 0), missing.get(b, 0), f["open"], f["critical"])
+        kind = str(getattr(kinds.get(b), "value", kinds.get(b)) or "broker")
+        rows.append({"broker_id": b, "broker": names["party"].get(b) or f"#{b}",
+                     "type": kind, "type_label": PARTNER_TYPES.get(kind, kind.replace("_", " ").capitalize()),
+                     "programmes": len(ps),
+                     "files_sent": int(sent.get(b, 0)), "late": late.get(b, 0), "missing": missing.get(b, 0),
+                     "open_findings": f["open"], "critical_findings": f["critical"],
+                     "risk": level, "reasons": why})
+    order = {"High": 0, "Medium": 1, "Low": 2}
+    rows.sort(key=lambda x: (order[x["risk"]], -x["late"] - x["missing"], x["broker"].lower()))
+    return rows
+
+
+def partners(s, principal, *, mga=None, broker=None, programme=None, risk=None, kind=None,
+             page: int = 1, page_size: int = 50, today=None) -> dict:
+    """Every broker of the carrier: programmes, files sent, late, missing, open
+    findings and a risk level. Carrier and Kavachio only — a broker never sees
+    how other brokers are doing."""
+    import audit_management as am
+    r = reach(s, principal, mga)
+    if r.v.is_broker:
+        raise HTTPException(403, "Partner Monitoring is for carriers.")
+    rows = _monitor_rows(s, r, broker=broker, programme=programme, today=today)
+    shown = [x for x in rows if (not risk or x["risk"] == risk) and (not kind or x["type"] == kind)]
+    out = _page(shown, page, page_size)
+    out["counts"] = {"brokers": len(rows), "high": sum(1 for x in rows if x["risk"] == "High"),
+                     "open_findings": sum(x["open_findings"] for x in rows),
+                     "late": sum(x["late"] for x in rows)}
+    out["types"] = [{"id": k, "name": v} for k, v in sorted({x["type"]: x["type_label"] for x in rows}.items(),
+                                                           key=lambda kv: kv[1])]
+    out["rule"] = RISK_RULE
+    out["months"] = MONITOR_MONTHS
+    out["audits_ready"] = not am.missing_tables(s)
+    return out
+
+
+def partner_profile(s, principal, broker_id: int, mga=None, today=None) -> dict:
+    import audit_management as am
+    from db import Program, ProgramBroker
+    r = reach(s, principal, mga)
+    if r.v.is_broker:
+        raise HTTPException(403, "Partner Monitoring is for carriers.")
+    rows = _monitor_rows(s, r, broker=broker_id, today=today)
+    if not rows:
+        raise HTTPException(404, "That broker is not one of yours.")
+    row = rows[0]
+    pq = s.query(Program.id, Program.name).join(ProgramBroker, ProgramBroker.program_id == Program.id).filter(
+        ProgramBroker.broker_party_id == broker_id)
+    if r.tenants is not None:
+        pq = pq.filter(Program.tenant_id.in_(sorted(r.tenants) or [0]))
+    row["programme_list"] = [{"id": i, "name": n} for i, n in sorted(set(pq.all()), key=lambda x: (x[1] or "").lower())]
+    row["findings"] = []
+    if not am.missing_tables(s):
+        q = s.query(am.Finding).filter(am.Finding.broker_party_id == broker_id, am.Finding.status != "closed")
+        if r.tenants is not None:
+            q = q.filter(am.Finding.tenant_id.in_(sorted(r.tenants) or [0]))
+        row["findings"] = [{"id": f.id, "audit_id": f.audit_id, "title": f.title,
+                            "severity": am.SEVERITIES.get(f.severity, f.severity),
+                            "status": am.FINDING_STATUS.get(f.status, f.status), "due_date": _iso(f.due_date),
+                            "overdue": am.overdue(f.due_date, f.status)} for f in q.order_by(am.Finding.id.desc())]
+    row["rule"] = RISK_RULE
+    return row
+
+
+# ── Setups made active again (51.1) ────────────────────────────────────────
+def restores(s, principal, *, mga=None, page: int = 1, page_size: int = 50) -> dict:
+    """Every earlier Bordereau Setup made active again, newest first, with the
+    reason and what it replaced. A carrier's own decision: brokers see none."""
+    from db import ActivityEvent
+    import setup_restore as sr
+    r = reach(s, principal, mga)
+    if r.v.is_broker:
+        return {**_page([], page, page_size)}
+    q = s.query(ActivityEvent).filter(ActivityEvent.action == sr.ACTION)
+    if r.tenants is not None:
+        q = q.filter(ActivityEvent.tenant_id.in_(sorted(r.tenants) or [0]))
+    people = People(s, r.v)
+    items = []
+    for e in q.order_by(ActivityEvent.created_at.desc()).limit(2000):
+        d = e.details if isinstance(e.details, dict) else {}
+        items.append({"at": _iso(e.created_at), "setup": d.get("name"), "setup_id": d.get("pipeline_id"),
+                      "programme": d.get("programme") or "—", "broker": d.get("broker") or "—",
+                      "replaced": ", ".join(x.get("name") or "" for x in d.get("replaced") or []) or "Nothing",
+                      "reason": d.get("reason"), "by": people.name(e.actor_user_id, e.actor or "—")})
+    return _page(items, page, page_size)

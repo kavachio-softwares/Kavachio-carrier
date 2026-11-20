@@ -232,6 +232,29 @@ def _send_executive_reports() -> int:
     with SessionLocal() as s:
         return executive_delivery.run_due(s)
 
+def _send_audit_reminders() -> int:
+    """53.2 — audit findings due soon or overdue: one email each, once
+    (audit_alerts.send_reminders keeps the record that stops a second)."""
+    from db import SessionLocal
+    import audit_alerts
+    with SessionLocal() as s:
+        return audit_alerts.send_reminders(s)
+
+
+def _seal_and_retain() -> tuple[int, int]:
+    """52.1 then 52.2 — fingerprint the audit records written since the last
+    run, then delete what is past its retention period and not held. Both do
+    nothing until migration 50 is applied, and retention nothing until a
+    period is set."""
+    from db import SessionLocal
+    import record_integrity
+    import retention
+    with SessionLocal() as s:
+        sealed = record_integrity.seal_new(s)
+    with SessionLocal() as s:
+        return sealed, retention.run_due(s)
+
+
 async def _loop() -> None:
     hour = _run_hour()
     log.info("C-9 sweep scheduler on — daily at %02d:00 UTC", hour)
@@ -257,6 +280,18 @@ async def _loop() -> None:
                     log.info("Executive report: sent for %s carrier(s)", n)
             except Exception:  # noqa: BLE001
                 log.exception("Executive report run failed; will retry next cycle")
+            try:
+                n = await loop.run_in_executor(None, _send_audit_reminders)
+                if n:
+                    log.info("Audit findings: %s reminder(s) sent", n)
+            except Exception:  # noqa: BLE001
+                log.exception("Audit finding reminders failed; will retry next cycle")
+            try:
+                sealed, deleted = await loop.run_in_executor(None, _seal_and_retain)
+                if sealed or deleted:
+                    log.info("Audit records: %s sealed, %s deleted by retention", sealed, deleted)
+            except Exception:  # noqa: BLE001
+                log.exception("Sealing / retention failed; will retry next cycle")
             # Sleep until the next scheduled hour, then run again.
             await asyncio.sleep(_seconds_until_next_run(datetime.now(timezone.utc), hour))
     except asyncio.CancelledError:

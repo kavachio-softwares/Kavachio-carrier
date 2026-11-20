@@ -70,6 +70,8 @@ export const ROUTE_ACCESS: {
   // contract at all — same rule as /contracts/:contractId below.
   { pattern: "/broker/contracts", requires: "broker_admin", only: ["broker_admin"] },
   { pattern: "/broker/programme-rules", requires: "broker_admin", only: ["broker_admin"] },
+  // Audit findings carriers raised about this broker (audit_management.py).
+  { pattern: "/broker/audit-findings", requires: "broker_admin", only: ["broker_admin"] },
   // Running the bordereau is BOTH broker seats' — the operator's day-to-day
   // job, and the admin's when they do it themselves. It was the operator's
   // alone, which read as a division of labour and worked as a blocker: a small

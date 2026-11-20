@@ -13,7 +13,7 @@ import { InfoTip } from "../components/InfoTip";
 import { fmtDateTime } from "../utils/date";
 import { L, listState } from "./AuditTabParts";
 
-const PAGE = 10;
+const PAGE = 20;
 
 export default function AuditReinsurerViews({ query }: { query: AuditQuery }) {
   const [kind, setKind] = useState("");

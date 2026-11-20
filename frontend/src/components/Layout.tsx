@@ -248,6 +248,9 @@ const GROUPS: {
     title: "Logs",
     items: [
       { to: "/audit", label: "Audit Logs", icon: ScrollText },
+      // The broker's findings from its carrier's audits (53.2), beside the logs
+      // they belong with. Broker seat only: ROUTE_ACCESS hides it from the rest.
+      { to: "/broker/audit-findings", label: "Audit Findings", icon: FileSearch },
     ],
   },
   {

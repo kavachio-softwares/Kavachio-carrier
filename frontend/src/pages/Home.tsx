@@ -14,6 +14,7 @@ import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 import { isHeld, listArrivals, type Arrival } from "../api/intake";
 import { InfoTip } from "../components/InfoTip";
 import { RulesWaitingCard } from "../components/RulesWaitingCard";
+import { AuditFindingsCard } from "../components/AuditFindingsCard";
 import { StatCard } from "../components/StatCard";
 import { ArrivalsCard } from "../components/ArrivalsCard";
 import { getReinsuranceDashboard, type ReinsuranceDashboard } from "../api/treaty";
@@ -717,6 +718,7 @@ export default function Home() {
 
         {/* Programme rules sent and not yet approved by everyone (carrier only). */}
         {role === "carrier_admin" && <RulesWaitingCard side="carrier" />}
+        {role === "carrier_admin" && <AuditFindingsCard side="carrier" />}
 
         {/* KPI tiles — wired to /dashboard/stats (see API notes for the new fields).
 

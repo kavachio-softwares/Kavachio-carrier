@@ -5,22 +5,25 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
-  CalendarClock, CheckCircle2, Clock, Download, Eye, FileStack, FileText, History, RefreshCw, Users,
-  XCircle, type LucideIcon,
+  AlertTriangle, CalendarClock, CheckCircle2, Clock, Download, Eye, FileSearch, FileStack, FileText, History,
+  RefreshCw, Users, XCircle, type LucideIcon,
 } from "lucide-react";
 import {
+  getPartnerProfile, getPartners, getRestores, type PartnerPage, type PartnerProfile, type RestoreRow,
   downloadVersion, getAccess, getContractHistory, getContractTimeline, getHistoryChoices, getSubmissions,
   getSubmissionTimeline, getVersions, type AccessPage, type Choice, type ContractPage, type ContractTimeline,
   type HistoryFilters, type SubmissionPage, type SubmissionTimeline, type TimelineStep, type VersionPage,
+  getTreatyHistory, getTreatyTimeline, type TreatyFilters, type TreatyPage, type TreatyTimeline,
 } from "../api/auditHistory";
 import type { AuditQuery, AuditRow } from "../api/audit";
 import { useServerList } from "../hooks/useServerList";
+import { AUDIT_PAGE, usePagedRows } from "../hooks/usePagedRows";
 import { Pagination } from "../components/Pagination";
 import { InfoTip } from "../components/InfoTip";
 import { showError } from "../components/ResultPopup";
 import { fmtDate, fmtDateTime } from "../utils/date";
 
-const PAGE = 25;
+const PAGE = 20;
 const L: React.CSSProperties = { textAlign: "left" };
 export const TONE: Record<string, string> = { ok: "b-ok", warn: "b-warn", bad: "b-crit", info: "b-info", muted: "b-mut" };
 
@@ -406,8 +409,119 @@ function ContractPanel({ id, onClose }: { id: number | null; onClose: () => void
   );
 }
 
+// ── Treaty History ─────────────────────────────────────────────────────────
+const STANDING_BADGE: Record<string, string> = { Signed: "b-ok", Approved: "b-info", "Asked for changes": "b-warn", Waiting: "b-mut" };
+
+export function TreatyHistory() {
+  const range = useRange("12");
+  const [f, setF] = useState<TreatyFilters>({});
+  const [failed, setFailed] = useState(false);
+  const [open, setOpen] = useState<number | null>(null);
+  const filters = useMemo(() => ({ ...f, ...range.dates }), [f, range.dates.from, range.dates.to]); // eslint-disable-line react-hooks/exhaustive-deps
+  const list = useServerList<TreatyPage["items"][number], TreatyPage>(
+    (p, n) => getTreatyHistory(filters, p, n).then(r => { setFailed(false); return r; })
+      .catch(e => { setFailed(true); throw e; }),
+    JSON.stringify(filters), PAGE);
+  const c = list.extra?.counts;
+  const ch = list.extra?.choices;
+  const set = (k: keyof TreatyFilters) => (v: string) => setF(x => ({ ...x, [k]: k === "status" ? v : v ? Number(v) : "" }));
+  return (
+    <>
+      <Bar clear={!!(f.reinsurer || f.programme || f.status || f.treaty || range.changed)} onClear={() => { setF({}); range.reset(); }}>
+        <Pick label="Treaty" value={f.treaty ?? ""} onChange={set("treaty")} all="All treaties"
+          options={(ch?.treaties ?? []).map(x => ({ value: x.id, label: x.name }))} />
+        <Pick label="Reinsurer" value={f.reinsurer ?? ""} onChange={set("reinsurer")} all="All reinsurers"
+          options={(ch?.reinsurers ?? []).map(x => ({ value: x.id, label: x.name }))} />
+        <Pick label="Programme" value={f.programme ?? ""} onChange={set("programme")} all="All programmes"
+          options={(ch?.programmes ?? []).map(x => ({ value: x.id, label: x.name }))} />
+        <Pick label="Status now" value={f.status ?? ""} onChange={set("status")} all="Any status"
+          options={(ch?.statuses ?? []).map(s => ({ value: s, label: s }))} />
+        {range.field("Date")}
+      </Bar>
+      <div style={tiles(4)}>
+        <Tile icon={FileText} label="Treaties" value={c?.treaties} colour="#2563eb" info="Treaties that match the filters." />
+        <Tile icon={CheckCircle2} label="In force" value={c?.active} colour="#16a34a" info="Treaties active now." />
+        <Tile icon={History} label="Terms changed" value={c?.terms_changed} colour="#d97706"
+          info="Treaties with a term changed from a date, or an endorsement applied." />
+        <Tile icon={Clock} label="Waiting for a reinsurer" value={c?.waiting} colour="#7c3aed"
+          info="Treaties a reinsurer has not yet approved or signed." />
+      </div>
+      <div className="card">
+        <div className="card-h"><h3>Every step on every treaty
+          <InfoTip text={"Drafts, approvals, signatures, term changes, endorsements and renewals, from the insurer and the reinsurers. Newest first.\nClick a row to see that treaty's whole story."} /></h3></div>
+        {loading(list.loading, list.items.length, "Nothing happened to these treaties in these dates.", failed) ?? (
+          <>
+            <div className="tbl-wrap"><table>
+              <thead><tr><th style={L}>Date</th><th style={L}>Treaty</th><th style={L}>What happened</th>
+                <th style={L}>Status</th><th style={L}>By</th></tr></thead>
+              <tbody>{list.items.map((r, i) => (
+                <tr key={`${r.treaty_id}-${i}`} onClick={() => setOpen(r.treaty_id)} style={{ cursor: "pointer" }}>
+                  <td style={{ ...L, whiteSpace: "nowrap" }} className="muted">{r.at ? fmtDateTime(r.at) : "—"}</td>
+                  <td style={{ ...L, whiteSpace: "normal" }}><b>{r.treaty}</b><div className="sub">{r.reinsurers} · {r.programme}</div></td>
+                  <td style={{ ...L, whiteSpace: "normal" }}>{r.title}{r.note && <div className="sub">“{r.note}”</div>}</td>
+                  <td style={L}>{r.after ? <>{r.before && <span className="sub">{r.before} → </span>}<b>{r.after}</b></>
+                    : <span className="sub">No change</span>}</td>
+                  <td style={L}>{r.by}{r.side === "reinsurer" && <div><span className="badge b-info">Reinsurer</span></div>}</td>
+                </tr>))}</tbody>
+            </table></div>
+            <Pagination page={list.page} pageSize={PAGE} totalItems={list.total} pageCount={list.pageCount}
+              onPageChange={list.setPage} noun="steps" />
+          </>)}
+      </div>
+      <TreatyPanel id={open} onClose={() => setOpen(null)} />
+    </>
+  );
+}
+
+function TreatyPanel({ id, onClose }: { id: number | null; onClose: () => void }) {
+  const [t, setT] = useState<TreatyTimeline | null>(null);
+  useEffect(() => {
+    setT(null);
+    if (id != null) getTreatyTimeline(id).then(setT).catch(e => { showError(e, "Could not open this treaty's history"); onClose(); });
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <SidePanel open={id != null} title={t?.name ?? "Treaty history"} sub={t && [t.type, t.programmes].filter(Boolean).join(" · ")} onClose={onClose}>
+      {!t ? <div className="muted">Loading…</div> : (
+        <>
+          <Facts rows={[["Status now", t.status], ["Type", t.type],
+                        ["Runs", t.starts || t.ends ? `${t.starts ? fmtDate(t.starts) : "—"} – ${t.ends ? fmtDate(t.ends) : "—"}` : null],
+                        ["Protects", t.programmes],
+                        ["Renews", t.renews && <Link className="linkish" to={`/contracts/${t.renews.id}`}>{t.renews.name}</Link>],
+                        ["Renewed by", t.renewed_by && <Link className="linkish" to={`/contracts/${t.renewed_by.id}`}>{t.renewed_by.name}</Link>]]} />
+          <h4 style={{ margin: "4px 0 8px" }}>Reinsurers
+            <InfoTip text={"Each reinsurer's share and where it stands.\nSigned: signed the treaty. Approved: approved its lines and terms. Waiting: not answered yet."} /></h4>
+          {t.reinsurers.length === 0 ? <div className="empty">No reinsurers on this treaty yet.</div> : (
+            <div className="tbl-wrap" style={{ marginBottom: 12 }}><table>
+              <thead><tr><th style={L}>Reinsurer</th><th style={L}>Share</th><th style={L}>Where it stands</th></tr></thead>
+              <tbody>{t.reinsurers.map(x => (
+                <tr key={x.id}><td style={L}><b>{x.name}</b>{x.lead && <span className="sub"> · Lead</span>}</td>
+                  <td style={L}>{x.share ?? "—"}</td>
+                  <td style={L}><span className={`badge ${STANDING_BADGE[x.standing] ?? "b-mut"}`}>{x.standing}</span></td></tr>))}</tbody>
+            </table></div>)}
+          <div style={{ marginBottom: 12 }}><Link className="linkish" to={`/contracts/${t.id}`}>Open the treaty →</Link></div>
+          <h4 style={{ margin: "4px 0 12px" }}>Timeline</h4>
+          <Timeline steps={t.steps.map(s => ({ ...s, detail: s.note ? `“${s.note}”` : null }))} />
+        </>)}
+    </SidePanel>
+  );
+}
+
 // ── File Versions ──────────────────────────────────────────────────────────
+/** Versions & Restores: two lists, one at a time, as two sub-tabs. */
 export function FileVersions() {
+  const [view, setView] = useState<"versions" | "restores">("versions");
+  return (
+    <>
+      <span className="seg" style={{ marginBottom: 14, display: "inline-flex" }}>
+        <button type="button" className={view === "versions" ? "on" : ""} onClick={() => setView("versions")}>File versions</button>
+        <button type="button" className={view === "restores" ? "on" : ""} onClick={() => setView("restores")}>Setups made active again</button>
+      </span>
+      {view === "versions" ? <Versions /> : <Restores />}
+    </>
+  );
+}
+
+function Versions() {
   const ch = useChoices();
   const [f, setF] = useState<HistoryFilters>({});
   const [failed, setFailed] = useState(false);
@@ -467,5 +581,134 @@ export function FileVersions() {
           </>)}
       </div>
     </>
+  );
+}
+
+/** Earlier Bordereau Setups made active again (51.1), newest first. */
+function Restores() {
+  const [failed, setFailed] = useState(false);
+  const list = useServerList<RestoreRow>(
+    (p, n) => getRestores(p, n).then(r => { setFailed(false); return r; }).catch(e => { setFailed(true); throw e; }),
+    "restores", PAGE);
+  return (
+    <div className="card">
+      <div className="card-h"><h3>Setups made active again{list.total ? ` (${list.total})` : ""}
+        <InfoTip text={"When a Bordereau Setup that was replaced is switched back on, it is listed here with the reason.\nFiles already processed are never changed."} /></h3></div>
+      {loading(list.loading, list.items.length, "No setup has been made active again.", failed) ?? (
+        <>
+          <div className="tbl-wrap"><table>
+            <thead><tr><th style={L}>Date</th><th style={L}>Setup now in use</th><th style={L}>Programme</th><th style={L}>Broker</th>
+              <th style={L}>Setup it replaced</th><th style={{ ...L, minWidth: 220 }}>Reason</th><th style={L}>By</th></tr></thead>
+            <tbody>{list.items.map((r, i) => (
+              <tr key={i}>
+                <td style={{ ...L, whiteSpace: "nowrap" }} className="muted">{r.at ? fmtDateTime(r.at) : "—"}</td>
+                <td style={L}>{r.setup_id ? <Link className="linkish" to={`/direct/setups/${r.setup_id}`}>{r.setup}</Link> : r.setup}</td>
+                <td style={L}>{r.programme}</td><td style={L}>{r.broker}</td><td style={L}>{r.replaced}</td>
+                <td style={{ ...L, whiteSpace: "normal" }}>{r.reason || "—"}</td><td style={L}>{r.by}</td>
+              </tr>))}</tbody>
+          </table></div>
+          <Pagination page={list.page} pageSize={PAGE} totalItems={list.total} pageCount={list.pageCount}
+            onPageChange={list.setPage} noun="entries" />
+        </>)}
+    </div>
+  );
+}
+
+// ── Partner Monitoring (54.1) ──────────────────────────────────────────────
+const RISK_BADGE: Record<string, string> = { High: "b-crit", Medium: "b-warn", Low: "b-ok" };
+
+export function PartnerMonitoring() {
+  const ch = useChoices();
+  const [f, setF] = useState<HistoryFilters & { risk?: string; type?: string }>({});
+  const [failed, setFailed] = useState(false);
+  const [open, setOpen] = useState<number | null>(null);
+  const list = useServerList<PartnerPage["items"][number], PartnerPage>(
+    (p, n) => getPartners(f, p, n).then(r => { setFailed(false); return r; }).catch(e => { setFailed(true); throw e; }),
+    JSON.stringify(f), PAGE);
+  const c = list.extra?.counts;
+  const months = list.extra?.months ?? 6;
+  const set = (k: "broker" | "programme" | "risk" | "type") => (v: string) =>
+    setF(x => ({ ...x, [k]: k === "risk" || k === "type" ? v : v ? Number(v) : "" }));
+  return (
+    <>
+      <Bar clear={!!(f.broker || f.programme || f.risk || f.type)} onClear={() => setF({})}>
+        <Pick label="Broker" value={f.broker ?? ""} onChange={set("broker")} all="All brokers"
+          options={ch.brokers.map(b => ({ value: b.id, label: b.name }))} />
+        <Pick label="Programme" value={f.programme ?? ""} onChange={set("programme")} all="All programmes"
+          options={ch.programmes.map(p => ({ value: p.id, label: p.name }))} />
+        <Pick label="Risk level" value={f.risk ?? ""} onChange={set("risk")} all="Any risk"
+          options={["High", "Medium", "Low"].map(r => ({ value: r, label: r }))} />
+        <Pick label="Partner type" value={f.type ?? ""} onChange={set("type")} all="All types"
+          options={(list.extra?.types ?? []).map(t => ({ value: t.id, label: t.name }))} />
+      </Bar>
+      <div style={tiles(4)}>
+        <Tile icon={Users} label="Brokers" value={c?.brokers} colour="#2563eb" info="Brokers on your programmes." />
+        <Tile icon={AlertTriangle} label="High risk" value={c?.high} colour="#dc2626" info={list.extra?.rule} />
+        <Tile icon={FileSearch} label="Open findings" value={c?.open_findings} colour="#d97706" info="Audit findings not closed yet." />
+        <Tile icon={Clock} label={`Late files (${months} months)`} value={c?.late} colour="#7c3aed" info={`Files that arrived after their due date in the last ${months} months.`} />
+      </div>
+      <div className="card">
+        <div className="card-h"><h3>How each broker is doing
+          <InfoTip text={`Files, lateness and open audit findings over the last ${months} months.\nClick a broker for its profile.`} /></h3></div>
+        {list.extra && !list.extra.audits_ready && (
+          <div className="note warn" style={{ margin: "10px 16px 0" }}>Audits are not set up on this database yet, so open findings show as 0.</div>)}
+        {loading(list.loading, list.items.length, "No brokers match these filters.", failed) ?? (
+          <>
+            <div className="tbl-wrap"><table>
+              <thead><tr><th style={L}>Broker</th>
+                <th style={L}>Type <InfoTip text={"The kind of company in the broker's place on your programmes.\nA claims handler shows as \"Claims handler (TPA)\"."} /></th>
+                <th style={L}>Programmes</th><th style={L}>Files sent</th><th style={L}>Late</th>
+                <th style={L}>Missing</th><th style={L}>Open findings</th>
+                <th style={L}>Risk level <InfoTip text={list.extra?.rule ?? ""} /></th></tr></thead>
+              <tbody>{list.items.map(r => (
+                <tr key={r.broker_id} onClick={() => setOpen(r.broker_id)} style={{ cursor: "pointer" }}>
+                  <td style={L}><b>{r.broker}</b></td><td style={L}>{r.type_label}</td><td style={L}>{r.programmes}</td><td style={L}>{r.files_sent}</td>
+                  <td style={L}>{r.late || "—"}</td><td style={L}>{r.missing || "—"}</td>
+                  <td style={L}>{r.open_findings || "—"}{r.critical_findings > 0 && <span className="sub"> ({r.critical_findings} critical)</span>}</td>
+                  <td style={L}><span className={`badge ${RISK_BADGE[r.risk]}`}>{r.risk}</span>
+                    <div className="sub" style={{ whiteSpace: "normal" }}>{r.reasons.join(" · ")}</div></td>
+                </tr>))}</tbody>
+            </table></div>
+            <Pagination page={list.page} pageSize={PAGE} totalItems={list.total} pageCount={list.pageCount}
+              onPageChange={list.setPage} noun="brokers" />
+          </>)}
+      </div>
+      <PartnerPanel id={open} onClose={() => setOpen(null)} />
+    </>
+  );
+}
+
+function PartnerPanel({ id, onClose }: { id: number | null; onClose: () => void }) {
+  const [p, setP] = useState<PartnerProfile | null>(null);
+  useEffect(() => {
+    setP(null);
+    if (id != null) getPartnerProfile(id).then(setP).catch(e => { showError(e, "Could not open this broker"); onClose(); });
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const findings = usePagedRows(p?.findings ?? [], AUDIT_PAGE, id);
+  return (
+    <SidePanel open={id != null} title={p?.broker ?? "Partner profile"} sub="Partner profile" onClose={onClose}>
+      {!p ? <div className="muted">Loading…</div> : (
+        <>
+          <div style={{ marginBottom: 12 }}><span className={`badge ${RISK_BADGE[p.risk]}`} style={{ fontSize: 13 }}>{p.risk} risk</span>
+            <div style={{ marginTop: 6 }}>{p.reasons.join(" · ")}</div>
+            <div className="sub" style={{ marginTop: 4 }}>{p.rule}</div></div>
+          <Facts rows={[["Type", p.type_label], ["Programmes", p.programme_list.map(x => x.name).join(", ") || "—"], ["Files sent", p.files_sent],
+                        ["Late files", p.late], ["Missing files", p.missing], ["Open findings", p.open_findings]]} />
+          <h4 style={{ margin: "4px 0 10px" }}>Open findings</h4>
+          {p.findings.length === 0 ? <div className="empty">No open findings.</div> : (
+            <div className="tbl-wrap"><table>
+              <thead><tr><th style={L}>Finding</th><th style={L}>How serious</th><th style={L}>Due</th><th style={L}>Status</th></tr></thead>
+              <tbody>{findings.rows.map(x => (
+                <tr key={x.id}><td style={{ ...L, whiteSpace: "normal" }}>{x.title}</td><td style={L}>{x.severity}</td>
+                  <td style={L}>{x.due_date ? fmtDate(x.due_date) : "—"}{x.overdue && <div><span className="badge b-crit">Overdue</span></div>}</td>
+                  <td style={L}>{x.status}</td></tr>))}</tbody>
+            </table></div>)}
+          {p.findings.length > AUDIT_PAGE && <Pagination {...findings.pager} noun="findings" />}
+          <div style={{ display: "flex", gap: 14, marginTop: 14 }}>
+            <Link className="linkish" to="/audit?tab=submissions" onClick={onClose}>Submission history →</Link>
+            <Link className="linkish" to="/audit?tab=audits" onClick={onClose}>Audits →</Link>
+          </div>
+        </>)}
+    </SidePanel>
   );
 }

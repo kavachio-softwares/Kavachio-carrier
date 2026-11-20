@@ -19,7 +19,7 @@ import { fmtDateTime } from "../utils/date";
 import { Facts, SidePanel, Tile, tiles } from "./AuditHistoryTabs";
 import { Bar, ChangesTable, KeptOnFile, L, listState, Pick, SearchBox, useRange, val } from "./AuditTabParts";
 
-const PAGE = 25;
+const PAGE = 20;
 const EVENT_TONE: Record<string, string> = {
   Created: "b-ok", Changed: "b-info", Deleted: "b-crit", Removed: "b-crit", "Switched off": "b-warn",
   "Switched on": "b-ok", Retired: "b-mut",

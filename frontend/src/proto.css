@@ -1720,3 +1720,43 @@
 
 /* Review Wording & Terms (26.3): document beside its terms, stacked when narrow. */
 @media(max-width:1100px){.proto .wording-review{grid-template-columns:1fr !important}}
+
+/* Audit Logs — the filter panel (one list, no tabs; 20 Nov 2026). */
+.proto .afl{overflow:visible}
+.proto .afl-head{display:flex;align-items:center;gap:8px;width:100%;padding:11px 16px;border:0;border-bottom:1px solid var(--p-border);background:transparent;font-size:13px;font-weight:700;color:var(--p-primary);cursor:pointer;text-align:left}
+.proto .afl-count{font-size:11.5px;font-weight:600;color:var(--p-primary);background:var(--p-primary-soft);border-radius:999px;padding:2px 9px}
+.proto .afl-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:12px;padding:14px 16px 4px}
+@media (max-width:1280px){.proto .afl-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:720px){.proto .afl-grid{grid-template-columns:minmax(0,1fr)}}
+.proto .afl-f{display:flex;flex-direction:column;gap:6px;min-width:0}
+.proto .afl-f > span:first-child{font-size:12px;font-weight:700;color:var(--p-ink)}
+.proto .afl-box{position:relative;display:block}
+.proto .afl-box .afl-ic{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--p-faint);pointer-events:none}
+.proto .afl-box select{width:100%;height:36px;box-sizing:border-box;border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);background:var(--p-surface);color:var(--p-ink);font-size:13px;padding:0 10px;text-overflow:ellipsis}
+.proto .afl-box .afl-ic + select{padding-left:31px}
+.proto .afl-box select:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .afl-box select.on{border-color:var(--p-primary);background:var(--p-primary-soft)}
+.proto .afl-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;padding:10px 16px 14px}
+.proto .afl-row .btn{height:36px;box-sizing:border-box}
+.proto .afl-row .fbar-field{min-width:150px}
+.proto .afl-row .fbar-select{height:36px;box-sizing:border-box}
+.proto .afl-search{flex:1 1 300px;height:36px;box-sizing:border-box;padding:0 12px}
+.proto .afl-dates{display:flex;align-items:center;gap:8px}
+.proto .afl-dates input{height:36px;box-sizing:border-box;border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);padding:0 8px;font-size:13px;background:var(--p-surface);color:var(--p-ink)}
+.proto .afl-chips{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:0 16px 14px}
+.proto .afl-chip{display:inline-flex;align-items:center;gap:5px;border:0;border-radius:999px;padding:3px 10px;font-size:12px;background:var(--p-primary-soft);color:var(--p-primary);cursor:pointer}
+.proto .afl-area{display:inline-block;font-size:11.5px;padding:2px 8px;border-radius:5px;background:#EEF2FF;color:#3730A3;white-space:nowrap}
+.proto .afl-val{white-space:normal;max-width:200px;font-size:12.5px}
+.proto .afl-table{table-layout:fixed;width:100%}
+.proto .afl-table td,.proto .afl-table th{white-space:normal;overflow-wrap:anywhere;padding-left:10px;padding-right:10px}
+.proto .afl-table .afl-area{white-space:normal}
+.proto .afl-row .fbar-field > .sub{display:none}
+/* Audit Logs — Event details panel. */
+.proto .evd-sec{padding:4px 0 6px;border-bottom:1px solid var(--p-border);margin-bottom:10px}
+.proto .evd-sec:last-of-type{border-bottom:0}
+.proto .evd-h{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--p-primary);margin:4px 0 10px}
+.proto .evd-tbl td,.proto .evd-tbl th{text-align:left;white-space:normal;font-size:12.5px;padding:6px 6px;vertical-align:top}
+.proto .evd-arrow{color:var(--p-primary);width:18px}
+.proto .evd-tl{display:grid;gap:6px;font-size:12.5px;margin-bottom:8px}
+.proto .evd-tl .muted{margin-right:6px}
+.proto .evd-ref{font-size:11.5px;color:var(--p-faint);margin-top:6px}

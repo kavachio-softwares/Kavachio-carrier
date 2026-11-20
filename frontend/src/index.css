@@ -191,3 +191,6 @@ tbody tr:hover { @apply bg-surface-2/60; }
   border-radius: 50%;
 }
 
+
+/* TabStrip: one line of tabs that scrolls sideways — no visible scrollbar (the ‹ › buttons show there is more). */
+.tab-strip::-webkit-scrollbar { display: none; }

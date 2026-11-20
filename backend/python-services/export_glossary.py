@@ -212,6 +212,10 @@ TERMS: list[tuple[tuple[str, ...], str]] = [
     (("Organisation",), "The company the person works for."),
     (("Action",), "What was done, in plain words, for example “Uploaded a file” or “Signed a contract”."),
     (("What exactly",), "The details of the change, for example the old value and the new value."),
+    (("Area",), "Which part of Kavachio it was in, for example Broker contracts, Reinsurance or Bordereaux received."),
+    (("Old value",), "What a field held before this change. Empty when nothing was changed."),
+    (("New value",), "What the field holds after this change. “(+2 more)” means more fields changed in the same "
+                     "save."),
     (("Bulk update",), "Filled in when many items were changed at once and are shown as one line."),
     (("Target type",), "The kind of thing that was changed, for example a file, contract, programme or user."),
     (("Target", "Target / file"), "The name of the thing that was changed."),
@@ -222,6 +226,13 @@ TERMS: list[tuple[tuple[str, ...], str]] = [
     # comparisons
     (("vs",), "How this period compares with the period named. Green means better, red means worse, grey means "
               "only more or less work, neither good nor bad."),
+    # the audit package (audit_package.py): which version of each check ran
+    (("Version that ran",), "Which version of the check was in place when it last ran in this period, as counted "
+                            "in Audit Logs > Rule History. \"As today\" means no change to it was ever recorded."),
+    (("Changed since",), "Whether the check was changed after it ran, how many times, and when last. "
+                         "\"No\" means what ran is what is in place today."),
+    (("Check as it ran",), "For a check changed since: how strict it was, its message and its settings when it ran, "
+                           "as kept in Rule History. Empty when it has not changed."),
 ]
 
 PERIOD_MEANING = "The figures for each period named, side by side so you can compare them."

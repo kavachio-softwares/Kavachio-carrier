@@ -26,7 +26,9 @@ export const getTrailSummary = (q: AuditQuery) =>
   api.get<TrailSummary>("/audit/history/summary", {
     params: clean({ from: dayStart(q.from), to: dayEnd(q.to), actor: q.actor,
                     action: q.action && q.action !== "all" ? q.action : undefined, q: q.q,
-                    record: q.record }),
+                    record: q.record, verb: q.verb || undefined, programme: q.programme || undefined,
+                    status: q.status || undefined,
+                    tz: q.q?.trim() ? -new Date().getTimezoneOffset() : undefined }),
   }).then(r => r.data);
 
 export type AccessPage = AuditPage & { counts: { viewed: number; downloaded: number; people: number } };
@@ -108,3 +110,74 @@ export interface VersionPage {
 export const getVersions = (f: HistoryFilters, page: number, pageSize: number) =>
   api.get<VersionPage>("/audit/history/versions", { params: hp(f, page, pageSize) }).then(r => r.data);
 export const downloadVersion = (exportId: number) => downloadFile(`/export/downloads/${exportId}/file`);
+
+// ── Partner Monitoring (54.1) ──────────────────────────────────────────────
+export interface PartnerRow {
+  broker_id: number; broker: string; type: string; type_label: string; programmes: number; files_sent: number; late: number; missing: number;
+  open_findings: number; critical_findings: number; risk: "High" | "Medium" | "Low"; reasons: string[];
+}
+export interface PartnerPage {
+  items: PartnerRow[]; total: number; page: number; page_size: number;
+  counts: { brokers: number; high: number; open_findings: number; late: number };
+  rule: string; months: number; audits_ready: boolean; types: { id: string; name: string }[];
+}
+export interface PartnerProfile extends PartnerRow {
+  programme_list: Choice[]; rule: string;
+  findings: { id: number; audit_id: number; title: string; severity: string; status: string; due_date: string | null; overdue: boolean }[];
+}
+export const getPartners = (f: HistoryFilters & { risk?: string; type?: string }, page: number, pageSize: number) =>
+  api.get<PartnerPage>("/audit/history/partners", { params: { ...hp(f, page, pageSize), ...clean({ risk: f.risk, type: f.type }) } })
+    .then(r => r.data);
+export const getPartnerProfile = (brokerId: number) =>
+  api.get<PartnerProfile>(`/audit/history/partners/${brokerId}`, { params: clean(mga()) }).then(r => r.data);
+
+// ── Setups made active again (51.1) ────────────────────────────────────────
+export interface RestoreRow {
+  at: string | null; setup: string | null; setup_id: number | null; programme: string; broker: string;
+  replaced: string; reason: string | null; by: string;
+}
+export const getRestores = (page: number, pageSize: number) =>
+  api.get<{ items: RestoreRow[]; total: number; page: number; page_size: number }>("/audit/history/restores",
+    { params: clean({ ...mga(), page, page_size: pageSize }) }).then(r => r.data);
+export interface RestorePreview { setup: string; ready: boolean; not_ready_reason: string | null; replaces: Choice[] }
+export const getRestorePreview = (pipelineId: number) =>
+  api.get<RestorePreview>(`/pipelines/${pipelineId}/restore`).then(r => r.data);
+export const restoreSetup = (pipelineId: number, reason: string) =>
+  api.post(`/pipelines/${pipelineId}/restore`, { reason }).then(r => r.data);
+
+// ── Audit package (50.1) ───────────────────────────────────────────────────
+export interface PackageAsk {
+  policy?: string; month?: string; from?: string; to?: string; programme?: number | ""; broker?: number | "";
+  /** The Date filter as the screen names it ("Last 30 days"), for the file's own words. */
+  dates?: string;
+  format: "excel" | "pdf";
+}
+export const downloadAuditPackage = (a: PackageAsk) =>
+  downloadFile(`/audit/history/package?${new URLSearchParams(Object.entries(
+    clean({ ...mga(), ...a })).map(([k, v]) => [k, String(v)])).toString()}`);
+
+// ── Treaty History (backend treaty_history.py) ─────────────────────────────
+export interface TreatyStep {
+  at: string | null; action: string; title: string; kind: string; before: string | null; after: string | null;
+  note: string | null; by: string; side: "insurer" | "reinsurer";
+}
+export interface TreatyEvent extends TreatyStep { treaty_id: number; treaty: string; reinsurers: string; programme: string }
+export interface TreatyPage {
+  items: TreatyEvent[]; total: number; page: number; page_size: number;
+  counts: { treaties: number; active: number; terms_changed: number; waiting: number };
+  choices: { treaties: Choice[]; reinsurers: Choice[]; programmes: Choice[]; statuses: string[] };
+}
+export interface TreatyTimeline {
+  id: number; name: string; type: string | null; status: string; starts: string | null; ends: string | null;
+  programmes: string; renews: Choice | null; renewed_by: Choice | null;
+  reinsurers: { id: number; name: string; share: string | null; lead: boolean; standing: string }[];
+  steps: TreatyStep[];
+}
+export type TreatyFilters = { reinsurer?: number | ""; programme?: number | ""; treaty?: number | ""; status?: string; from?: string; to?: string };
+export const getTreatyHistory = (f: TreatyFilters, page: number, pageSize: number) =>
+  api.get<TreatyPage>("/audit/history/treaties", {
+    params: clean({ ...mga(), reinsurer: f.reinsurer, programme: f.programme, treaty: f.treaty, status: f.status,
+                    from: f.from, to: f.to, page, page_size: pageSize }),
+  }).then(r => r.data);
+export const getTreatyTimeline = (id: number) =>
+  api.get<TreatyTimeline>(`/audit/history/treaties/${id}`, { params: clean(mga()) }).then(r => r.data);

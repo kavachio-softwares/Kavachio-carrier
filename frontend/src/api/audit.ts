@@ -33,6 +33,13 @@ export type AuditRow = {
   /** Kavachio's rows only: the evidence behind a large contract date
    *  correction, opened with downloadCorrectionEvidence. Null otherwise. */
   evidence?: { event_id: number; filename: string } | null;
+  /** Which part of Kavachio: the Sub-area ("Contract signing") and its Area ("Contracts"). */
+  area?: string | null;
+  module?: string | null;
+  /** The before / after of a save, when one was recorded (first field, then "(+n more)"). */
+  old?: string | null;
+  new?: string | null;
+  changes?: { field: string | null; old: string | null; new: string | null }[];
 };
 
 export type AuditPage = {
@@ -44,10 +51,17 @@ export type AuditPage = {
 };
 
 export type AuditOptions = {
-  actors: { key: string; label: string; role: string }[];
+  actors: { key: string; label: string; role: string; org?: string | null; side?: string | null; everyone?: boolean }[];
   action_groups: { key: string; label: string; actions: string[] }[];
   seat: string;
   categories: string[];
+  /** Area (the menu's modules) → its Sub-areas. */
+  modules?: { key: string; label: string; subs: { key: string; label: string; info?: string }[] }[];
+  verbs?: { key: string; label: string }[];
+  statuses?: { key: string; label: string }[];
+  /** Each Area's own Action list and Status list. */
+  area_actions?: Record<string, { key: string; label: string }[]>;
+  area_statuses?: Record<string, { key: string; label: string }[]>;
 };
 
 export type AuditQuery = {
@@ -56,11 +70,18 @@ export type AuditQuery = {
   to?: string;
   /** "user:12" | "broker:5" | "system" — "" for everyone in reach. */
   actor?: string;
-  /** An Action Type group key, or one event name. "" / "all" for everything. */
+  /** An Area ("m_contracts") or Sub-area ("signing") key, or one event name. "" / "all" for everything. */
   action?: string;
   q?: string;
   /** One record only (task 49.1): "contract:12" | "policy:P-1" | "file:march". */
   record?: string;
+  /** What kind of step ("added" | "changed" | …), or with an Area chosen, that
+   *  Area's own action (event names, comma-separated). "" for every action. */
+  verb?: string;
+  /** One programme's rows. */
+  programme?: number | null;
+  /** A Status badge's words ("Signed", "Deleted", …); "" for every status. */
+  status?: string;
 };
 
 /** Start of a local calendar day as an instant the server can compare.
@@ -92,6 +113,11 @@ function params(q: AuditQuery): Record<string, string> {
   if (q.action && q.action !== "all") out.action = q.action;
   if (q.q?.trim()) out.q = q.q.trim();
   if (q.record) out.record = q.record;
+  if (q.verb) out.verb = q.verb;
+  if (q.programme) out.programme = String(q.programme);
+  if (q.status) out.status = q.status;
+  // Search matches the times as the table shows them, in this browser's zone.
+  if (q.q?.trim()) out.tz = String(-new Date().getTimezoneOffset());
   return out;
 }
 
@@ -132,4 +158,27 @@ export async function downloadAuditLogs(q: AuditQuery, format: "csv" | "xlsx") {
  *  that correction's audit row — the only way Kavachio reaches it. */
 export async function downloadCorrectionEvidence(eventId: number, filename: string) {
   await downloadFile(`/admin/contract-period-evidence/${eventId}/file`, filename);
+}
+
+/** One entry in full, for the Event details panel (GET /audit/logs/event). */
+export type AuditEvent = {
+  row: AuditRow;
+  who: { person: string; role: string; organisation: string | null; carrier: string | null; how: string; ip: string | null };
+  what: { area: string | null; sub_area: string | null; action_type: string | null; on: string | null;
+          programme: string | null; contract: string | null };
+  changes: { field: string | null; old: string | null; new: string | null }[];
+  reason: string | null;
+  more: { label: string; value: string }[];
+  earlier: { at: string | null; who: string; what: string; status: string; tone: AuditRow["tone"] }[];
+  /** Filters the list to this record: a "contract:12" record, or else words to search. */
+  record: string | null;
+  search: string | null;
+  reference: string;
+};
+
+export async function getAuditEvent(id: string): Promise<AuditEvent> {
+  const { data } = await api.get<AuditEvent>("/audit/logs/event", {
+    params: { id, tz: -new Date().getTimezoneOffset() },
+  });
+  return data;
 }

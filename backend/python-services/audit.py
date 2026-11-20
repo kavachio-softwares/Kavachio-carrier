@@ -416,6 +416,22 @@ _SELF_LOGGED = [
     ("POST",   re.compile(r"^/programs/\d+/rules/\d+/(send|retire)$")),
     ("POST",   re.compile(r"^/broker/programme-rules/\d+/(approve|request-changes)$")),
     ("POST",   re.compile(r"^/treaty-view/[^/]+/programme-rules/\d+/(approve|request-changes)$")),
+    # Making an earlier Bordereau Setup active again names itself, with the reason (setup_restore).
+    ("POST",   re.compile(r"^/pipelines/\d+/restore$")),
+    # Audit Management: every write names itself (audit_management_routes).
+    ("POST",   re.compile(r"^/audits$")),
+    ("PUT",    re.compile(r"^/audits/\d+$")),
+    ("POST",   re.compile(r"^/audits/\d+/close$")),
+    ("POST",   re.compile(r"^/audits/\d+/findings$")),
+    ("PUT",    re.compile(r"^/audits/\d+/findings/\d+$")),
+    ("POST",   re.compile(r"^/audits/\d+/findings/\d+/(status|reply)$")),
+    ("POST",   re.compile(r"^/broker/audit-findings/\d+/reply$")),
+    # Integrity and retention (52.1 / 52.2): every write names itself (integrity_routes).
+    ("POST",   re.compile(r"^/audit/integrity/check$")),
+    ("PUT",    re.compile(r"^/audit/retention/rules$")),
+    ("DELETE", re.compile(r"^/audit/retention/rules/\d+$")),
+    ("POST",   re.compile(r"^/audit/retention/holds$")),
+    ("POST",   re.compile(r"^/audit/retention/holds/\d+/lift$")),
     ("PUT",    re.compile(r"^/intake/routes/\d+/contacts$")),
     ("POST",   re.compile(r"^/extra-fields$")),
     ("POST",   re.compile(r"^/extra-fields/[^/]+/adopt$")),
@@ -628,6 +644,9 @@ _ACCESS_PATHS = [
     re.compile(r"^/reports/monthly/(sends/\d+/)?file$"),
     re.compile(r"^/reports/partner-performance/file$"),
     re.compile(r"^/reinsurance/bordereaux/\d+/statements/\d+/file$"),
+    re.compile(r"^/audits/\d+/findings/\d+/files/\d+$"),
+    re.compile(r"^/audit/history/package$"),
+    re.compile(r"^/broker/audit-findings/\d+/files/\d+$"),
 ]
 
 # Reads whose path alone does not say WHICH data: the query names it.

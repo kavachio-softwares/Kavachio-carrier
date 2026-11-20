@@ -1618,6 +1618,29 @@ def _pipeline_to_dict(s, p: Pipeline, derive_refs: bool = False) -> dict:
     }
 
 
+def replaced_by(s, p: Pipeline) -> list:
+    """The live setups that making `p` active would supersede: same carrier,
+    programme and broker, covering any of the same contracts (see
+    _activate_pipeline). Also read by setup_restore to say so beforehand."""
+    from setup_scope import contract_ids_of
+    mine = contract_ids_of(s, p.id)
+    peers = s.query(Pipeline).filter(
+        Pipeline.tenant_id == p.tenant_id,
+        Pipeline.carrier_party_id == p.carrier_party_id,
+        Pipeline.program_id == p.program_id,
+        (Pipeline.broker_party_id.is_(None) if p.broker_party_id is None
+         else Pipeline.broker_party_id == p.broker_party_id),
+        Pipeline.id != p.id,
+        Pipeline.status == "active",
+    ).all()
+    out = []
+    for peer in peers:
+        theirs = contract_ids_of(s, peer.id)
+        if not mine or not theirs or (mine & theirs):
+            out.append(peer)
+    return out
+
+
 def _activate_pipeline(s, p: Pipeline) -> None:
     """Enforce completeness, then make this pipeline live — superseding the live
     ones it replaces (same carrier, program and broker, overlapping contracts). Raises HTTP 400 with
@@ -1638,21 +1661,8 @@ def _activate_pipeline(s, p: Pipeline) -> None:
     # were attached) covers every contract, so it still collides with every
     # other one exactly as before, and a pre-broker setup (broker NULL) still
     # only ever collides with another NULL.
-    from setup_scope import contract_ids_of
-    mine = contract_ids_of(s, p.id)
-    peers = s.query(Pipeline).filter(
-        Pipeline.tenant_id == p.tenant_id,
-        Pipeline.carrier_party_id == p.carrier_party_id,
-        Pipeline.program_id == p.program_id,
-        (Pipeline.broker_party_id.is_(None) if p.broker_party_id is None
-         else Pipeline.broker_party_id == p.broker_party_id),
-        Pipeline.id != p.id,
-        Pipeline.status == "active",
-    ).all()
-    for peer in peers:
-        theirs = contract_ids_of(s, peer.id)
-        if not mine or not theirs or (mine & theirs):
-            peer.status = "superseded"
+    for peer in replaced_by(s, p):
+        peer.status = "superseded"
     p.status = "active"
     p.modified_at = datetime.utcnow()
 

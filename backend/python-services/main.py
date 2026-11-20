@@ -59,6 +59,9 @@ from audit_history_routes import router as audit_history_router
 # Change History, Rule History, reinsurer link views (tasks 48.1, 48.2, 49.1).
 from audit_change_routes import router as audit_change_router
 import change_history as _change_history
+from audit_management_routes import router as audit_management_router
+from setup_restore import router as setup_restore_router
+from integrity_routes import router as integrity_router
 # Reinsurance treaties (Phase 26): a treaty's structure and the programmes it
 # protects (carrier side), and the reinsurer's private read-only link, unlocked
 # by an emailed one-time code (/treaty-view/…, no login).
@@ -175,6 +178,9 @@ app.include_router(ceded_router)
 app.include_router(audit_router)
 app.include_router(audit_history_router)
 app.include_router(audit_change_router)
+app.include_router(audit_management_router)
+app.include_router(setup_restore_router)
+app.include_router(integrity_router)
 # The secure correction link — no login, the emailed token is the credential.
 app.include_router(fix_link_router)
 app.include_router(submission_router)

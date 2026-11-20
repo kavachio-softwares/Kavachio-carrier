@@ -483,6 +483,23 @@ ACTION_WORDS = {
     "programme_rule_deleted":     "Deleted a draft programme rule",
     "programme_rule_approved":    "Approved a programme rule",
     "programme_rule_changes_requested": "Asked for changes to a programme rule",
+    "setup_made_active_again":    "Made an earlier Bordereau Setup active again",
+    "audit_created":              "Recorded an audit",
+    "audit_updated":              "Changed an audit",
+    "audit_closed":               "Closed an audit",
+    "audit_finding_created":      "Raised an audit finding",
+    "audit_finding_updated":      "Changed an audit finding",
+    "audit_finding_status":       "Moved an audit finding on",
+    "audit_finding_closed":       "Closed an audit finding",
+    "audit_finding_reopened":     "Reopened an audit finding",
+    "audit_finding_replied":      "Replied on an audit finding",
+    "audit_finding_evidence":     "Added evidence to an audit finding",
+    "audit_finding_reminder":     "Sent an audit finding reminder",
+    "integrity_checked":          "Checked that audit records were not changed",
+    "retention_rule_saved":       "Set how long records are kept",
+    "retention_rule_removed":     "Removed a retention period",
+    "legal_hold_placed":          "Placed a legal hold on records",
+    "legal_hold_lifted":          "Lifted a legal hold on records",
     # The status messages about a file — to the broker, or the carrier when a
     # deadline needs a decision. Which message, and to whom, is the detail.
     "bdx_notice_sent":            "Emailed a file status update",
@@ -690,6 +707,8 @@ _ACCESS_WORDS = [
     (re.compile(r"^/audit/changes/download"),    "Downloaded the change history"),
     (re.compile(r"^/audit/rules/download"),      "Downloaded the rule history"),
     (re.compile(r"^/policies/detail"),           "Opened a policy"),
+    (re.compile(r"^/audit/history/package"),     "Downloaded an audit package"),
+    (re.compile(r"^/(audits/\d+|broker/audit-findings)/.*files/\d+"), "Downloaded evidence on an audit finding"),
     (re.compile(r"^/contracts/\d+/documents/\d+/view"), "Opened a contract document"),
     (re.compile(r"^/contracts/\d+/documents/\d+/download"), "Downloaded a contract document"),
     (re.compile(r"^/contracts/\d+/contract\.pdf"), "Downloaded the contract PDF"),
@@ -710,7 +729,7 @@ def access_words(action: str, resource: Optional[str]) -> str:
     return action_words(action)
 
 
-DOWNLOAD_RESOURCES = r"(/file$|/download$|\.pdf$|^/audit/export$)"
+DOWNLOAD_RESOURCES = r"(/file$|/download$|\.pdf$|^/audit/export$|^/audit/history/package$)"
 
 
 def _access_status(label: str) -> tuple[str, str]:
@@ -788,7 +807,7 @@ _DETAIL_LABELS = {
     "rows": "{v} rows", "policies": "{v} policies", "exceptions": "{v} exceptions",
     "updated": "{v} updated", "skipped": "{v} skipped", "loaded": "{v} loaded",
     "failed": "{v} failed", "sheet_count": "{v} sheets", "count": "{v} items",
-    "version": "version {v}", "lane": "{v} lane", "reason": "{v}",
+    "version": "version {v}", "lane": "{v} lane", "reason": "{v}", "reminder": "Reminder: {v}",
     "role": "role {v}", "stage": "stage {v}", "resolved": "{v} resolved",
 }
 
@@ -1248,7 +1267,8 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
     # carrier's work. A broker runs against what the carrier built and never
     # touches one, so offering them this filter offers a guaranteed blank page.
     ("setup", "Setup and templates",
-     ("bordereau_setup_completed", "bordereau_setup_activated", "bordereau_setup_needed",
+     ("bordereau_setup_completed", "bordereau_setup_activated", "setup_made_active_again",
+      "bordereau_setup_needed",
       # The approval trail. CARRIER_SEATS, like the rest of this category: the
       # decision is internal to the carrier, and the broker only ever sees the
       # setup that came out the other side.
@@ -1332,6 +1352,13 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
      ("programme_rule_created", "programme_rule_updated", "programme_rule_sent",
       "programme_rule_retired", "programme_rule_deleted", "programme_rule_approved",
       "programme_rule_changes_requested"), ALL_SEATS),
+    ("audits", "Audits and findings",
+     ("audit_created", "audit_updated", "audit_closed", "audit_finding_created", "audit_finding_updated",
+      "audit_finding_status", "audit_finding_closed", "audit_finding_reopened", "audit_finding_replied",
+      "audit_finding_evidence", "audit_finding_reminder"), ALL_SEATS),
+    ("integrity", "Integrity and retention",
+     ("integrity_checked", "retention_rule_saved", "retention_rule_removed", "legal_hold_placed",
+      "legal_hold_lifted"), CARRIER_SEATS),
     # How files reach the CARRIER — mailboxes, routes and keys. The broker
     # sends; it is the carrier that sets up the ways in.
     ("intake", "Ingestion channels",
@@ -2573,11 +2600,14 @@ def options(s, v: Viewer) -> dict:
     actors: list[dict] = []
     seen: set[str] = set()
 
-    def add(key: str, label: str, role: str, sort: tuple):
+    def add(key: str, label: str, role: str, sort: tuple, org: Optional[str] = None,
+            side: Optional[str] = None, everyone: bool = False):
         if key in seen or not label:
             return
         seen.add(key)
-        actors.append({"key": key, "label": label, "role": role, "_sort": sort})
+        # org / side / everyone: for "Name - Company (Broker)" in the dropdown (audit_one).
+        actors.append({"key": key, "label": label, "role": role, "_sort": sort,
+                       "org": org, "side": side, "everyone": everyone})
 
     if sc.everything:
         people = s.query(AppUser).order_by(AppUser.full_name).limit(1000).all()
@@ -2597,17 +2627,22 @@ def options(s, v: Viewer) -> dict:
                if (r in BROKER_ROLES and r != "broker_admin" and v.is_carrier
                    and u.broker_party_id)
                else f"user:{u.id}")
-        add(key, who["name"], who["role"], (who["role"], who["name"]))
+        rk = who.get("role_key") or ""
+        side = ("Broker" if rk.startswith("broker") else "Carrier" if rk.startswith("carrier")
+                else "Kavachio")
+        everyone = key.startswith("broker:")
+        add(key, who["name"], who["role"], (who["role"], who["name"]), who.get("org"), side, everyone)
 
     # Every broker in reach, as a whole company, even one whose people have
     # never acted — "what has this broker been doing" covers all its people,
     # and the steps Kavachio took on its behalf.
     if v.is_carrier:
         for bid in sorted(sc.broker_party_ids):
-            add(f"broker:{bid}", namer.party_name(bid) or f"Broker #{bid}",
-                "Broker company (everyone)", ("Broker company", str(bid)))
+            org = namer.party_name(bid) or f"Broker #{bid}"
+            add(f"broker:{bid}", org,
+                "Broker company (everyone)", ("Broker company", str(bid)), org, "Broker", True)
 
-    add("system", "Kavachio", "Automatic steps", ("zzz", "Kavachio"))
+    add("system", "Kavachio", "Automatic steps", ("zzz", "Kavachio"), "Automatic steps", "Kavachio")
     actors.sort(key=lambda a: a.pop("_sort"))
 
     return {"actors": actors,
